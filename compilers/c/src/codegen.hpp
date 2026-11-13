@@ -160,6 +160,7 @@ namespace neos::compilers::c
         // --- statements
     public:
         void statement(node* aStatement);
+        void debug_statement(node const* aStatement);
         void compound(node* aCompound);
         void computed_goto(node* aGoto);
         void declaration_cleanups(node* aDeclaration);

@@ -38,6 +38,9 @@
 #include "js.hpp"
 #include "api.hpp"
 
+
+void neos_javascript_debugger_thrown_value(neos::javascript_runtime::value aValue);   // (debug.cpp)
+
 namespace neos::javascript_runtime
 {
     // --- shapes
@@ -1438,7 +1441,10 @@ namespace neos::javascript_runtime
 
     void throw_error(value aPrototype, std::string const& aMessage)
     {
-        throw js_exception{ make_error(aPrototype, make_string_utf8(aMessage)) };
+        js_exception const error{ make_error(aPrototype, make_string_utf8(aMessage)) };
+        // (debugging: a catchpoint stops here, where the runtime throws the error)
+        ::neos_javascript_debugger_thrown_value(error.thrown);
+        throw error;
     }
 
     void throw_type_error(std::string const& aMessage)

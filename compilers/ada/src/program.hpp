@@ -112,6 +112,8 @@ namespace neos::compilers::ada
     public:
         void generate();
         compiler& comp() { return iCompiler; }
+        // (debugging: a type as the VM's debugger describes it (see bytecode::VariablesSection))
+        std::string debug_type(ada_type* aType);
         i_code_generator& gen() { return iCompiler.gen(); }
         [[noreturn]] void error(node const* aNode, std::string const& aMessage);
         [[noreturn]] void error_in_private_part_too(node const* aNode, std::string const& aMessage) { throw compile_error{ aNode, aMessage, true }; }
@@ -472,6 +474,7 @@ namespace neos::compilers::ada
         bool needs_tasks(ada_type* aType);
     private:
     private:
+        std::map<ada_type const*, std::uint32_t> iDebugTypes;  ///< (debugging: the records described, by their numbers)
         compiler& iCompiler;
         bool const iRecovery = std::getenv("NEOS_ADA_ALL_ERRORS") != nullptr;
         bool const iCheckOnly = std::getenv("NEOS_ADA_CHECK") != nullptr;

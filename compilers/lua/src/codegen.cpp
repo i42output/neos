@@ -365,10 +365,16 @@ namespace neos::compilers::lua
             return sNames;
         }
 
+        // (debugging (see i_code_generator::debug_info): no function is inlined, and no variable's values are inferred to be integers, so
+        // that each variable has one local that holds its value, as a Lua value, and each call has its frame)
+        thread_local bool tDebugInfo = false;
+
         // (a known function that is inlined: one whose body is "return <integer arithmetic of its parameters>" (that cannot raise an 
         // error when they are integers); its expression)
             node* inline_expression(function_info const& aFunction)
         {
+            if (tDebugInfo)
+                return nullptr;
             if (aFunction.vararg || aFunction.method || aFunction.parameters.empty() || aFunction.parameters.size() > function_generator::RegisterArguments ||
                 std::any_of(aFunction.parameters.begin(), aFunction.parameters.end(), [](variable const* p) { return p->captured || p->assigned || p->declaration == nullptr; }))
                 return nullptr;
@@ -832,7 +838,9 @@ namespace neos::compilers::lua
         try
         {
             analyse(aChunk);
-            infer_integers(aChunk);
+            tDebugInfo = debug_info();
+            if (!tDebugInfo)
+                infer_integers(aChunk);
             iLiterals.clear();
             iLiteralOrder.clear();
             iGlobalIndex.clear();
@@ -1432,6 +1440,45 @@ namespace neos::compilers::lua
             }
         iCompiler.generator().set_function_body(iFunction.index, code);
         iCompiler.generator().set_function_locals(iFunction.index, neolib::vector<type>{ iLocals.begin(), iLocals.end() });
+        if (iCompiler.debug_info())
+            describe_variables();
+    }
+
+    // (debugging: the function's variables, as the debugger shows them (see neos.runtime.lua's debug hooks): its parameters and local
+    // variables (a captured one's local holds its box), seen from the statement that declares it to the end of the block it is in (a 
+    // for's: of the for); its upvalues (of its callee: its function); and its environment (_ENV: the globals))
+    void function_generator::describe_variables()
+    {
+        auto const line_of_end = [&](node const* aNode)
+        {
+            return iCompiler.source_line_of(aNode->source.empty() ? aNode->source : aNode->source.substr(aNode->source.size() - 1u));
+        };
+        for (auto const& v : iCompiler.iVariables)
+        {
+            if (v.function != &iFunction || v.declaration == nullptr || v.name.empty() || v.name.front() == '%' || v.name.front() == '(')
+                continue;
+            std::uint32_t firstLine = 0u;
+            std::uint32_t lastLine = 0u;
+            if (!v.parameter)
+            {
+                // (the statement that declares it: its line; the block that it is in (a for's: the for): its end)
+                node const* statement = v.declaration;
+                while (statement->parent != nullptr && !is_statement(statement->kind))
+                    statement = statement->parent;
+                firstLine = iCompiler.source_line_of(statement->source);
+                node const* scope = statement->is(construct::NumericFor) || statement->is(construct::GenericFor) || statement->is(construct::FunctionStatement) ? 
+                    statement : statement->parent;
+                if (scope == nullptr)
+                    scope = statement;
+                lastLine = scope->is(construct::Chunk) ? 0u : line_of_end(scope);
+            }
+            iCompiler.debug_variable(iFunction.index, v.name, v.parameter ? bytecode::VariableParameter : std::uint8_t{ 0u }, bytecode::VariableLocal, v.local,
+                firstLine, lastLine, "lua", v.captured ? "box" : "value");
+        }
+        for (std::size_t i = 0u; i < iFunction.upvalues.size(); ++i)
+            if (auto const* target = iFunction.upvalues[i].target; target != nullptr && !target->name.empty())
+                iCompiler.debug_variable(iFunction.index, target->name, 0u, bytecode::VariableLocal, CalleeLocal, 0u, 0u, "lua", "upvalue:" + std::to_string(i));
+        iCompiler.debug_variable(iFunction.index, "_ENV", bytecode::VariableScope | bytecode::VariableHidden, bytecode::VariableLocal, CalleeLocal, 0u, 0u, "lua", "env");
     }
 
     // --- variables

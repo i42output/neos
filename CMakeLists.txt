@@ -460,9 +460,14 @@ add_neos_runtime_plugin(ada
     runtime/ada/src/lib_annex.cpp)
 target_include_directories(ada PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/ada/include")
 
+# neoscript runtime: neoscript's stream functions (neo::print, neo::input)
+add_neos_runtime_plugin(neo
+    runtime/neo/src/neo.cpp)
+
 # Lua runtime: Lua's values, tables, metatables, coroutines and standard library
 add_neos_runtime_plugin(lua
     runtime/lua/src/plugin.cpp
+    runtime/lua/src/debug.cpp
     runtime/lua/src/api.cpp
     runtime/lua/src/call.cpp
     runtime/lua/src/gc.cpp
@@ -493,6 +498,7 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/functions.cpp
     runtime/javascript/src/realm.cpp
     runtime/javascript/src/console.cpp
+    runtime/javascript/src/debug.cpp
     runtime/javascript/src/builtins_object.cpp
     runtime/javascript/src/builtins_error.cpp
     runtime/javascript/src/builtins_basic.cpp

@@ -42,6 +42,11 @@
 #include "lua.hpp"
 #include "api.hpp"
 
+
+// (debugging: an error that the program does not handle (see debug.cpp))
+bool neos_lua_debugger_error(std::string const& aMessage);
+bool neos_lua_debugger_catching();
+void neos_lua_debugger_thrown(std::string const& aType, std::string const& aMessage, bool aControl);
 namespace neos::lua_runtime
 {
     namespace
@@ -285,6 +290,13 @@ namespace neos::lua_runtime
         auto& protectors = stacks().protectors;
         if (the_state().exitRequested)
             throw lua_error{ aValue };
+        // (debugging: a catchpoint stops here, where the error is raised (its type: its value's; its message: a string's or a number's text,
+        // no metamethod is called))
+        if (::neos_lua_debugger_catching())
+        {
+            value_list keep{ aValue };
+            ::neos_lua_debugger_thrown(object_type_name(aValue), is_string(aValue) ? str(aValue) : is_number(aValue) ? number_text(aValue) : std::string{}, false);
+        }
         if (!protectors.empty())
         {
             auto* p = protectors.back();
@@ -335,6 +347,9 @@ namespace neos::lua_runtime
             else
                 message = "(error object is a " + type_name(aValue) + " value)";
             tUncaughtTraceback = withTraceback ? traceback(message, 1, true) : message;
+            // (debugging: the program stops here (its frames as they are); if the debugger ends it, it exits (its error is not reported))
+            if (::neos_lua_debugger_error(message))
+                request_exit(1);
         }
         throw lua_error{ aValue };
     }

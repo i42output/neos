@@ -199,6 +199,7 @@ namespace neos::compilers::lua
     public:
         void generate();
     private:
+        void describe_variables();
         // control flow
         enum class control_kind
         {

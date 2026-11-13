@@ -1841,6 +1841,20 @@ namespace neos::compilers::javascript
         return g;
     }
 
+    std::uint64_t compiler::source_position(std::string_view aSource) const
+    {
+        if (aSource.empty() || aSource.data() < iSource.data() || aSource.data() + aSource.size() > iSource.data() + iSource.size())
+            return 0u;
+        auto const line = source_line_of(aSource);
+        auto const endLine = source_line_of(aSource.substr(aSource.size() - 1u));
+        auto const column_of = [&](char const* aAt, std::uint32_t aLine) -> std::uint32_t
+        {
+            auto const lineStart = aLine <= 1u ? 0u : iNewlines[aLine - 2u] + 1u;
+            return static_cast<std::uint32_t>(static_cast<std::size_t>(aAt - iSource.data()) - lineStart);
+        };
+        return bytecode::position(line, endLine, column_of(aSource.data(), line), column_of(aSource.data() + aSource.size() - 1u, endLine) + 1u);
+    }
+
     std::uint32_t compiler::source_line_of(std::string_view aSource) const
     {
         if (aSource.data() < iSource.data() || aSource.data() > iSource.data() + iSource.size())

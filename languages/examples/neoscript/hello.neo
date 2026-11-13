@@ -1,0 +1,10 @@
+// neoscript example: Hello, world!
+using neo.stream;
+
+proc main()
+    name : string;
+{
+    neo::print("Enter your name: ");
+    neo::input(name);
+    neo::print("Hello " + name + "!\n");
+}

@@ -325,7 +325,7 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
         // (--cache: the program's text, if it is in the cache (not for an image or a trace: they are of compiling it))
         std::optional<std::uint64_t> cacheKey;
         auto const& programs = aOptions["load"].as<std::vector<std::string>>();
-        if (neos::cache::folder() && !aOptions.count("img") && !aOptions.count("trace") && programs.size() == 1u)
+        if (neos::cache::folder() && !aOptions.count("img") && !aOptions.count("trace") && !aOptions.count("debug") && programs.size() == 1u)
         {
             cacheKey = program_cache_key(aOptions, programs.front());
             if (cacheKey)
@@ -338,6 +338,9 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
             context.load_schema(aOptions["schema"].as<std::string>());
         for (auto const& p : aOptions["load"].as<std::vector<std::string>>())
             context.load_program(p);
+        // (-g: the program is compiled to be debugged, then debugged)
+        if (aOptions.count("debug"))
+            context.compiler().set_debug_info(true);
         try
         {
             context.compile_program();
@@ -350,6 +353,8 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
         }
         if (aOptions.count("img"))
             write_image(context, aOptions["img"].as<std::string>());
+        else if (aOptions.count("debug"))
+            return neos::debug_program(context);
         else
         {
             context.run();
@@ -437,6 +442,7 @@ int main(int argc, char* argv[])
             ("trap-on-overflow", "integer arithmetic whose result overflows its (fixed size) type traps (else it wraps)")
             ("bigint-promotion", boost::program_options::value<std::string>(), "on|off: integers of any size (a result that overflows is promoted to an arbitrary precision integer), overriding the language's schema (bigint.promotion)")
             ("restricted", "restricted mode: programs cannot call runtime plugin functions that can change the host environment")
+            ("debug,g", "debug the program (with gdb's commands: see the debugger's \"help\")")
             ("cache", "keep the results of compilations (programs' bytecode, schemas' grammars) in the user's cache folder and use them when nothing they depend on has changed")
             ("img", boost::program_options::value<std::string>(), "make an image of the program (an executable that runs it) rather than run it: --img=<path> (by default <program>.exe on Windows, else a.out)")
             ("img-default", "(--img with no path)")

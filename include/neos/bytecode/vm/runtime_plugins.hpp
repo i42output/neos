@@ -73,6 +73,11 @@ namespace neos
                 bool available();
                 // true if there is a runtime plugin for the namespace aNamespace (it is not loaded)
                 bool plugin_available(std::string const& aNamespace);
+                // (the debugger) the hooks (a neos_rt_debug const*: see neos/runtime/debug.h) of the runtime plugin for the namespace 
+                // aNamespace, if it is loaded and has them; else null
+                void const* debug_hooks(std::string const& aNamespace);
+                // (the debugger) its functions that plugins call (a neos_rt_debugger const*: see neos/runtime/debug.h; defined by the VM)
+                void const* debugger();
                 // the host's functions that plugins call (see neos/runtime/plugin.h: neos_rt_host; defined by the VM)
                 void const* host();
                 // (a program's entry point has returned: the plugins that it used finish their work)

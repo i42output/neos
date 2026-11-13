@@ -262,7 +262,12 @@ namespace neos::compilers::ada
         std::uint32_t line = 1u;
         if (aSubprogram->decl != nullptr && aSubprogram->decl->file != nullptr)
             line = aSubprogram->decl->file->line_of(aSubprogram->decl->source);
+        if (gen().debug_info() && sub.body != nullptr && sub.body->file != nullptr)
+            line = sub.body->file->line_of(sub.body->source);
         sub.function_index = gen().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{ aSubprogram->name }, line);
+        // (its frame's source: the file of its body (else of its declaration): the program's units are compiled together)
+        if (auto const* where = sub.body != nullptr && sub.body->file != nullptr ? sub.body : aSubprogram->decl; gen().debug_info() && where != nullptr && where->file != nullptr)
+            gen().set_function_source(sub.function_index, neolib::string{ where->file->path });
         {
             std::vector<type> types;
             for (auto const& p : parameters)
@@ -882,6 +887,138 @@ namespace neos::compilers::ada
         validate(iSubprogram != nullptr ? iProgram.full_name(iSubprogram) : std::string{ "elaboration" });
         iProgram.gen().set_function_body(iIndex, code);
         iProgram.gen().set_function_locals(iIndex, neolib::vector<type>{ iLocals.begin(), iLocals.end() });
+        if (iProgram.comp().debug_info())
+            describe_variables();
+    }
+
+    std::string program::debug_type(ada_type* aType)
+    {
+        if (aType == nullptr)
+            return "void";
+        auto* const t = aType->view();
+        auto const integer = [&](bool aSigned)
+        {
+            auto const size = scalar_size(aType);
+            auto const bits = size <= 1u ? "8" : size <= 2u ? "16" : size <= 4u ? "32" : "64";
+            return std::string{ aSigned ? "i" : "u" } + bits;
+        };
+        switch (t->kind)
+        {
+        case type_kind::Enumeration:
+            {
+                if (t->standard_character)
+                    return scalar_size(aType) <= 1u ? "cchar" : "char";
+                // (its literals' names, by position)
+                auto const* base = t->base_type()->view();
+                std::string result = "enum" + std::to_string(std::max<std::uint64_t>(scalar_size(aType), 1u)) + "{";
+                for (std::size_t i = 0u; i < base->literals.size(); ++i)
+                    result += (i != 0u ? "," : "") + (base->literals[i] != nullptr ? base->literals[i]->name : std::string{ "?" });
+                return result + "}";
+            }
+        case type_kind::Integer:
+        case type_kind::Fixed:
+        case type_kind::Decimal:
+            return integer(true);
+        case type_kind::Modular:
+            return integer(false);
+        case type_kind::Float:
+            return scalar_size(aType) <= 4u ? "f32" : "f64";
+        case type_kind::Access:
+            return "*" + debug_type(t->designated);
+        case type_kind::Array:
+            {
+                // (an array's object is its descriptor (its data's offset from it, then each dimension's bounds): see neos.variables's
+                // "[@<dimensions>*<size>]"; not a packed array's (its components are bits) nor one of arrays (its components' layout))
+                auto* const component = t->component;
+                if (component == nullptr || packed_bits(t) != 0u || component->view()->kind == type_kind::Array)
+                    return "void";
+                auto const size = component_size(t);
+                if (size == 0u)
+                    return "void";
+                return "[@" + std::to_string(t->indexes.size()) + "*" + std::to_string(size) + "]" + debug_type(component);
+            }
+        case type_kind::Record:
+            {
+                // (by its number (its description, once, among the globals: "%type<n>"), as a component may designate it)
+                auto existing = iDebugTypes.find(t);
+                if (existing != iDebugTypes.end())
+                    return "%" + std::to_string(existing->second);
+                auto const number = static_cast<std::uint32_t>(iDebugTypes.size());
+                iDebugTypes.emplace(t, number);
+                std::string description = "record " + (t->name.empty() ? std::string{ "(anonymous)" } : t->name) + "{";
+                bool first = true;
+                for (auto const& c : t->components)
+                {
+                    if (c.ent == nullptr || !c.offset || c.variant >= 0 || c.stored || c.bit_position)
+                        continue;
+                    description += (first ? "" : ";") + c.ent->name + "@" + std::to_string(*c.offset) + ":" + debug_type(c.type);
+                    first = false;
+                }
+                description += "}";
+                comp().debug_variable(bytecode::NoFunction, "%type" + std::to_string(number), bytecode::VariableHidden, bytecode::VariableAddress, 0u, 0u, 0u, 
+                    {}, description);
+                return "%" + std::to_string(number);
+            }
+        default:
+            return "void";
+        }
+    }
+
+    void function_generator::describe_variables()
+    {
+        // (its parameters, then the objects declared in it, where they are: a WebAssembly local, its frame, the static data, or (indirect)
+        // at an address in one of those)
+        auto describe = [&](entity* aObject, bool aParameter)
+        {
+            if (aObject == nullptr || aObject->name.empty() || aObject->name.front() == '%' || aObject->name.front() == '_')
+                return;
+            auto const flags = aParameter ? bytecode::VariableParameter : std::uint8_t{ 0u };
+            auto const firstLine = !aParameter && aObject->decl != nullptr && aObject->decl->file != nullptr ? aObject->decl->file->line_of(aObject->decl->source) : 0u;
+            // (in Ada's memory (see language::ada::layout::Memory))
+            std::string const memory = "#" + std::to_string(language::ada::layout::Memory) + ":";
+            auto const type = memory + iProgram.debug_type(aObject->type);
+            auto& c = iProgram.comp();
+            switch (aObject->where)
+            {
+            case storage::Local:
+                c.debug_variable(iIndex, aObject->name, flags, bytecode::VariableLocal, aObject->local, firstLine, 0u, {}, type);
+                break;
+            case storage::Frame:
+                c.debug_variable(iIndex, aObject->name, flags, bytecode::VariableLocal, iFrame, firstLine, 0u, {}, memory + "@" + std::to_string(aObject->offset) + ":" + type.substr(memory.size()));
+                break;
+            case storage::Static:
+                c.debug_variable(iIndex, aObject->name, flags, bytecode::VariableAddress, static_cast<std::uint32_t>(aObject->offset), firstLine, 0u, {}, memory + "@0:" + type.substr(memory.size()));
+                break;
+            case storage::Indirect:
+                c.debug_variable(iIndex, aObject->name, flags, bytecode::VariableLocal, aObject->local, firstLine, 0u, {}, memory + "@0:" + type.substr(memory.size()));
+                break;
+            case storage::IndirectFrame:
+                // (its address in the frame: a pointer to it there)
+                c.debug_variable(iIndex, aObject->name, flags, bytecode::VariableLocal, iFrame, firstLine, 0u, {}, memory + "@" + std::to_string(aObject->offset) + ":*" + type.substr(memory.size()));
+                break;
+            default:
+                break;
+            }
+        };
+        if (iSubprogram != nullptr && iSubprogram->sub)
+            for (auto const& p : iSubprogram->sub->parameters)
+                describe(p.ent, true);
+        for (auto* o : iDebugObjects)
+            describe(o, false);
+    }
+
+    void function_generator::debug_statement(node const* aStatement)
+    {
+        if (!iProgram.comp().debug_info() || aStatement == nullptr || aStatement->file == nullptr || aStatement->source.empty())
+            return;
+        auto const* file = aStatement->file;
+        auto const last = aStatement->source.substr(aStatement->source.size() - 1u);
+        auto const line = file->line_of(aStatement->source);
+        iProgram.comp().mark_line(iCode, line);
+        auto const column = file->column_of(aStatement->source);
+        auto const endColumn = file->column_of(last);
+        if (column != 0u && endColumn != 0u)
+            iProgram.comp().mark_statement(iCode, bytecode::position(line, file->line_of(last), column - 1u, endColumn));
     }
 
     void function_generator::prologue()
@@ -1775,6 +1912,8 @@ namespace neos::compilers::ada
     {
         if (aObject->where != storage::None)
             return;
+        if (iProgram.comp().debug_info())
+            iDebugObjects.push_back(aObject);
         auto* t = aObject->type;
         bool const composite = t != nullptr && t->view()->is_composite();
         bool const library = aObject->scope != nullptr && aObject->scope->level == 0 && iSubprogram == nullptr;
@@ -3072,6 +3211,8 @@ namespace neos::compilers::ada
     void function_generator::statement(node* aStatement)
     {
         iWhere = aStatement;
+        if (!aStatement->is(construct::NullStatement) && !aStatement->is(construct::Label) && !aStatement->is(construct::Pragma))
+            debug_statement(aStatement);
         // (a simple statement's ranges (e.g. a slice's subtype indication): compatible with their type marks)
         if (aStatement->is(construct::Assignment) || aStatement->is(construct::Call) || aStatement->is(construct::Return))
             compatibility_checks(aStatement, [&](node const* aNode)

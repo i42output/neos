@@ -41,8 +41,12 @@
 #include <filesystem>
 #include <boost/lexical_cast.hpp>
 #include <neolib/core/string_utils.hpp>
+#include <atomic>
+#include <csignal>
+#include <memory>
 #include <neos/image.hpp>
 #include <neos/console.hpp>
+#include <neos/debug.hpp>
 
 namespace neos
 {
@@ -118,6 +122,112 @@ namespace neos
         return neos::image::write(image_path(aContext, aPath), aContext.text(), aContext.restricted(), stub);
     }
 
+    namespace
+    {
+        // (the debugger: the session that Ctrl+C pauses (SIGINT))
+        std::atomic<debug::session*> sInterruptedSession = nullptr;
+
+        extern "C" void debug_interrupt(int)
+        {
+#if defined(_WIN32)
+            std::signal(SIGINT, debug_interrupt);   // (Windows resets the handler to SIG_DFL before calling it)
+#endif
+            if (auto* const session = sInterruptedSession.load())
+                session->interrupt();
+        }
+    }
+
+    int debug_program(context& aContext)
+    {
+        auto& output = aContext.cout();
+        auto& input = aContext.cin();
+        if (aContext.text().empty())
+            throw neos::context::no_text();
+        debug::console_frontend frontend{ input, output };
+        auto const session = std::make_shared<debug::session>(frontend);
+        frontend.set_session(*session);
+        // (a breakpoint's source if none is given: the program's (its first source file))
+        [&]()
+        {
+            for (auto const& tu : aContext.program().translationUnits)
+                for (auto const& f : tu.fragments)
+                    if (f.source_file_path() != std::nullopt)
+                    {
+                        frontend.set_default_source((*f.source_file_path()).to_std_string());
+                        return;
+                    }
+        }();
+        aContext.set_debug_session(session);
+        struct end_session 
+        { 
+            context& c; 
+            ~end_session() 
+            { 
+                c.set_debug_session(nullptr); 
+                sInterruptedSession = nullptr;
+            } 
+        } const endSession{ aContext };
+        // (Ctrl+C pauses the program: the previous handler is restored when the debugger ends, unless another session has replaced it)
+        // (POSIX: without SA_RESTART, so that Ctrl+C interrupts a read of the program's input on the thread it is delivered to, as it
+        // does on Windows (see debug::blocking_read))
+        auto* const previousInterrupted = sInterruptedSession.exchange(session.get());
+#if defined(_WIN32)
+        auto const previousHandler = std::signal(SIGINT, debug_interrupt);
+#else
+        struct sigaction interrupt = {};
+        interrupt.sa_handler = debug_interrupt;
+        sigemptyset(&interrupt.sa_mask);
+        interrupt.sa_flags = 0;
+        struct sigaction previousHandler = {};
+        ::sigaction(SIGINT, &interrupt, &previousHandler);
+#endif
+        struct restore_handler 
+        { 
+            decltype(previousHandler) handler; 
+            debug::session* previous; 
+            ~restore_handler() 
+            { 
+#if defined(_WIN32)
+                std::signal(SIGINT, handler == SIG_ERR ? SIG_DFL : handler); 
+#else
+                ::sigaction(SIGINT, &handler, nullptr);
+#endif
+                sInterruptedSession = previous; 
+            } 
+        } const restoreHandler{ previousHandler, previousInterrupted };
+        output << "neos debugger: \"run\" (or \"start\") runs the program; \"help\" lists the commands." << std::endl;
+        int status = EXIT_SUCCESS;
+        for (;;)
+        {
+            std::string line;
+            if (!frontend.read_command(line))
+                break;
+            bool quit = false;
+            if (frontend.command(line, quit))
+                continue;
+            if (quit)
+                break;
+            session->begin_run();
+            try
+            {
+                aContext.run();
+            }
+            catch (std::exception const& e)
+            {
+                output << "Error: " << e.what() << std::endl;
+            }
+            output << std::flush;
+            status = aContext.exit_status();
+            if (session->terminate_requested())
+                output << "[Program terminated]" << std::endl;
+            else
+                output << "[Program exited with code " << status << "]" << std::endl;
+            if (frontend.quit_requested())
+                break;
+        }
+        return status;
+    }
+
     bool process_command(neos::context& aContext, bool& aInteractive, const std::string& aConsoleInput, bool aColour)
     {
         auto output_parse_time = [&aContext](std::chrono::steady_clock::duration aParseTime)
@@ -174,6 +284,8 @@ namespace neos
                     << "list                                     List program\n"
                     << "c(ompile)                                Compile program\n"
                     << "r(un) [<path to program>]                Run program (a path: load and compile it first)\n"
+                    << "d(ebug) [<path to program>]              Debug program (compiled to be debugged; a path: load it first):\n"
+                    << "                                         the debugger's commands are gdb's (see its \"help\")\n"
                     << "img [<path>]                             Make an image of the (compiled) program: an executable that\n"
                     << "                                         runs it (by default <program>.exe on Windows, else a.out)\n"
                     << "![<expression>]                          Evaluate expression (enter interactive mode if expression omitted)\n"
@@ -233,6 +345,18 @@ namespace neos
                     output_compilation_time();
                 }
                 aContext.run();
+            }
+            else if (command == "d" || command == "debug")
+            {
+                // (the program is compiled to be debugged (see i_code_generator::debug_info), then debugged)
+                auto const debugInfo = aContext.compiler().debug_info();
+                aContext.compiler().set_debug_info(true);
+                struct restore { context& c; bool d; ~restore() { c.compiler().set_debug_info(d); } } const restoreDebugInfo{ aContext, debugInfo };
+                if (!parameters.empty())
+                    load_program(parameters);
+                aContext.compile_program();
+                output_compilation_time();
+                debug_program(aContext);
             }
             else if (command == "img")
             {

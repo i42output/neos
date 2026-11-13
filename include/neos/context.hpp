@@ -145,6 +145,9 @@ namespace neos
         void set_restricted(bool aRestricted);
         // the program's command line arguments (the program (its path, as it was given) first, then the arguments that follow it)
         void set_arguments(std::vector<std::string> const& aArguments);
+        // (debugging: the session that the programs it runs run under (see debug::session); none: not debugged)
+        std::shared_ptr<debug::session> const& debug_session() const;
+        void set_debug_session(std::shared_ptr<debug::session> aSession);
     public:
         bool running() const final;
         void run() final;
@@ -201,6 +204,7 @@ namespace neos
         std::vector<neolib::ref_ptr<neolib::i_plugin>> iAddedPlugins;
         std::map<std::string, std::string> iPackages;
         std::vector<std::string> iArguments;
+        std::shared_ptr<debug::session> iDebugSession;
         bool iRestricted = false;
         std::map<std::string, std::pair<std::shared_ptr<language::schema>, std::shared_ptr<language::schema>>> iHighlightSchemas; ///< (by path: 
                                                         ///< the schema whose stages discard what the language discards (as the compiler's do: the 
@@ -208,4 +212,4 @@ namespace neos
         std::map<std::string, std::shared_ptr<language::schema>> iOutlineSchemas; ///< (by path: the schema whose stages discard what the 
                                                         ///< language discards, for outlines (its parsers parse the sources outlined incrementally))
     };
-}
+}

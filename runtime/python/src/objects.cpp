@@ -84,6 +84,9 @@
 #include "python.hpp"
 #include "objects.hpp"
 
+
+// (debugging: an error that the program does not handle (see debug.cpp))
+bool neos_python_debugger_error(std::string const& aMessage);
 namespace neos::python_runtime
 {
     namespace detail
@@ -6450,9 +6453,9 @@ namespace neos::python_runtime
                 std::string const text = message;
                 auto const colon = text.find(": ");
                 if (colon == std::string::npos)
-                    python_runtime::raise(text, "");
+                    python_runtime::raise(text, "", false);   // (propagates: thrown where the call raised it)
                 else
-                    python_runtime::raise(text.substr(0u, colon), text.substr(colon + 2u));
+                    python_runtime::raise(text.substr(0u, colon), text.substr(colon + 2u), false);
                 return nullptr;
             }
             switch (f.result)
@@ -9573,7 +9576,8 @@ namespace neos::python_runtime
             tRaised = aException;
             tRaisedCaught = false;
             tRaisedText = message.empty() ? type : type + ": " + message;
-            python_runtime::raise(type, message);
+            // (re-raised (a bare raise: see reraise_exception): not thrown here, for a catchpoint (as Ada's raise; and gdb's "catch throw"))
+            python_runtime::raise(type, message, aContext);
         }
 
         // (the text of the error of the exception last raised, whose message is a token (see raise_exception): its message (when it is 
@@ -9711,7 +9715,7 @@ namespace neos::python_runtime
             if (tCaught == nullptr)
                 error("RuntimeError", "No active exception to reraise");
             else
-                raise_exception(tCaught);
+                raise_exception(tCaught, false);    // (raised again: no context (it is its own), not thrown again (see raise_exception))
         }
 
         // the exception being handled (from its "type: message")
@@ -10058,7 +10062,10 @@ namespace neos::python_runtime
                 }
             }
             std::set<object*> seen;
-            write_standard(2, exception_report(e.get(), seen, traceback_colorize()));
+            auto const report = exception_report(e.get(), seen, traceback_colorize());
+            // (debugging: the program stops (its module's frame as it is))
+            if (!::neos_python_debugger_error(report))
+                write_standard(2, report);
             return 1;
         }
 

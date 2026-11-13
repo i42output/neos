@@ -335,9 +335,9 @@ namespace neos::python_runtime
                         std::string const text = trapped;
                         auto const colon = text.find(": ");
                         if (colon == std::string::npos)
-                            python_runtime::raise(text, "");
+                            python_runtime::raise(text, "", false);   // (propagates: thrown where the code raised it)
                         else
-                            python_runtime::raise(text.substr(0u, colon), text.substr(colon + 2u));
+                            python_runtime::raise(text.substr(0u, colon), text.substr(colon + 2u), false);
                     }
                     return nullptr;
                 }

@@ -319,6 +319,11 @@ namespace neos::language
         return id;
     }
 
+    void compiler::set_function_source(std::uint32_t aFunction, neolib::i_string const& aSource)
+    {
+        iModule.functions.at(aFunction).frameSource = aSource.to_std_string();
+    }
+
     type compiler::inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex) const
     {
         auto const facts = iInference.parameters.find(aFunction.to_std_string());

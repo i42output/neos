@@ -42,6 +42,7 @@
 #include <iostream>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/bytecode/exceptions.hpp>
 #include <neos/bytecode/opcodes.hpp>
@@ -49,6 +50,11 @@
 
 namespace neos
 {
+    namespace debug
+    {
+        class session;
+    }
+
     namespace bytecode
     {
         namespace vm
@@ -96,6 +102,7 @@ namespace neos
                 std::ostream& iErrorOutput;
                 compile_service const iCompileService;
                 std::vector<std::string> const iArguments;
+                std::shared_ptr<debug::session> const iSession;    ///< (the debugger's (see debug::set_session): the program is interpreted)
                 bool const iRestricted; ///< restricted mode: runtime plugin functions that can change the host environment cannot be called
                 language::data_type iResult;
                 std::optional<std::string> iError;

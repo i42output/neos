@@ -7118,6 +7118,9 @@ namespace neos::compilers::python
         // (a class's body: its namespace is the names it binds)
         if (class_body(current_function_name()))
             return true;
+        // (debugging: the debugger can see it)
+        if (debug_info())
+            return true;
         auto& f = state();
         if (f.source == nullptr)
             return true;

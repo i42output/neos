@@ -53,6 +53,8 @@
 #include <neos/bytecode/vm/runtime_plugins.hpp>
 #define NEOS_RUNTIME_PLUGIN_HOST
 #include <neos/runtime/plugin.h>
+#include <neos/runtime/debug.h>
+#include <neos/debug.hpp>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -64,7 +66,10 @@
 #else
 #include <sys/mman.h>
 #include <ucontext.h>
+#include <unistd.h>
 #endif
+#include <cctype>
+#include <cstdio>
 #include <list>
 #include <mutex>
 #include <thread>
@@ -130,6 +135,11 @@ namespace neos
                 struct trap : std::runtime_error { using std::runtime_error::runtime_error; };
                 // (a trap that a runtime plugin requested (see neos_rt_host::trap): the calling thread's)
                 thread_local std::optional<std::string> tTrapRequest;
+                // (the debugger ended the program while the calling thread was in a plugin's call (reading its input (see debug_read_again),
+                // or throwing an exception (see host_debug_thrown)): an error that the plugin then raises ends the program, not the language's
+                // handling of it)
+                thread_local bool tDebugTerminating = false;
+                void debug_terminate();
                 // (neos::exit(status): the program stops, with an exit status)
                 struct exit_request { std::int32_t status; };
 
@@ -380,9 +390,29 @@ namespace neos
                     std::vector<value> const* stack = nullptr;      ///< (the interpreter's operand stack)
                     jit::invocation invocation;                     ///< (generated code's)
                     void* context = nullptr;                        ///< (its program's (see neos_rt_host::thread_context), once known)
+                    std::size_t position = 0u;                      ///< (the interpreter's, when debugging: the token of the instruction it is running)
                 };
 
                 thread_local activation* tActivation = nullptr;
+
+                // the debugger (see neos/debug.hpp): the session of the programs that the thread runs (none: not debugged); how the 
+                // thread is stepping; whether it stops at the first statement it runs; whether the debugger is running code on it 
+                // (e.g. evaluating a breakpoint's condition) or it is stopped (its statements do not stop); whether it has stopped for 
+                // the error being thrown (so that the activations it unwinds do not stop for it again)
+                thread_local debug::session* tDebugSession = nullptr;
+                struct debug_step
+                {
+                    debug::action mode = debug::action::Continue;
+                    std::size_t depth = 0u;
+                };
+                thread_local debug_step tDebugStep;
+                thread_local bool tDebugEntry = false;
+                thread_local bool tDebugBusy = false;
+                thread_local bool tDebugErrorStopped = false;
+                thread_local bool tDebugProgramThread = false;  ///< (the program's own thread (see thread::execute): the debugger ends the program 
+                                                                ///< there; another thread that it ends stops with an error)
+                inline constexpr std::uint8_t DebugStatement = 0x01u;
+                inline constexpr std::uint8_t DebugBreakpoint = 0x02u;
 
                 struct activation_scope
                 {
@@ -584,6 +614,16 @@ namespace neos
                     {
                         return iFrames.at(aFunction);
                     }
+                    std::size_t frame_count() const
+                    {
+                        return iFrames.size();
+                    }
+                    // (the position of the call at a token (see PositionMarker): 0 if none)
+                    std::uint64_t position_at(std::size_t aToken) const
+                    {
+                        auto const p = std::lower_bound(iPositions.begin(), iPositions.end(), std::make_pair(aToken, std::uint64_t{ 0u }));
+                        return p != iPositions.end() && p->first == aToken ? p->second : 0u;
+                    }
                     std::string const& source_name(std::uint32_t aSource) const
                     {
                         static std::string const sNone;
@@ -642,7 +682,9 @@ namespace neos
                         block_tables();
                         std::vector<value> stack;
                         std::vector<frame> frames;
-                        activation_scope const activating{ this, nullptr, &frames, &stack };
+                        activation_scope activating{ this, nullptr, &frames, &stack };
+                        if (iDebug != nullptr)
+                            debug_prepare();
                         decoded_reader code{ iTokens };
                         auto enter = [&](std::uint32_t aCallee, std::vector<value> aCallArguments)
                         {
@@ -707,475 +749,491 @@ namespace neos
                         {
                             stack.push_back(aOperation(pop()));
                         };
-                        for (;;)
+                        try
                         {
-                            ++iInstructions;
-                            auto& current = frames.back();
-                            auto& f = iFunctions[current.function];
-                            auto& labels = current.labels;
-                            auto& locals = current.locals;
-                            auto const opPosition = code.position();
-                            if (opPosition >= f.codeEnd)
+                            for (;;)
                             {
-                                if (leave())
-                                    return stack;
-                                continue;
-                            }
-                            auto const op = code.byte();
-                            switch (op)
-                            {
-                            case 0x00: throw trap{ "unreachable executed" };
-                            case 0x01: break;
-                            case 0x02:
-                                {
-                                    auto const bt = code.byte();
-                                    labels.push_back({ iEnds[opPosition], stack.size(), block_arity(bt), false });
-                                }
-                                break;
-                            case 0x03:
-                                {
-                                    code.byte();
-                                    labels.push_back({ code.position(), stack.size(), 0u, true });
-                                }
-                                break;
-                            case 0x04:
-                                {
-                                    auto const bt = code.byte();
-                                    auto const condition = as_i32(pop());
-                                    if (condition != 0)
-                                        labels.push_back({ iEnds[opPosition], stack.size(), block_arity(bt), false });
-                                    else if (iElses[opPosition] != 0u)
-                                    {
-                                        labels.push_back({ iEnds[opPosition], stack.size(), block_arity(bt), false });
-                                        code.seek(iElses[opPosition]);
-                                    }
-                                    else
-                                        code.seek(iEnds[opPosition]);
-                                }
-                                break;
-                            case 0x05: // reached else at end of then-branch
-                                {
-                                    auto const target = labels.back();
-                                    labels.pop_back();
-                                    code.seek(target.continuation);
-                                }
-                                break;
-                            case 0x0B:
-                                if (labels.empty())
+                                ++iInstructions;
+                                auto& current = frames.back();
+                                auto& f = iFunctions[current.function];
+                                auto& labels = current.labels;
+                                auto& locals = current.locals;
+                                auto const opPosition = code.position();
+                                if (opPosition >= f.codeEnd)
                                 {
                                     if (leave())
                                         return stack;
-                                    break;
+                                    continue;
                                 }
-                                labels.pop_back();
-                                break;
-                            case 0x0C:
-                                if (branch(static_cast<std::size_t>(code.u())) && leave())
-                                    return stack;
-                                break;
-                            case 0x0D:
+                                if (iDebug != nullptr) [[unlikely]]
                                 {
-                                    auto const depth = static_cast<std::size_t>(code.u());
-                                    if (as_i32(pop()) != 0 && branch(depth) && leave())
-                                        return stack;
+                                    activating.a.position = opPosition;
+                                    if (iDebugMarks[opPosition] != 0u)
+                                        debug_statement(activating.a, opPosition);
                                 }
-                                break;
-                            case 0x0E:
+                                auto const op = code.byte();
+                                switch (op)
                                 {
-                                    // (br_table: the depths (the table's, then the default's) follow their count; the index chooses one)
-                                    auto const count = static_cast<std::size_t>(code.u());
-                                    auto const tableAt = code.position();
-                                    auto const index = static_cast<std::uint32_t>(as_i32(pop()));
-                                    code.seek(tableAt + std::min<std::size_t>(index, count));
-                                    auto const depth = static_cast<std::size_t>(code.u());
-                                    code.seek(tableAt + count + 1u);
-                                    if (branch(depth) && leave())
-                                        return stack;
-                                }
-                                break;
-                            case 0x0F:
-                                if (leave())
-                                    return stack;
-                                break;
-                            case 0x10:
-                                {
-                                    current.callSite = opPosition;
-                                    auto const callee = static_cast<std::uint32_t>(code.u());
-                                    auto const& calleeType = type_of(callee);
-                                    if (stack.size() < current.base + calleeType.parameters.size())
-                                        throw trap{ "stack underflow" };
-                                    auto const parameterCount = calleeType.parameters.size();
-                                    if (iFunctions.at(callee).import)
+                                case 0x00: throw trap{ "unreachable executed" };
+                                case 0x01: break;
+                                case 0x02:
                                     {
-                                        // (the arguments are replaced by the results)
-                                        auto const resultCount = calleeType.results.size();
-                                        auto const base = stack.size() - parameterCount;
-                                        stack.resize(base + std::max(parameterCount, resultCount));
-                                        call_import(callee, stack.data() + base);
-                                        stack.resize(base + resultCount);
+                                        auto const bt = code.byte();
+                                        labels.push_back({ iEnds[opPosition], stack.size(), block_arity(bt), false });
                                     }
-                                    else
+                                    break;
+                                case 0x03:
                                     {
+                                        code.byte();
+                                        labels.push_back({ code.position(), stack.size(), 0u, true });
+                                    }
+                                    break;
+                                case 0x04:
+                                    {
+                                        auto const bt = code.byte();
+                                        auto const condition = as_i32(pop());
+                                        if (condition != 0)
+                                            labels.push_back({ iEnds[opPosition], stack.size(), block_arity(bt), false });
+                                        else if (iElses[opPosition] != 0u)
+                                        {
+                                            labels.push_back({ iEnds[opPosition], stack.size(), block_arity(bt), false });
+                                            code.seek(iElses[opPosition]);
+                                        }
+                                        else
+                                            code.seek(iEnds[opPosition]);
+                                    }
+                                    break;
+                                case 0x05: // reached else at end of then-branch
+                                    {
+                                        auto const target = labels.back();
+                                        labels.pop_back();
+                                        code.seek(target.continuation);
+                                    }
+                                    break;
+                                case 0x0B:
+                                    if (labels.empty())
+                                    {
+                                        if (leave())
+                                            return stack;
+                                        break;
+                                    }
+                                    labels.pop_back();
+                                    break;
+                                case 0x0C:
+                                    if (branch(static_cast<std::size_t>(code.u())) && leave())
+                                        return stack;
+                                    break;
+                                case 0x0D:
+                                    {
+                                        auto const depth = static_cast<std::size_t>(code.u());
+                                        if (as_i32(pop()) != 0 && branch(depth) && leave())
+                                            return stack;
+                                    }
+                                    break;
+                                case 0x0E:
+                                    {
+                                        // (br_table: the depths (the table's, then the default's) follow their count; the index chooses one)
+                                        auto const count = static_cast<std::size_t>(code.u());
+                                        auto const tableAt = code.position();
+                                        auto const index = static_cast<std::uint32_t>(as_i32(pop()));
+                                        code.seek(tableAt + std::min<std::size_t>(index, count));
+                                        auto const depth = static_cast<std::size_t>(code.u());
+                                        code.seek(tableAt + count + 1u);
+                                        if (branch(depth) && leave())
+                                            return stack;
+                                    }
+                                    break;
+                                case 0x0F:
+                                    if (leave())
+                                        return stack;
+                                    break;
+                                case 0x10:
+                                    {
+                                        current.callSite = opPosition;
+                                        auto const callee = static_cast<std::uint32_t>(code.u());
+                                        auto const& calleeType = type_of(callee);
+                                        if (stack.size() < current.base + calleeType.parameters.size())
+                                            throw trap{ "stack underflow" };
+                                        auto const parameterCount = calleeType.parameters.size();
+                                        if (iFunctions.at(callee).import)
+                                        {
+                                            // (the arguments are replaced by the results)
+                                            auto const resultCount = calleeType.results.size();
+                                            auto const base = stack.size() - parameterCount;
+                                            stack.resize(base + std::max(parameterCount, resultCount));
+                                            call_import(callee, stack.data() + base);
+                                            stack.resize(base + resultCount);
+                                        }
+                                        else
+                                        {
+                                            std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(parameterCount), stack.end() };
+                                            stack.resize(stack.size() - parameterCount);
+                                            current.pc = code.position();
+                                            enter(callee, std::move(arguments)); // note: invalidates 'current'
+                                        }
+                                    }
+                                    break;
+                                case 0x11:
+                                    {
+                                        // (call_indirect: of a function of the program (the table is its functions) whose type is the 
+                                        // instruction's; its index is the last operand)
+                                        current.callSite = opPosition;
+                                        auto const typeIndex = static_cast<std::uint32_t>(code.u());
+                                        code.u();
+                                        auto const callee = as_u32(pop());
+                                        if (callee >= iFunctions.size() || iFunctions[callee].import || iFunctions[callee].type != typeIndex)
+                                            throw trap{ "indirect call type mismatch" };
+                                        auto const parameterCount = type_of(callee).parameters.size();
+                                        if (stack.size() < current.base + parameterCount)
+                                            throw trap{ "stack underflow" };
                                         std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(parameterCount), stack.end() };
                                         stack.resize(stack.size() - parameterCount);
                                         current.pc = code.position();
                                         enter(callee, std::move(arguments)); // note: invalidates 'current'
                                     }
-                                }
-                                break;
-                            case 0x11:
-                                {
-                                    // (call_indirect: of a function of the program (the table is its functions) whose type is the 
-                                    // instruction's; its index is the last operand)
-                                    current.callSite = opPosition;
-                                    auto const typeIndex = static_cast<std::uint32_t>(code.u());
-                                    code.u();
-                                    auto const callee = as_u32(pop());
-                                    if (callee >= iFunctions.size() || iFunctions[callee].import || iFunctions[callee].type != typeIndex)
-                                        throw trap{ "indirect call type mismatch" };
-                                    auto const parameterCount = type_of(callee).parameters.size();
-                                    if (stack.size() < current.base + parameterCount)
-                                        throw trap{ "stack underflow" };
-                                    std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(parameterCount), stack.end() };
-                                    stack.resize(stack.size() - parameterCount);
-                                    current.pc = code.position();
-                                    enter(callee, std::move(arguments)); // note: invalidates 'current'
-                                }
-                                break;
-                            case 0x1A: pop(); break;
-                            case 0x1B:
-                                {
-                                    auto const condition = as_i32(pop());
-                                    auto const b = pop();
-                                    auto const a = pop();
-                                    stack.push_back(condition != 0 ? a : b);
-                                }
-                                break;
-                            // memory (align, offset): [address + offset, address + offset + width) must be within memory
-                            case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x2E: case 0x2F:
-                            case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35:
-                                {
-                                    static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4 };
-                                    auto const memoryIndex = code.u() >> 32u;
-                                    auto const offset = code.u();
-                                    auto const width = sWidths[op - 0x28u];
-                                    std::uint8_t const* source;
-                                    if (memoryIndex == 0u)
+                                    break;
+                                case 0x1A: pop(); break;
+                                case 0x1B:
                                     {
-                                        auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
-                                        if (address + width > iMemory.size())
-                                            throw trap{ "out of bounds memory access" };
-                                        source = &iMemory[address];
-                                    }
-                                    else
-                                    {
-                                        // (an external memory: a 64 bit address)
-                                        auto const& external = jit::external_memory(memoryIndex);
-                                        auto const address = pop() + offset;
-                                        if (address + width > external.size || address + width < address)
-                                            throw trap{ "out of bounds memory access" };
-                                        source = external.base + address;
-                                    }
-                                    std::uint64_t bits = 0u;
-                                    std::memcpy(&bits, source, width);
-                                    switch (op)
-                                    {
-                                    case 0x2C: bits = of_i32(static_cast<std::int8_t>(bits)); break;
-                                    case 0x2E: bits = of_i32(static_cast<std::int16_t>(bits)); break;
-                                    case 0x30: bits = of_i64(static_cast<std::int8_t>(bits)); break;
-                                    case 0x32: bits = of_i64(static_cast<std::int16_t>(bits)); break;
-                                    case 0x34: bits = of_i64(static_cast<std::int32_t>(bits)); break;
-                                    default: break;
-                                    }
-                                    stack.push_back(bits);
-                                }
-                                break;
-                            case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x3E:
-                                {
-                                    static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 2, 1, 2, 4 };
-                                    auto const memoryIndex = code.u() >> 32u;
-                                    auto const offset = code.u();
-                                    auto const width = sWidths[op - 0x36u];
-                                    auto const bits = pop();
-                                    if (memoryIndex == 0u)
-                                    {
-                                        auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
-                                        if (address + width > iMemory.size())
-                                            throw trap{ "out of bounds memory access" };
-                                        std::memcpy(&iMemory[address], &bits, width);
-                                    }
-                                    else
-                                    {
-                                        auto& external = jit::external_memory(memoryIndex);
-                                        auto const address = pop() + offset;
-                                        if (address + width > external.size || address + width < address)
-                                            throw trap{ "out of bounds memory access" };
-                                        std::memcpy(external.base + address, &bits, width);
-                                    }
-                                }
-                                break;
-                            case 0x20: stack.push_back(locals.at(code.u())); break;
-                            case 0x21: locals.at(code.u()) = pop(); break;
-                            case 0x22: locals.at(code.u()) = stack.back(); break;
-                            case 0x23:
-                                {
-                                    auto const g = code.u();
-                                    stack.push_back(iThreadGlobals.at(g) != 0u ? thread_globals()[g] : iGlobals.at(g));
-                                }
-                                break;
-                            case 0x24:
-                                {
-                                    auto const g = code.u();
-                                    (iThreadGlobals.at(g) != 0u ? thread_globals()[g] : iGlobals.at(g)) = pop();
-                                }
-                                break;
-                            case 0x41: stack.push_back(of_i32(static_cast<std::int32_t>(code.s()))); break;
-                            case 0x42: stack.push_back(of_i64(code.s())); break;
-                            case 0x43: stack.push_back(of_f32(code.raw<float>())); break;
-                            case 0x44: stack.push_back(of_f64(code.raw<double>())); break;
-                            // i32 comparison
-                            case 0x45: unary([](value a) { return of_bool(as_i32(a) == 0); }); break;
-                            case 0x46: binary([](value a, value b) { return of_bool(as_i32(a) == as_i32(b)); }); break;
-                            case 0x47: binary([](value a, value b) { return of_bool(as_i32(a) != as_i32(b)); }); break;
-                            case 0x48: binary([](value a, value b) { return of_bool(as_i32(a) < as_i32(b)); }); break;
-                            case 0x49: binary([](value a, value b) { return of_bool(as_u32(a) < as_u32(b)); }); break;
-                            case 0x4A: binary([](value a, value b) { return of_bool(as_i32(a) > as_i32(b)); }); break;
-                            case 0x4B: binary([](value a, value b) { return of_bool(as_u32(a) > as_u32(b)); }); break;
-                            case 0x4C: binary([](value a, value b) { return of_bool(as_i32(a) <= as_i32(b)); }); break;
-                            case 0x4D: binary([](value a, value b) { return of_bool(as_u32(a) <= as_u32(b)); }); break;
-                            case 0x4E: binary([](value a, value b) { return of_bool(as_i32(a) >= as_i32(b)); }); break;
-                            case 0x4F: binary([](value a, value b) { return of_bool(as_u32(a) >= as_u32(b)); }); break;
-                            // i64 comparison
-                            case 0x50: unary([](value a) { return of_bool(a == 0u); }); break;
-                            case 0x51: binary([](value a, value b) { return of_bool(a == b); }); break;
-                            case 0x52: binary([](value a, value b) { return of_bool(a != b); }); break;
-                            case 0x53: binary([](value a, value b) { return of_bool(as_i64(a) < as_i64(b)); }); break;
-                            case 0x54: binary([](value a, value b) { return of_bool(a < b); }); break;
-                            case 0x55: binary([](value a, value b) { return of_bool(as_i64(a) > as_i64(b)); }); break;
-                            case 0x56: binary([](value a, value b) { return of_bool(a > b); }); break;
-                            case 0x57: binary([](value a, value b) { return of_bool(as_i64(a) <= as_i64(b)); }); break;
-                            case 0x58: binary([](value a, value b) { return of_bool(a <= b); }); break;
-                            case 0x59: binary([](value a, value b) { return of_bool(as_i64(a) >= as_i64(b)); }); break;
-                            case 0x5A: binary([](value a, value b) { return of_bool(a >= b); }); break;
-                            // f32/f64 comparison
-                            case 0x5B: binary([](value a, value b) { return of_bool(as_f32(a) == as_f32(b)); }); break;
-                            case 0x5C: binary([](value a, value b) { return of_bool(as_f32(a) != as_f32(b)); }); break;
-                            case 0x5D: binary([](value a, value b) { return of_bool(as_f32(a) < as_f32(b)); }); break;
-                            case 0x5E: binary([](value a, value b) { return of_bool(as_f32(a) > as_f32(b)); }); break;
-                            case 0x5F: binary([](value a, value b) { return of_bool(as_f32(a) <= as_f32(b)); }); break;
-                            case 0x60: binary([](value a, value b) { return of_bool(as_f32(a) >= as_f32(b)); }); break;
-                            case 0x61: binary([](value a, value b) { return of_bool(as_f64(a) == as_f64(b)); }); break;
-                            case 0x62: binary([](value a, value b) { return of_bool(as_f64(a) != as_f64(b)); }); break;
-                            case 0x63: binary([](value a, value b) { return of_bool(as_f64(a) < as_f64(b)); }); break;
-                            case 0x64: binary([](value a, value b) { return of_bool(as_f64(a) > as_f64(b)); }); break;
-                            case 0x65: binary([](value a, value b) { return of_bool(as_f64(a) <= as_f64(b)); }); break;
-                            case 0x66: binary([](value a, value b) { return of_bool(as_f64(a) >= as_f64(b)); }); break;
-                            // i32 arithmetic
-                            case 0x6A: binary([](value a, value b) { return of_u32(as_u32(a) + as_u32(b)); }); break;
-                            case 0x6B: binary([](value a, value b) { return of_u32(as_u32(a) - as_u32(b)); }); break;
-                            case 0x6C: binary([](value a, value b) { return of_u32(as_u32(a) * as_u32(b)); }); break;
-                            case 0x6D: binary([](value a, value b) 
-                                { 
-                                    if (as_i32(b) == 0) throw trap{ "integer divide by zero" };
-                                    if (as_i32(a) == std::numeric_limits<std::int32_t>::min() && as_i32(b) == -1) throw trap{ "integer overflow" };
-                                    return of_i32(as_i32(a) / as_i32(b)); 
-                                }); break;
-                            case 0x6E: binary([](value a, value b) { if (as_u32(b) == 0u) throw trap{ "integer divide by zero" }; return of_u32(as_u32(a) / as_u32(b)); }); break;
-                            case 0x6F: binary([](value a, value b) 
-                                { 
-                                    if (as_i32(b) == 0) throw trap{ "integer divide by zero" };
-                                    if (as_i32(b) == -1) return of_i32(0);
-                                    return of_i32(as_i32(a) % as_i32(b)); 
-                                }); break;
-                            case 0x70: binary([](value a, value b) { if (as_u32(b) == 0u) throw trap{ "integer divide by zero" }; return of_u32(as_u32(a) % as_u32(b)); }); break;
-                            case 0x71: binary([](value a, value b) { return of_u32(as_u32(a) & as_u32(b)); }); break;
-                            case 0x72: binary([](value a, value b) { return of_u32(as_u32(a) | as_u32(b)); }); break;
-                            case 0x73: binary([](value a, value b) { return of_u32(as_u32(a) ^ as_u32(b)); }); break;
-                            case 0x74: binary([](value a, value b) { return of_u32(as_u32(a) << (as_u32(b) & 31u)); }); break;
-                            case 0x75: binary([](value a, value b) { return of_i32(as_i32(a) >> (as_u32(b) & 31u)); }); break;
-                            case 0x76: binary([](value a, value b) { return of_u32(as_u32(a) >> (as_u32(b) & 31u)); }); break;
-                            case 0x67: unary([](value a) { std::uint32_t n = 0u; while (n < 32u && (as_u32(a) & (0x80000000u >> n)) == 0u) ++n; return of_u32(n); }); break;
-                            case 0x68: unary([](value a) { std::uint32_t n = 0u; while (n < 32u && (as_u32(a) & (1u << n)) == 0u) ++n; return of_u32(n); }); break;
-                            case 0x69: unary([](value a) { std::uint32_t n = 0u; for (auto x = as_u32(a); x != 0u; x &= x - 1u) ++n; return of_u32(n); }); break;
-                            case 0x77: binary([](value a, value b) { auto const s = as_u32(b) & 31u; return of_u32(s == 0u ? as_u32(a) : (as_u32(a) << s) | (as_u32(a) >> (32u - s))); }); break;
-                            case 0x78: binary([](value a, value b) { auto const s = as_u32(b) & 31u; return of_u32(s == 0u ? as_u32(a) : (as_u32(a) >> s) | (as_u32(a) << (32u - s))); }); break;
-                            case 0x79: unary([](value a) { std::uint64_t n = 0u; while (n < 64u && (a & (0x8000000000000000ull >> n)) == 0u) ++n; return value{ n }; }); break;
-                            case 0x7A: unary([](value a) { std::uint64_t n = 0u; while (n < 64u && (a & (1ull << n)) == 0u) ++n; return value{ n }; }); break;
-                            case 0x7B: unary([](value a) { std::uint64_t n = 0u; for (auto x = a; x != 0u; x &= x - 1u) ++n; return value{ n }; }); break;
-                            case 0x89: binary([](value a, value b) { auto const s = b & 63u; return value{ s == 0u ? a : (a << s) | (a >> (64u - s)) }; }); break;
-                            case 0x8A: binary([](value a, value b) { auto const s = b & 63u; return value{ s == 0u ? a : (a >> s) | (a << (64u - s)) }; }); break;
-                            // i64 arithmetic
-                            case 0x7C: binary([](value a, value b) { return a + b; }); break;
-                            case 0x7D: binary([](value a, value b) { return a - b; }); break;
-                            case 0x7E: binary([](value a, value b) { return a * b; }); break;
-                            case 0x7F: binary([](value a, value b) 
-                                { 
-                                    if (b == 0u) throw trap{ "integer divide by zero" };
-                                    if (as_i64(a) == std::numeric_limits<std::int64_t>::min() && as_i64(b) == -1) throw trap{ "integer overflow" };
-                                    return of_i64(as_i64(a) / as_i64(b)); 
-                                }); break;
-                            case 0x80: binary([](value a, value b) { if (b == 0u) throw trap{ "integer divide by zero" }; return a / b; }); break;
-                            case 0x81: binary([](value a, value b) 
-                                { 
-                                    if (b == 0u) throw trap{ "integer divide by zero" };
-                                    if (as_i64(b) == -1) return of_i64(0);
-                                    return of_i64(as_i64(a) % as_i64(b)); 
-                                }); break;
-                            case 0x82: binary([](value a, value b) { if (b == 0u) throw trap{ "integer divide by zero" }; return a % b; }); break;
-                            case 0x83: binary([](value a, value b) { return a & b; }); break;
-                            case 0x84: binary([](value a, value b) { return a | b; }); break;
-                            case 0x85: binary([](value a, value b) { return a ^ b; }); break;
-                            case 0x86: binary([](value a, value b) { return a << (b & 63u); }); break;
-                            case 0x87: binary([](value a, value b) { return of_i64(as_i64(a) >> (b & 63u)); }); break;
-                            case 0x88: binary([](value a, value b) { return a >> (b & 63u); }); break;
-                            // f32 arithmetic
-                            case 0x8B: unary([](value a) { return of_f32(std::fabs(as_f32(a))); }); break;
-                            case 0x8C: unary([](value a) { return of_f32(-as_f32(a)); }); break;
-                            case 0x8D: unary([](value a) { return of_f32(std::ceil(as_f32(a))); }); break;
-                            case 0x8E: unary([](value a) { return of_f32(std::floor(as_f32(a))); }); break;
-                            case 0x8F: unary([](value a) { return of_f32(std::trunc(as_f32(a))); }); break;
-                            case 0x90: unary([](value a) { return of_f32(std::nearbyint(as_f32(a))); }); break;
-                            case 0x91: unary([](value a) { return of_f32(std::sqrt(as_f32(a))); }); break;
-                            case 0x92: binary([](value a, value b) { return of_f32(as_f32(a) + as_f32(b)); }); break;
-                            case 0x93: binary([](value a, value b) { return of_f32(as_f32(a) - as_f32(b)); }); break;
-                            case 0x94: binary([](value a, value b) { return of_f32(as_f32(a) * as_f32(b)); }); break;
-                            case 0x95: binary([](value a, value b) { return of_f32(as_f32(a) / as_f32(b)); }); break;
-                            case 0x96: binary([](value a, value b) { return of_f32(wasm_min(as_f32(a), as_f32(b))); }); break;
-                            case 0x97: binary([](value a, value b) { return of_f32(wasm_max(as_f32(a), as_f32(b))); }); break;
-                            case 0x98: binary([](value a, value b) { return of_f32(std::copysign(as_f32(a), as_f32(b))); }); break;
-                            // f64 arithmetic
-                            case 0x99: unary([](value a) { return of_f64(std::fabs(as_f64(a))); }); break;
-                            case 0x9A: unary([](value a) { return of_f64(-as_f64(a)); }); break;
-                            case 0x9B: unary([](value a) { return of_f64(std::ceil(as_f64(a))); }); break;
-                            case 0x9C: unary([](value a) { return of_f64(std::floor(as_f64(a))); }); break;
-                            case 0x9D: unary([](value a) { return of_f64(std::trunc(as_f64(a))); }); break;
-                            case 0x9E: unary([](value a) { return of_f64(std::nearbyint(as_f64(a))); }); break;
-                            case 0x9F: unary([](value a) { return of_f64(std::sqrt(as_f64(a))); }); break;
-                            case 0xA0: binary([](value a, value b) { return of_f64(as_f64(a) + as_f64(b)); }); break;
-                            case 0xA1: binary([](value a, value b) { return of_f64(as_f64(a) - as_f64(b)); }); break;
-                            case 0xA2: binary([](value a, value b) { return of_f64(as_f64(a) * as_f64(b)); }); break;
-                            case 0xA3: binary([](value a, value b) { return of_f64(as_f64(a) / as_f64(b)); }); break;
-                            case 0xA4: binary([](value a, value b) { return of_f64(wasm_min(as_f64(a), as_f64(b))); }); break;
-                            case 0xA5: binary([](value a, value b) { return of_f64(wasm_max(as_f64(a), as_f64(b))); }); break;
-                            case 0xA6: binary([](value a, value b) { return of_f64(std::copysign(as_f64(a), as_f64(b))); }); break;
-                            // conversions
-                            case 0xA7: unary([](value a) { return of_u32(static_cast<std::uint32_t>(a)); }); break;
-                            case 0xA8: unary([](value a) { return of_i32(truncate<std::int32_t>(as_f32(a))); }); break;
-                            case 0xA9: unary([](value a) { return of_u32(truncate<std::uint32_t>(as_f32(a))); }); break;
-                            case 0xAA: unary([](value a) { return of_i32(truncate<std::int32_t>(as_f64(a))); }); break;
-                            case 0xAB: unary([](value a) { return of_u32(truncate<std::uint32_t>(as_f64(a))); }); break;
-                            case 0xAC: unary([](value a) { return of_i64(as_i32(a)); }); break;
-                            case 0xAD: unary([](value a) { return static_cast<value>(as_u32(a)); }); break;
-                            case 0xAE: unary([](value a) { return of_i64(truncate<std::int64_t>(as_f32(a))); }); break;
-                            case 0xAF: unary([](value a) { return static_cast<value>(truncate<std::uint64_t>(as_f32(a))); }); break;
-                            case 0xB0: unary([](value a) { return of_i64(truncate<std::int64_t>(as_f64(a))); }); break;
-                            case 0xB1: unary([](value a) { return static_cast<value>(truncate<std::uint64_t>(as_f64(a))); }); break;
-                            case 0xB2: unary([](value a) { return of_f32(static_cast<float>(as_i32(a))); }); break;
-                            case 0xB3: unary([](value a) { return of_f32(static_cast<float>(as_u32(a))); }); break;
-                            case 0xB4: unary([](value a) { return of_f32(static_cast<float>(as_i64(a))); }); break;
-                            case 0xB5: unary([](value a) { return of_f32(static_cast<float>(a)); }); break;
-                            case 0xB6: unary([](value a) { return of_f32(static_cast<float>(as_f64(a))); }); break;
-                            case 0xB7: unary([](value a) { return of_f64(static_cast<double>(as_i32(a))); }); break;
-                            case 0xB8: unary([](value a) { return of_f64(static_cast<double>(as_u32(a))); }); break;
-                            case 0xB9: unary([](value a) { return of_f64(static_cast<double>(as_i64(a))); }); break;
-                            case 0xBA: unary([](value a) { return of_f64(static_cast<double>(a)); }); break;
-                            case 0xBB: unary([](value a) { return of_f64(static_cast<double>(as_f32(a))); }); break;
-                            case 0xBC: case 0xBD: case 0xBE: case 0xBF: break; // (reinterpretations: values are their bits)
-                            case 0xC0: unary([](value a) { return of_i32(static_cast<std::int8_t>(as_u32(a))); }); break;
-                            case 0xC1: unary([](value a) { return of_i32(static_cast<std::int16_t>(as_u32(a))); }); break;
-                            case 0xC2: unary([](value a) { return of_i64(static_cast<std::int8_t>(a)); }); break;
-                            case 0xC3: unary([](value a) { return of_i64(static_cast<std::int16_t>(a)); }); break;
-                            case 0xC4: unary([](value a) { return of_i64(static_cast<std::int32_t>(a)); }); break;
-                            // (prefix 0xFC: the saturating conversions; memory.copy and memory.fill)
-                            case 0xFC:
-                                switch (auto const sub = code.u())
-                                {
-                                case 0x00: unary([](value a) { return of_i32(saturate<std::int32_t>(as_f32(a))); }); break;
-                                case 0x01: unary([](value a) { return of_u32(saturate<std::uint32_t>(as_f32(a))); }); break;
-                                case 0x02: unary([](value a) { return of_i32(saturate<std::int32_t>(as_f64(a))); }); break;
-                                case 0x03: unary([](value a) { return of_u32(saturate<std::uint32_t>(as_f64(a))); }); break;
-                                case 0x04: unary([](value a) { return of_i64(saturate<std::int64_t>(as_f32(a))); }); break;
-                                case 0x05: unary([](value a) { return static_cast<value>(saturate<std::uint64_t>(as_f32(a))); }); break;
-                                case 0x06: unary([](value a) { return of_i64(saturate<std::int64_t>(as_f64(a))); }); break;
-                                case 0x07: unary([](value a) { return static_cast<value>(saturate<std::uint64_t>(as_f64(a))); }); break;
-                                case 0x0A:
-                                    {
-                                        auto const targetMemory = code.u();
-                                        auto const sourceMemory = code.u();
-                                        auto const count = pop();
-                                        auto const source = pop();
-                                        auto const target = pop();
-                                        auto const n = targetMemory == 0u || sourceMemory == 0u ? static_cast<std::uint64_t>(as_u32(count)) : count;
-                                        auto* to = memory_range(targetMemory, target, n);
-                                        auto const* from = memory_range(sourceMemory, source, n);
-                                        if (n != 0u)
-                                            std::memmove(to, from, static_cast<std::size_t>(n));
+                                        auto const condition = as_i32(pop());
+                                        auto const b = pop();
+                                        auto const a = pop();
+                                        stack.push_back(condition != 0 ? a : b);
                                     }
                                     break;
-                                case 0x0B:
+                                // memory (align, offset): [address + offset, address + offset + width) must be within memory
+                                case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x2E: case 0x2F:
+                                case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35:
                                     {
-                                        auto const memoryIndex = code.u();
-                                        auto const count = pop();
-                                        auto const byte = pop();
-                                        auto const target = pop();
-                                        auto const n = memoryIndex == 0u ? static_cast<std::uint64_t>(as_u32(count)) : count;
-                                        auto* to = memory_range(memoryIndex, target, n);
-                                        if (n != 0u)
-                                            std::memset(to, static_cast<int>(as_u32(byte) & 0xFFu), static_cast<std::size_t>(n));
+                                        static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4 };
+                                        auto const memoryIndex = code.u() >> 32u;
+                                        auto const offset = code.u();
+                                        auto const width = sWidths[op - 0x28u];
+                                        std::uint8_t const* source;
+                                        if (memoryIndex == 0u)
+                                        {
+                                            auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                            if (address + width > iMemory.size())
+                                                throw trap{ "out of bounds memory access" };
+                                            source = &iMemory[address];
+                                        }
+                                        else
+                                        {
+                                            // (an external memory: a 64 bit address)
+                                            auto const& external = jit::external_memory(memoryIndex);
+                                            auto const address = pop() + offset;
+                                            if (address + width > external.size || address + width < address)
+                                                throw trap{ "out of bounds memory access" };
+                                            source = external.base + address;
+                                        }
+                                        std::uint64_t bits = 0u;
+                                        std::memcpy(&bits, source, width);
+                                        switch (op)
+                                        {
+                                        case 0x2C: bits = of_i32(static_cast<std::int8_t>(bits)); break;
+                                        case 0x2E: bits = of_i32(static_cast<std::int16_t>(bits)); break;
+                                        case 0x30: bits = of_i64(static_cast<std::int8_t>(bits)); break;
+                                        case 0x32: bits = of_i64(static_cast<std::int16_t>(bits)); break;
+                                        case 0x34: bits = of_i64(static_cast<std::int32_t>(bits)); break;
+                                        default: break;
+                                        }
+                                        stack.push_back(bits);
+                                    }
+                                    break;
+                                case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x3E:
+                                    {
+                                        static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 2, 1, 2, 4 };
+                                        auto const memoryIndex = code.u() >> 32u;
+                                        auto const offset = code.u();
+                                        auto const width = sWidths[op - 0x36u];
+                                        auto const bits = pop();
+                                        if (memoryIndex == 0u)
+                                        {
+                                            auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                            if (address + width > iMemory.size())
+                                                throw trap{ "out of bounds memory access" };
+                                            std::memcpy(&iMemory[address], &bits, width);
+                                        }
+                                        else
+                                        {
+                                            auto& external = jit::external_memory(memoryIndex);
+                                            auto const address = pop() + offset;
+                                            if (address + width > external.size || address + width < address)
+                                                throw trap{ "out of bounds memory access" };
+                                            std::memcpy(external.base + address, &bits, width);
+                                        }
+                                    }
+                                    break;
+                                case 0x20: stack.push_back(locals.at(code.u())); break;
+                                case 0x21: locals.at(code.u()) = pop(); break;
+                                case 0x22: locals.at(code.u()) = stack.back(); break;
+                                case 0x23:
+                                    {
+                                        auto const g = code.u();
+                                        stack.push_back(iThreadGlobals.at(g) != 0u ? thread_globals()[g] : iGlobals.at(g));
+                                    }
+                                    break;
+                                case 0x24:
+                                    {
+                                        auto const g = code.u();
+                                        (iThreadGlobals.at(g) != 0u ? thread_globals()[g] : iGlobals.at(g)) = pop();
+                                    }
+                                    break;
+                                case 0x41: stack.push_back(of_i32(static_cast<std::int32_t>(code.s()))); break;
+                                case 0x42: stack.push_back(of_i64(code.s())); break;
+                                case 0x43: stack.push_back(of_f32(code.raw<float>())); break;
+                                case 0x44: stack.push_back(of_f64(code.raw<double>())); break;
+                                // i32 comparison
+                                case 0x45: unary([](value a) { return of_bool(as_i32(a) == 0); }); break;
+                                case 0x46: binary([](value a, value b) { return of_bool(as_i32(a) == as_i32(b)); }); break;
+                                case 0x47: binary([](value a, value b) { return of_bool(as_i32(a) != as_i32(b)); }); break;
+                                case 0x48: binary([](value a, value b) { return of_bool(as_i32(a) < as_i32(b)); }); break;
+                                case 0x49: binary([](value a, value b) { return of_bool(as_u32(a) < as_u32(b)); }); break;
+                                case 0x4A: binary([](value a, value b) { return of_bool(as_i32(a) > as_i32(b)); }); break;
+                                case 0x4B: binary([](value a, value b) { return of_bool(as_u32(a) > as_u32(b)); }); break;
+                                case 0x4C: binary([](value a, value b) { return of_bool(as_i32(a) <= as_i32(b)); }); break;
+                                case 0x4D: binary([](value a, value b) { return of_bool(as_u32(a) <= as_u32(b)); }); break;
+                                case 0x4E: binary([](value a, value b) { return of_bool(as_i32(a) >= as_i32(b)); }); break;
+                                case 0x4F: binary([](value a, value b) { return of_bool(as_u32(a) >= as_u32(b)); }); break;
+                                // i64 comparison
+                                case 0x50: unary([](value a) { return of_bool(a == 0u); }); break;
+                                case 0x51: binary([](value a, value b) { return of_bool(a == b); }); break;
+                                case 0x52: binary([](value a, value b) { return of_bool(a != b); }); break;
+                                case 0x53: binary([](value a, value b) { return of_bool(as_i64(a) < as_i64(b)); }); break;
+                                case 0x54: binary([](value a, value b) { return of_bool(a < b); }); break;
+                                case 0x55: binary([](value a, value b) { return of_bool(as_i64(a) > as_i64(b)); }); break;
+                                case 0x56: binary([](value a, value b) { return of_bool(a > b); }); break;
+                                case 0x57: binary([](value a, value b) { return of_bool(as_i64(a) <= as_i64(b)); }); break;
+                                case 0x58: binary([](value a, value b) { return of_bool(a <= b); }); break;
+                                case 0x59: binary([](value a, value b) { return of_bool(as_i64(a) >= as_i64(b)); }); break;
+                                case 0x5A: binary([](value a, value b) { return of_bool(a >= b); }); break;
+                                // f32/f64 comparison
+                                case 0x5B: binary([](value a, value b) { return of_bool(as_f32(a) == as_f32(b)); }); break;
+                                case 0x5C: binary([](value a, value b) { return of_bool(as_f32(a) != as_f32(b)); }); break;
+                                case 0x5D: binary([](value a, value b) { return of_bool(as_f32(a) < as_f32(b)); }); break;
+                                case 0x5E: binary([](value a, value b) { return of_bool(as_f32(a) > as_f32(b)); }); break;
+                                case 0x5F: binary([](value a, value b) { return of_bool(as_f32(a) <= as_f32(b)); }); break;
+                                case 0x60: binary([](value a, value b) { return of_bool(as_f32(a) >= as_f32(b)); }); break;
+                                case 0x61: binary([](value a, value b) { return of_bool(as_f64(a) == as_f64(b)); }); break;
+                                case 0x62: binary([](value a, value b) { return of_bool(as_f64(a) != as_f64(b)); }); break;
+                                case 0x63: binary([](value a, value b) { return of_bool(as_f64(a) < as_f64(b)); }); break;
+                                case 0x64: binary([](value a, value b) { return of_bool(as_f64(a) > as_f64(b)); }); break;
+                                case 0x65: binary([](value a, value b) { return of_bool(as_f64(a) <= as_f64(b)); }); break;
+                                case 0x66: binary([](value a, value b) { return of_bool(as_f64(a) >= as_f64(b)); }); break;
+                                // i32 arithmetic
+                                case 0x6A: binary([](value a, value b) { return of_u32(as_u32(a) + as_u32(b)); }); break;
+                                case 0x6B: binary([](value a, value b) { return of_u32(as_u32(a) - as_u32(b)); }); break;
+                                case 0x6C: binary([](value a, value b) { return of_u32(as_u32(a) * as_u32(b)); }); break;
+                                case 0x6D: binary([](value a, value b) 
+                                    { 
+                                        if (as_i32(b) == 0) throw trap{ "integer divide by zero" };
+                                        if (as_i32(a) == std::numeric_limits<std::int32_t>::min() && as_i32(b) == -1) throw trap{ "integer overflow" };
+                                        return of_i32(as_i32(a) / as_i32(b)); 
+                                    }); break;
+                                case 0x6E: binary([](value a, value b) { if (as_u32(b) == 0u) throw trap{ "integer divide by zero" }; return of_u32(as_u32(a) / as_u32(b)); }); break;
+                                case 0x6F: binary([](value a, value b) 
+                                    { 
+                                        if (as_i32(b) == 0) throw trap{ "integer divide by zero" };
+                                        if (as_i32(b) == -1) return of_i32(0);
+                                        return of_i32(as_i32(a) % as_i32(b)); 
+                                    }); break;
+                                case 0x70: binary([](value a, value b) { if (as_u32(b) == 0u) throw trap{ "integer divide by zero" }; return of_u32(as_u32(a) % as_u32(b)); }); break;
+                                case 0x71: binary([](value a, value b) { return of_u32(as_u32(a) & as_u32(b)); }); break;
+                                case 0x72: binary([](value a, value b) { return of_u32(as_u32(a) | as_u32(b)); }); break;
+                                case 0x73: binary([](value a, value b) { return of_u32(as_u32(a) ^ as_u32(b)); }); break;
+                                case 0x74: binary([](value a, value b) { return of_u32(as_u32(a) << (as_u32(b) & 31u)); }); break;
+                                case 0x75: binary([](value a, value b) { return of_i32(as_i32(a) >> (as_u32(b) & 31u)); }); break;
+                                case 0x76: binary([](value a, value b) { return of_u32(as_u32(a) >> (as_u32(b) & 31u)); }); break;
+                                case 0x67: unary([](value a) { std::uint32_t n = 0u; while (n < 32u && (as_u32(a) & (0x80000000u >> n)) == 0u) ++n; return of_u32(n); }); break;
+                                case 0x68: unary([](value a) { std::uint32_t n = 0u; while (n < 32u && (as_u32(a) & (1u << n)) == 0u) ++n; return of_u32(n); }); break;
+                                case 0x69: unary([](value a) { std::uint32_t n = 0u; for (auto x = as_u32(a); x != 0u; x &= x - 1u) ++n; return of_u32(n); }); break;
+                                case 0x77: binary([](value a, value b) { auto const s = as_u32(b) & 31u; return of_u32(s == 0u ? as_u32(a) : (as_u32(a) << s) | (as_u32(a) >> (32u - s))); }); break;
+                                case 0x78: binary([](value a, value b) { auto const s = as_u32(b) & 31u; return of_u32(s == 0u ? as_u32(a) : (as_u32(a) >> s) | (as_u32(a) << (32u - s))); }); break;
+                                case 0x79: unary([](value a) { std::uint64_t n = 0u; while (n < 64u && (a & (0x8000000000000000ull >> n)) == 0u) ++n; return value{ n }; }); break;
+                                case 0x7A: unary([](value a) { std::uint64_t n = 0u; while (n < 64u && (a & (1ull << n)) == 0u) ++n; return value{ n }; }); break;
+                                case 0x7B: unary([](value a) { std::uint64_t n = 0u; for (auto x = a; x != 0u; x &= x - 1u) ++n; return value{ n }; }); break;
+                                case 0x89: binary([](value a, value b) { auto const s = b & 63u; return value{ s == 0u ? a : (a << s) | (a >> (64u - s)) }; }); break;
+                                case 0x8A: binary([](value a, value b) { auto const s = b & 63u; return value{ s == 0u ? a : (a >> s) | (a << (64u - s)) }; }); break;
+                                // i64 arithmetic
+                                case 0x7C: binary([](value a, value b) { return a + b; }); break;
+                                case 0x7D: binary([](value a, value b) { return a - b; }); break;
+                                case 0x7E: binary([](value a, value b) { return a * b; }); break;
+                                case 0x7F: binary([](value a, value b) 
+                                    { 
+                                        if (b == 0u) throw trap{ "integer divide by zero" };
+                                        if (as_i64(a) == std::numeric_limits<std::int64_t>::min() && as_i64(b) == -1) throw trap{ "integer overflow" };
+                                        return of_i64(as_i64(a) / as_i64(b)); 
+                                    }); break;
+                                case 0x80: binary([](value a, value b) { if (b == 0u) throw trap{ "integer divide by zero" }; return a / b; }); break;
+                                case 0x81: binary([](value a, value b) 
+                                    { 
+                                        if (b == 0u) throw trap{ "integer divide by zero" };
+                                        if (as_i64(b) == -1) return of_i64(0);
+                                        return of_i64(as_i64(a) % as_i64(b)); 
+                                    }); break;
+                                case 0x82: binary([](value a, value b) { if (b == 0u) throw trap{ "integer divide by zero" }; return a % b; }); break;
+                                case 0x83: binary([](value a, value b) { return a & b; }); break;
+                                case 0x84: binary([](value a, value b) { return a | b; }); break;
+                                case 0x85: binary([](value a, value b) { return a ^ b; }); break;
+                                case 0x86: binary([](value a, value b) { return a << (b & 63u); }); break;
+                                case 0x87: binary([](value a, value b) { return of_i64(as_i64(a) >> (b & 63u)); }); break;
+                                case 0x88: binary([](value a, value b) { return a >> (b & 63u); }); break;
+                                // f32 arithmetic
+                                case 0x8B: unary([](value a) { return of_f32(std::fabs(as_f32(a))); }); break;
+                                case 0x8C: unary([](value a) { return of_f32(-as_f32(a)); }); break;
+                                case 0x8D: unary([](value a) { return of_f32(std::ceil(as_f32(a))); }); break;
+                                case 0x8E: unary([](value a) { return of_f32(std::floor(as_f32(a))); }); break;
+                                case 0x8F: unary([](value a) { return of_f32(std::trunc(as_f32(a))); }); break;
+                                case 0x90: unary([](value a) { return of_f32(std::nearbyint(as_f32(a))); }); break;
+                                case 0x91: unary([](value a) { return of_f32(std::sqrt(as_f32(a))); }); break;
+                                case 0x92: binary([](value a, value b) { return of_f32(as_f32(a) + as_f32(b)); }); break;
+                                case 0x93: binary([](value a, value b) { return of_f32(as_f32(a) - as_f32(b)); }); break;
+                                case 0x94: binary([](value a, value b) { return of_f32(as_f32(a) * as_f32(b)); }); break;
+                                case 0x95: binary([](value a, value b) { return of_f32(as_f32(a) / as_f32(b)); }); break;
+                                case 0x96: binary([](value a, value b) { return of_f32(wasm_min(as_f32(a), as_f32(b))); }); break;
+                                case 0x97: binary([](value a, value b) { return of_f32(wasm_max(as_f32(a), as_f32(b))); }); break;
+                                case 0x98: binary([](value a, value b) { return of_f32(std::copysign(as_f32(a), as_f32(b))); }); break;
+                                // f64 arithmetic
+                                case 0x99: unary([](value a) { return of_f64(std::fabs(as_f64(a))); }); break;
+                                case 0x9A: unary([](value a) { return of_f64(-as_f64(a)); }); break;
+                                case 0x9B: unary([](value a) { return of_f64(std::ceil(as_f64(a))); }); break;
+                                case 0x9C: unary([](value a) { return of_f64(std::floor(as_f64(a))); }); break;
+                                case 0x9D: unary([](value a) { return of_f64(std::trunc(as_f64(a))); }); break;
+                                case 0x9E: unary([](value a) { return of_f64(std::nearbyint(as_f64(a))); }); break;
+                                case 0x9F: unary([](value a) { return of_f64(std::sqrt(as_f64(a))); }); break;
+                                case 0xA0: binary([](value a, value b) { return of_f64(as_f64(a) + as_f64(b)); }); break;
+                                case 0xA1: binary([](value a, value b) { return of_f64(as_f64(a) - as_f64(b)); }); break;
+                                case 0xA2: binary([](value a, value b) { return of_f64(as_f64(a) * as_f64(b)); }); break;
+                                case 0xA3: binary([](value a, value b) { return of_f64(as_f64(a) / as_f64(b)); }); break;
+                                case 0xA4: binary([](value a, value b) { return of_f64(wasm_min(as_f64(a), as_f64(b))); }); break;
+                                case 0xA5: binary([](value a, value b) { return of_f64(wasm_max(as_f64(a), as_f64(b))); }); break;
+                                case 0xA6: binary([](value a, value b) { return of_f64(std::copysign(as_f64(a), as_f64(b))); }); break;
+                                // conversions
+                                case 0xA7: unary([](value a) { return of_u32(static_cast<std::uint32_t>(a)); }); break;
+                                case 0xA8: unary([](value a) { return of_i32(truncate<std::int32_t>(as_f32(a))); }); break;
+                                case 0xA9: unary([](value a) { return of_u32(truncate<std::uint32_t>(as_f32(a))); }); break;
+                                case 0xAA: unary([](value a) { return of_i32(truncate<std::int32_t>(as_f64(a))); }); break;
+                                case 0xAB: unary([](value a) { return of_u32(truncate<std::uint32_t>(as_f64(a))); }); break;
+                                case 0xAC: unary([](value a) { return of_i64(as_i32(a)); }); break;
+                                case 0xAD: unary([](value a) { return static_cast<value>(as_u32(a)); }); break;
+                                case 0xAE: unary([](value a) { return of_i64(truncate<std::int64_t>(as_f32(a))); }); break;
+                                case 0xAF: unary([](value a) { return static_cast<value>(truncate<std::uint64_t>(as_f32(a))); }); break;
+                                case 0xB0: unary([](value a) { return of_i64(truncate<std::int64_t>(as_f64(a))); }); break;
+                                case 0xB1: unary([](value a) { return static_cast<value>(truncate<std::uint64_t>(as_f64(a))); }); break;
+                                case 0xB2: unary([](value a) { return of_f32(static_cast<float>(as_i32(a))); }); break;
+                                case 0xB3: unary([](value a) { return of_f32(static_cast<float>(as_u32(a))); }); break;
+                                case 0xB4: unary([](value a) { return of_f32(static_cast<float>(as_i64(a))); }); break;
+                                case 0xB5: unary([](value a) { return of_f32(static_cast<float>(a)); }); break;
+                                case 0xB6: unary([](value a) { return of_f32(static_cast<float>(as_f64(a))); }); break;
+                                case 0xB7: unary([](value a) { return of_f64(static_cast<double>(as_i32(a))); }); break;
+                                case 0xB8: unary([](value a) { return of_f64(static_cast<double>(as_u32(a))); }); break;
+                                case 0xB9: unary([](value a) { return of_f64(static_cast<double>(as_i64(a))); }); break;
+                                case 0xBA: unary([](value a) { return of_f64(static_cast<double>(a)); }); break;
+                                case 0xBB: unary([](value a) { return of_f64(static_cast<double>(as_f32(a))); }); break;
+                                case 0xBC: case 0xBD: case 0xBE: case 0xBF: break; // (reinterpretations: values are their bits)
+                                case 0xC0: unary([](value a) { return of_i32(static_cast<std::int8_t>(as_u32(a))); }); break;
+                                case 0xC1: unary([](value a) { return of_i32(static_cast<std::int16_t>(as_u32(a))); }); break;
+                                case 0xC2: unary([](value a) { return of_i64(static_cast<std::int8_t>(a)); }); break;
+                                case 0xC3: unary([](value a) { return of_i64(static_cast<std::int16_t>(a)); }); break;
+                                case 0xC4: unary([](value a) { return of_i64(static_cast<std::int32_t>(a)); }); break;
+                                // (prefix 0xFC: the saturating conversions; memory.copy and memory.fill)
+                                case 0xFC:
+                                    switch (auto const sub = code.u())
+                                    {
+                                    case 0x00: unary([](value a) { return of_i32(saturate<std::int32_t>(as_f32(a))); }); break;
+                                    case 0x01: unary([](value a) { return of_u32(saturate<std::uint32_t>(as_f32(a))); }); break;
+                                    case 0x02: unary([](value a) { return of_i32(saturate<std::int32_t>(as_f64(a))); }); break;
+                                    case 0x03: unary([](value a) { return of_u32(saturate<std::uint32_t>(as_f64(a))); }); break;
+                                    case 0x04: unary([](value a) { return of_i64(saturate<std::int64_t>(as_f32(a))); }); break;
+                                    case 0x05: unary([](value a) { return static_cast<value>(saturate<std::uint64_t>(as_f32(a))); }); break;
+                                    case 0x06: unary([](value a) { return of_i64(saturate<std::int64_t>(as_f64(a))); }); break;
+                                    case 0x07: unary([](value a) { return static_cast<value>(saturate<std::uint64_t>(as_f64(a))); }); break;
+                                    case 0x0A:
+                                        {
+                                            auto const targetMemory = code.u();
+                                            auto const sourceMemory = code.u();
+                                            auto const count = pop();
+                                            auto const source = pop();
+                                            auto const target = pop();
+                                            auto const n = targetMemory == 0u || sourceMemory == 0u ? static_cast<std::uint64_t>(as_u32(count)) : count;
+                                            auto* to = memory_range(targetMemory, target, n);
+                                            auto const* from = memory_range(sourceMemory, source, n);
+                                            if (n != 0u)
+                                                std::memmove(to, from, static_cast<std::size_t>(n));
+                                        }
+                                        break;
+                                    case 0x0B:
+                                        {
+                                            auto const memoryIndex = code.u();
+                                            auto const count = pop();
+                                            auto const byte = pop();
+                                            auto const target = pop();
+                                            auto const n = memoryIndex == 0u ? static_cast<std::uint64_t>(as_u32(count)) : count;
+                                            auto* to = memory_range(memoryIndex, target, n);
+                                            if (n != 0u)
+                                                std::memset(to, static_cast<int>(as_u32(byte) & 0xFFu), static_cast<std::size_t>(n));
+                                        }
+                                        break;
+                                    default:
+                                        throw trap{ "unsupported instruction 0xfc 0x" + to_hex(static_cast<std::uint8_t>(sub)) };
+                                    }
+                                    break;
+                                // (prefix 0xFE: atomic accesses (see jit::atomic_access))
+                                case 0xFE:
+                                    {
+                                        auto const sub = code.u();
+                                        auto const memarg = code.u();
+                                        auto const offset = code.u();
+                                        if (sub == 0x03u)
+                                        {
+                                            std::atomic_thread_fence(std::memory_order_seq_cst);
+                                            break;
+                                        }
+                                        auto const width = jit::atomic_width(sub);
+                                        value operand = 0u;
+                                        value replacement = 0u;
+                                        if (sub == 0x48u || (sub > 0x48u && sub <= 0x4Eu))
+                                        {
+                                            replacement = pop();
+                                            operand = pop();
+                                        }
+                                        else if (sub >= 0x17u)
+                                            operand = pop();
+                                        auto const memoryIndex = memarg >> 32u;
+                                        std::uint8_t* at;
+                                        if (memoryIndex == 0u)
+                                        {
+                                            auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                            if (address + width > iMemory.size())
+                                                throw trap{ "out of bounds memory access" };
+                                            at = &iMemory[address];
+                                        }
+                                        else
+                                        {
+                                            auto const& external = jit::external_memory(memoryIndex);
+                                            auto const address = pop() + offset;
+                                            if (address + width > external.size || address + width < address)
+                                                throw trap{ "out of bounds memory access" };
+                                            at = external.base + address;
+                                        }
+                                        if ((reinterpret_cast<std::uintptr_t>(at) & (width - 1u)) != 0u)
+                                            throw trap{ "unaligned atomic" };
+                                        auto const result = jit::atomic_access(at, sub, operand, replacement);
+                                        if (sub < 0x17u || sub >= 0x1Eu)
+                                            stack.push_back(jit::atomic_wide(sub) ? result : of_u32(static_cast<std::uint32_t>(result)));
                                     }
                                     break;
                                 default:
-                                    throw trap{ "unsupported instruction 0xfc 0x" + to_hex(static_cast<std::uint8_t>(sub)) };
+                                    throw trap{ "unsupported instruction 0x" + to_hex(op) };
                                 }
-                                break;
-                            // (prefix 0xFE: atomic accesses (see jit::atomic_access))
-                            case 0xFE:
-                                {
-                                    auto const sub = code.u();
-                                    auto const memarg = code.u();
-                                    auto const offset = code.u();
-                                    if (sub == 0x03u)
-                                    {
-                                        std::atomic_thread_fence(std::memory_order_seq_cst);
-                                        break;
-                                    }
-                                    auto const width = jit::atomic_width(sub);
-                                    value operand = 0u;
-                                    value replacement = 0u;
-                                    if (sub == 0x48u || (sub > 0x48u && sub <= 0x4Eu))
-                                    {
-                                        replacement = pop();
-                                        operand = pop();
-                                    }
-                                    else if (sub >= 0x17u)
-                                        operand = pop();
-                                    auto const memoryIndex = memarg >> 32u;
-                                    std::uint8_t* at;
-                                    if (memoryIndex == 0u)
-                                    {
-                                        auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
-                                        if (address + width > iMemory.size())
-                                            throw trap{ "out of bounds memory access" };
-                                        at = &iMemory[address];
-                                    }
-                                    else
-                                    {
-                                        auto const& external = jit::external_memory(memoryIndex);
-                                        auto const address = pop() + offset;
-                                        if (address + width > external.size || address + width < address)
-                                            throw trap{ "out of bounds memory access" };
-                                        at = external.base + address;
-                                    }
-                                    if ((reinterpret_cast<std::uintptr_t>(at) & (width - 1u)) != 0u)
-                                        throw trap{ "unaligned atomic" };
-                                    auto const result = jit::atomic_access(at, sub, operand, replacement);
-                                    if (sub < 0x17u || sub >= 0x1Eu)
-                                        stack.push_back(jit::atomic_wide(sub) ? result : of_u32(static_cast<std::uint32_t>(result)));
-                                }
-                                break;
-                            default:
-                                throw trap{ "unsupported instruction 0x" + to_hex(op) };
                             }
+                        }
+                        catch (std::exception const& e)
+                        {
+                            // (debugging: the program stops for the error (before its frames are unwound))
+                            if (iDebug != nullptr)
+                                debug_error(activating.a, e.what());
+                            throw;
                         }
                     }
                     void resize_memory(std::size_t aSize)
@@ -1399,6 +1457,28 @@ namespace neos
                                         info.frame = !info.name.empty();
                                         info.source = static_cast<std::uint32_t>(r.u());
                                         info.firstLine = static_cast<std::uint32_t>(r.u());
+                                    }
+                                }
+                                else if (sectionName == bytecode::VariablesSection)
+                                {
+                                    iHasVariables = true;
+                                    for (auto n = r.u(); n > 0u; --n)
+                                    {
+                                        auto const function = static_cast<std::uint32_t>(r.u());
+                                        auto& variables = function == bytecode::NoFunction ? iGlobalVariables : iVariables[function];
+                                        for (auto m = r.u(); m > 0u; --m)
+                                        {
+                                            variable_info v;
+                                            v.name = r.name();
+                                            v.flags = r.byte();
+                                            v.storage = r.byte();
+                                            v.index = static_cast<std::uint32_t>(r.u());
+                                            v.firstLine = static_cast<std::uint32_t>(r.u());
+                                            v.lastLine = static_cast<std::uint32_t>(r.u());
+                                            v.language = r.name();
+                                            v.type = r.name();
+                                            variables.push_back(std::move(v));
+                                        }
                                     }
                                 }
                                 break;
@@ -1946,8 +2026,6 @@ namespace neos
                     enum class import_kind : std::uint8_t
                     {
                         Unresolved,
-                        Print,
-                        Input,
                         Length,
                         ToInteger,
                         ToString,
@@ -1972,8 +2050,6 @@ namespace neos
                     {
                         static std::unordered_map<std::string_view, import_kind> const sHostFunctions =
                         {
-                            { "neo::print", import_kind::Print },
-                            { "neo::input", import_kind::Input },
                             { "neo::length", import_kind::Length },
                             { "neo::to_integer", import_kind::ToInteger },
                             { "neo::to_string", import_kind::ToString },
@@ -2066,6 +2142,11 @@ namespace neos
                     void plugin_error(std::uint32_t aFunction, char const* aError)
                     {
                         (void)aFunction;
+                        if (tDebugTerminating)
+                        {
+                            tDebugTerminating = false;
+                            debug_terminate();
+                        }
                         // (a trap that the plugin requested: the program stops, even if it handles plugins' errors)
                         if (tTrapRequest)
                         {
@@ -2123,18 +2204,6 @@ namespace neos
                             iImportKinds[aFunction] = kind = resolve_import(aFunction);
                         switch (kind)
                         {
-                        case import_kind::Print:
-                            iOutput << view_string(as_u32(aBuffer[0])) << std::flush;
-                            break;
-                        case import_kind::Input:
-                            {
-                                std::string line;
-                                std::getline(iInput, line);
-                                if (!line.empty() && line.back() == '\r')
-                                    line.pop_back();
-                                aBuffer[0] = of_u32(allocate_string(line));
-                            }
-                            break;
                         case import_kind::Length:
                             aBuffer[0] = of_u32(static_cast<std::uint32_t>(view_string(as_u32(aBuffer[0])).size()));
                             break;
@@ -2507,6 +2576,201 @@ namespace neos
                     std::vector<std::uint32_t> iCodeOrder;
                     std::vector<std::pair<std::size_t, std::uint32_t>> iLines;
                     std::vector<std::pair<std::size_t, std::uint64_t>> iPositions;  ///< (token -> its position (see bytecode::PositionMarker))
+                    // the debugger (see neos/debug.hpp)
+                    friend class debug_stop;
+                public:
+                    // (a variable of a function (or a global of the module), as the compiler described it (see VariablesSection))
+                    struct variable_info
+                    {
+                        std::string name;
+                        std::uint8_t flags = 0u;
+                        std::uint8_t storage = bytecode::VariableLocal;
+                        std::uint32_t index = 0u;
+                        std::uint32_t firstLine = 0u;
+                        std::uint32_t lastLine = 0u;
+                        std::string language;
+                        std::string type;
+                    };
+                public:
+                    debug::session* debug_session() const 
+                    { 
+                        return iDebug; 
+                    }
+                    void set_debug_session(debug::session* aSession)
+                    {
+                        iDebug = aSession;
+                        iDebugVersion = 0u;
+                    }
+                    std::vector<variable_info> const* variables_of(std::uint32_t aFunction) const
+                    {
+                        auto const existing = iVariables.find(aFunction);
+                        return existing != iVariables.end() ? &existing->second : nullptr;
+                    }
+                    std::vector<variable_info> const& global_variables() const
+                    {
+                        return iGlobalVariables;
+                    }
+                    bool has_variables() const
+                    {
+                        return iHasVariables;
+                    }
+                    std::vector<std::uint8_t> const& local_types(std::uint32_t aFunction) const
+                    {
+                        return iFunctions.at(aFunction).locals;
+                    }
+                    std::uint32_t debug_line(std::size_t aToken) const
+                    {
+                        return aToken < iDebugTokenLines.size() ? iDebugTokenLines[aToken] : 0u;
+                    }
+                    value* debug_global(std::uint32_t aGlobal)
+                    {
+                        if (aGlobal >= iGlobals.size())
+                            return nullptr;
+                        return iAnyThreadGlobals && iThreadGlobals.at(aGlobal) != 0u ? &thread_globals()[aGlobal] : &iGlobals[aGlobal];
+                    }
+                    std::string debug_string(std::uint32_t aAddress) const
+                    {
+                        try
+                        {
+                            return std::string{ view_string(aAddress) };
+                        }
+                        catch (...)
+                        {
+                            return {};
+                        }
+                    }
+                    // (debugging: aSize bytes of the program's memory at aAddress: false if they are not in it)
+                    bool debug_read(std::uint32_t aMemory, std::uint64_t aAddress, void* aBuffer, std::size_t aSize) const
+                    {
+                        if (aMemory != 0u)
+                        {
+                            // (an external memory (see neos_rt_host::external_memory_at): its region can have pages that are not accessible
+                            // (e.g. reserved, not committed), so they are copied by the system, which fails rather than faults (the debugger 
+                            // reads what a variable's value says is an address, which can be anything))
+                            auto const& external = jit::external_memory(aMemory);
+                            if (external.base == nullptr || aAddress > external.size || aSize > external.size - aAddress)
+                                return false;
+                            return debug_copy(aBuffer, external.base + aAddress, aSize);
+                        }
+                        if (aAddress > iMemory.size() || aSize > iMemory.size() - aAddress)
+                            return false;
+                        std::memcpy(aBuffer, iMemory.data() + aAddress, aSize);
+                        return true;
+                    }
+                    static bool debug_copy(void* aBuffer, void const* aSource, std::size_t aSize)
+                    {
+#if defined(_WIN32)
+                        SIZE_T copied = 0u;
+                        return ::ReadProcessMemory(::GetCurrentProcess(), aSource, aBuffer, aSize, &copied) != FALSE && copied == aSize;
+#else
+                        // (through a pipe: write fails with EFAULT if the source is not accessible)
+                        static std::mutex sMutex;
+                        static int sPipe[2] = { -1, -1 };
+                        std::lock_guard lock{ sMutex };
+                        if (sPipe[0] == -1 && ::pipe(sPipe) != 0)
+                        {
+                            sPipe[0] = sPipe[1] = -1;
+                            return false;
+                        }
+                        auto* const destination = static_cast<char*>(aBuffer);
+                        auto const* const source = static_cast<char const*>(aSource);
+                        for (std::size_t done = 0u; done < aSize;)
+                        {
+                            auto const chunk = std::min<std::size_t>(aSize - done, 4096u);
+                            auto const written = ::write(sPipe[1], source + done, chunk);
+                            if (written <= 0)
+                                return false;
+                            for (std::size_t got = 0u; got < static_cast<std::size_t>(written);)
+                            {
+                                auto const r = ::read(sPipe[0], destination + done + got, static_cast<std::size_t>(written) - got);
+                                if (r <= 0)
+                                    return false;
+                                got += static_cast<std::size_t>(r);
+                            }
+                            done += static_cast<std::size_t>(written);
+                        }
+                        return true;
+#endif
+                    }
+                    // (debugging: a literal of an enumeration type ("enum<size>{<literal>,...}") of the program's variables: as it is, else 
+                    // ignoring case (e.g. Ada's, whose names are case insensitive); as the type names it)
+                    std::optional<std::string> debug_enum_literal(std::string_view aName) const
+                    {
+                        auto const search = [&](bool aIgnoreCase) -> std::optional<std::string>
+                        {
+                            auto const same = [&](std::string_view aLiteral)
+                            {
+                                return aLiteral.size() == aName.size() && (aIgnoreCase ? 
+                                    std::equal(aLiteral.begin(), aLiteral.end(), aName.begin(), [](char a, char b) 
+                                        { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }) : 
+                                    aLiteral == aName);
+                            };
+                            auto const in = [&](std::string_view aType) -> std::optional<std::string>
+                            {
+                                for (auto at = aType.find("enum"); at != std::string_view::npos; at = aType.find("enum", at + 4u))
+                                {
+                                    auto const open = aType.find('{', at);
+                                    auto const close = aType.find('}', open);
+                                    if (open == std::string_view::npos || close == std::string_view::npos)
+                                        break;
+                                    auto literals = aType.substr(open + 1u, close - open - 1u);
+                                    for (std::size_t start = 0u; start <= literals.size();)
+                                    {
+                                        auto const comma = std::min(literals.find(',', start), literals.size());
+                                        if (same(literals.substr(start, comma - start)))
+                                            return std::string{ literals.substr(start, comma - start) };
+                                        start = comma + 1u;
+                                    }
+                                }
+                                return {};
+                            };
+                            for (auto const& v : iGlobalVariables)
+                                if (auto const literal = in(v.type))
+                                    return literal;
+                            for (auto const& [function, variables] : iVariables)
+                                for (auto const& v : variables)
+                                    if (auto const literal = in(v.type))
+                                        return literal;
+                            return {};
+                        };
+                        if (auto const literal = search(false))
+                            return literal;
+                        return search(true);
+                    }
+                    // (debugging: a type named "%<n>" (see VariablesSection): its description)
+                    std::string_view debug_named_type(std::string_view aType) const
+                    {
+                        for (int i = 0; i < 8 && aType.starts_with('%'); ++i)
+                        {
+                            auto const name = "%type" + std::string{ aType.substr(1u) };
+                            bool found = false;
+                            for (auto const& v : iGlobalVariables)
+                                if (v.name == name)
+                                {
+                                    aType = v.type;
+                                    found = true;
+                                    break;
+                                }
+                            if (!found)
+                                break;
+                        }
+                        return aType;
+                    }
+                    void debug_prepare();
+                    void debug_statement(activation& aActivation, std::size_t aToken);
+                    void debug_error(activation& aActivation, std::string const& aMessage);
+                private:
+                    debug::session* iDebug = tDebugSession;
+                    std::atomic<std::uint64_t> iDebugVersion = 0u;
+                    std::mutex iDebugMutex;
+                    std::vector<std::uint8_t> iDebugMarks;              ///< (each token's: DebugStatement (a statement begins), DebugBreakpoint)
+                    std::vector<std::uint32_t> iDebugTokenLines;        ///< (a statement's token: its line)
+                    std::map<std::uint32_t, std::map<std::uint32_t, std::vector<std::size_t>>> iDebugLines; ///< (source -> line -> its statements' tokens)
+                    std::unordered_map<std::size_t, std::vector<std::pair<std::uint32_t, bool>>> iDebugBreakpoints;  ///< (token -> the breakpoints there 
+                                                                        ///< (and whether at its column: it stops even if its line is the previous statement's))
+                    std::unordered_map<std::uint32_t, std::vector<variable_info>> iVariables;
+                    std::vector<variable_info> iGlobalVariables;
+                    bool iHasVariables = false;
                 };
             }
 
@@ -2821,6 +3085,11 @@ namespace neos
                 void host_thread_attach(void* aContext)
                 {
                     tRunning = aContext != nullptr ? *static_cast<running*>(aContext) : running{};
+                    // (debugging: the thread's programs are its program's session's)
+                    tDebugSession = tRunning.program != nullptr ? tRunning.program->debug_session() : nullptr;
+                    tDebugStep = debug_step{};
+                    if (tDebugSession != nullptr)
+                        tDebugSession->thread_id();
                 }
 
                 // --- programs compiled while a program runs (they stay until the process ends: their functions may be called)
@@ -3189,6 +3458,1769 @@ namespace neos
                     jit::watched_changed(aAddress);
                 }
 
+                // --- the debugger (see neos/debug.hpp)
+
+                // (the number of the interpreter's frames that the calling thread is running (across the coroutines that resumed 
+                // the one it is running): how deep a step is)
+                std::size_t debug_depth()
+                {
+                    std::size_t depth = 0u;
+                    auto* a = tActivation;
+                    for (auto* c = tCoroutine;;)
+                    {
+                        for (; a != nullptr; a = a->previous)
+                            if (a->frames != nullptr)
+                                depth += a->frames->size();
+                        if (c == nullptr)
+                            break;
+                        a = c->resumerActivations;
+                        c = c->previous;
+                    }
+                    return depth;
+                }
+
+                // (a frame of the calling thread, innermost first: its program, its function, the token of the instruction it is 
+                // running (or the call it is making) and its locals (the interpreter's))
+                struct debug_frame
+                {
+                    machine* program = nullptr;
+                    std::uint32_t function = 0u;
+                    std::size_t token = 0u;
+                    std::vector<value> const* locals = nullptr;
+                };
+
+                std::vector<debug_frame> debug_frames()
+                {
+                    std::vector<debug_frame> result;
+                    auto* a = tActivation;
+                    for (auto* c = tCoroutine;;)
+                    {
+                        for (; a != nullptr; a = a->previous)
+                        {
+                            if (a->frames == nullptr || a->program == nullptr)
+                                continue;
+                            auto* const program = const_cast<machine*>(a->program);
+                            bool innermost = true;
+                            for (auto f = a->frames->rbegin(); f != a->frames->rend(); ++f)
+                            {
+                                auto const token = innermost ? a->position : f->callSite;
+                                innermost = false;
+                                auto const& info = f->function < program->frame_count() ? program->frame_of(f->function) : machine::frame_info{};
+                                // (not the program's entry point (the compiler's: e.g. "__neos_main__", that calls the top level's code))
+                                if (!info.frame || info.name.starts_with("__neos"))
+                                    continue;
+                                result.push_back(debug_frame{ program, f->function, token, &f->locals });
+                            }
+                        }
+                        if (c == nullptr)
+                            break;
+                        a = c->resumerActivations;
+                        c = c->previous;
+                    }
+                    return result;
+                }
+
+                // (a value as text: shortest round trip for floats; strings quoted and escaped)
+                std::string debug_number(double aValue)
+                {
+                    if (std::isnan(aValue))
+                        return "nan";
+                    if (std::isinf(aValue))
+                        return aValue < 0.0 ? "-inf" : "inf";
+                    char buffer[64];
+                    auto const [p, ec] = std::to_chars(buffer, buffer + sizeof(buffer), aValue);
+                    return std::string{ buffer, ec == std::errc{} ? p : buffer };
+                }
+
+                std::string debug_quoted(std::string_view aText, std::size_t aLimit = 1024u)
+                {
+                    std::string result = "\"";
+                    for (std::size_t i = 0u; i < aText.size(); ++i)
+                    {
+                        if (result.size() > aLimit)
+                        {
+                            result += "...";
+                            break;
+                        }
+                        auto const c = aText[i];
+                        switch (c)
+                        {
+                        case '"': result += "\\\""; break;
+                        case '\\': result += "\\\\"; break;
+                        case '\n': result += "\\n"; break;
+                        case '\r': result += "\\r"; break;
+                        case '\t': result += "\\t"; break;
+                        default:
+                            if (static_cast<unsigned char>(c) < 0x20u)
+                            {
+                                char escape[8];
+                                std::snprintf(escape, sizeof(escape), "\\x%02x", static_cast<unsigned>(static_cast<unsigned char>(c)));
+                                result += escape;
+                            }
+                            else
+                                result += c;
+                        }
+                    }
+                    result += "\"";
+                    return result;
+                }
+
+                std::string debug_code_point(std::uint32_t aCodePoint)
+                {
+                    std::string utf8;
+                    if (aCodePoint < 0x80u)
+                        utf8 += static_cast<char>(aCodePoint);
+                    else if (aCodePoint < 0x800u)
+                    {
+                        utf8 += static_cast<char>(0xC0u | (aCodePoint >> 6u));
+                        utf8 += static_cast<char>(0x80u | (aCodePoint & 0x3Fu));
+                    }
+                    else if (aCodePoint < 0x10000u)
+                    {
+                        utf8 += static_cast<char>(0xE0u | (aCodePoint >> 12u));
+                        utf8 += static_cast<char>(0x80u | ((aCodePoint >> 6u) & 0x3Fu));
+                        utf8 += static_cast<char>(0x80u | (aCodePoint & 0x3Fu));
+                    }
+                    else if (aCodePoint < 0x110000u)
+                    {
+                        utf8 += static_cast<char>(0xF0u | (aCodePoint >> 18u));
+                        utf8 += static_cast<char>(0x80u | ((aCodePoint >> 12u) & 0x3Fu));
+                        utf8 += static_cast<char>(0x80u | ((aCodePoint >> 6u) & 0x3Fu));
+                        utf8 += static_cast<char>(0x80u | (aCodePoint & 0x3Fu));
+                    }
+                    std::string result = "'";
+                    result += aCodePoint == '\'' ? "\\'" : aCodePoint == '\\' ? "\\\\" : utf8;
+                    result += "'";
+                    return std::to_string(aCodePoint) + " " + result;
+                }
+
+                // (a WebAssembly value type's name: a local that the compiler did not describe)
+                char const* debug_wasm_type(std::uint8_t aType)
+                {
+                    switch (aType)
+                    {
+                    case 0x7F: return "i32";
+                    case 0x7E: return "i64";
+                    case 0x7D: return "f32";
+                    case 0x7C: return "f64";
+                    default: return "?";
+                    }
+                }
+
+                // (a value's truth, as its text shows it: e.g. a breakpoint's condition)
+                bool debug_true(std::string const& aText)
+                {
+                    static std::set<std::string> const sFalse{ "", "0", "-0", "0.0", "-0.0", "false", "False", "FALSE", "nil", "None", "null", "undefined", "nan", "\"\"", "''" };
+                    return sFalse.find(aText) == sFalse.end();
+                }
+
+                // a stopped program, as the thread that stopped sees it (see debug::i_stop): the program's other threads are parked 
+                // (see debug::session::park), so what is asked of them runs on them (debug::session::run_on)
+                class debug_stop : public debug::i_stop
+                {
+                private:
+                    // (a value that has parts: where its parts are found)
+                    struct held_value
+                    {
+                        std::uint32_t thread = 0u;
+                        machine* program = nullptr;
+                        std::string language;
+                        std::string type;
+                        value word = 0u;
+                    };
+                public:
+                    debug_stop(debug::session& aSession, debug::stop_reason aReason, std::optional<std::uint32_t> aBreakpoint, std::string aMessage) :
+                        iSession{ aSession }, iReason{ aReason }, iBreakpoint{ aBreakpoint }, iMessage{ std::move(aMessage) }, iThread{ aSession.thread_id() }
+                    {
+                    }
+                public:
+                    debug::stop_reason reason() const override
+                    {
+                        return iReason;
+                    }
+                    std::string const& message() const override
+                    {
+                        return iMessage;
+                    }
+                    std::optional<std::uint32_t> breakpoint() const override
+                    {
+                        return iBreakpoint;
+                    }
+                    std::uint32_t thread() const override
+                    {
+                        return iThread;
+                    }
+                    std::vector<debug::thread_info> threads() override
+                    {
+                        std::vector<debug::thread_info> result;
+                        auto add = [&](std::uint32_t aId, std::string aState)
+                        {
+                            debug::thread_info t;
+                            t.id = aId;
+                            t.state = std::move(aState);
+                            auto const f = frames(aId);
+                            if (!f.empty())
+                                t.top = f.front();
+                            result.push_back(std::move(t));
+                        };
+                        add(iThread, "stopped");
+                        for (auto const id : iSession.parked_threads())
+                            if (id != iThread)
+                                add(id, "stopped");
+                        std::sort(result.begin(), result.end(), [](auto const& lhs, auto const& rhs) { return lhs.id < rhs.id; });
+                        return result;
+                    }
+                    std::vector<debug::frame> frames(std::optional<std::uint32_t> aThread) override
+                    {
+                        std::vector<debug::frame> result;
+                        on(aThread, [&]()
+                        {
+                            for (auto const& f : debug_frames())
+                                result.push_back(describe(f));
+                        });
+                        return result;
+                    }
+                    std::vector<debug::variable> locals(std::size_t aFrame, std::optional<std::uint32_t> aThread) override
+                    {
+                        std::vector<debug::variable> result;
+                        for (auto& [v, flags] : frame_variables(aFrame, aThread))
+                            if ((flags & bytecode::VariableHidden) == 0u)
+                                result.push_back(std::move(v));
+                        return result;
+                    }
+                    std::vector<debug::variable> globals(std::size_t aFrame, std::optional<std::uint32_t> aThread) override
+                    {
+                        // (the module's globals, then the names of the frame's scopes (see VariableScope))
+                        std::vector<debug::variable> result;
+                        auto const thread = aThread.value_or(iThread);
+                        on(aThread, [&]()
+                        {
+                            auto const frames = debug_frames();
+                            if (aFrame >= frames.size())
+                                return;
+                            auto& program = *frames[aFrame].program;
+                            for (auto const& v : program.global_variables())
+                            {
+                                if ((v.flags & bytecode::VariableHidden) != 0u)
+                                    continue;
+                                if (v.storage == bytecode::VariableAddress)
+                                    result.push_back(make_variable(v.name, thread, program, v.language, v.type, v.index));
+                                else if (v.storage == bytecode::VariableGlobal)
+                                    if (auto const* g = program.debug_global(v.index))
+                                        result.push_back(make_variable(v.name, thread, program, v.language, v.type, *g));
+                            }
+                        });
+                        for (auto& v : module_variables(aFrame, aThread))
+                            if (std::none_of(result.begin(), result.end(), [&](auto const& e) { return e.name == v.name; }))
+                                result.push_back(std::move(v));
+                        for (auto const& [v, flags] : frame_variables(aFrame, aThread))
+                            if ((flags & bytecode::VariableScope) != 0u && v.reference != 0u)
+                                for (auto& part : parts(v.reference, 0u, ~std::size_t{ 0u }))
+                                    if (std::none_of(result.begin(), result.end(), [&](auto const& e) { return e.name == part.name; }))
+                                        result.push_back(std::move(part));
+                        return result;
+                    }
+                    std::vector<debug::variable> parts(std::uint64_t aReference, std::size_t aStart, std::size_t aCount) override
+                    {
+                        std::vector<debug::variable> result;
+                        if (aReference == 0u || aReference > iValues.size())
+                            return result;
+                        auto const held = iValues[aReference - 1u];
+                        if (held.language.empty())
+                        {
+                            // (the VM's: an object in memory, or a pointer)
+                            std::size_t index = 0u;
+                            memory_parts(*held.program, held.type, held.word, [&](std::string const& aName, std::string const& aType, value aWord)
+                            {
+                                if (index++ < aStart)
+                                    return true;
+                                if (result.size() == aCount)
+                                    return false;
+                                result.push_back(make_variable(aName, held.thread, *held.program, {}, aType, aWord));
+                                return true;
+                            });
+                            return result;
+                        }
+                        on(held.thread, [&]()
+                        {
+                            auto const* hooks = static_cast<neos_rt_debug const*>(runtime::debug_hooks(held.language));
+                            if (hooks == nullptr || hooks->parts == nullptr)
+                                return;
+                            std::vector<neos_rt_debug_part> parts;
+                            std::size_t const batch = 64u;
+                            for (std::size_t start = aStart; aCount > result.size();)
+                            {
+                                parts.assign(std::min(batch, aCount - result.size()), neos_rt_debug_part{});
+                                auto const count = hooks->parts(held.type.c_str(), held.word, start, parts.size(), parts.data());
+                                // (the parts' strings are valid only until the hooks are next called: copied first)
+                                std::vector<std::tuple<std::string, std::string, value>> copies;
+                                for (std::size_t i = 0u; i < count && i < parts.size(); ++i)
+                                    copies.emplace_back(parts[i].name != nullptr ? parts[i].name : "", parts[i].type != nullptr ? parts[i].type : "", parts[i].value);
+                                for (auto const& [name, type, word] : copies)
+                                    result.push_back(make_variable(name, held.thread, *held.program, held.language, type, word));
+                                if (count < parts.size())
+                                    break;
+                                start += count;
+                            }
+                        });
+                        return result;
+                    }
+                    std::optional<debug::variable> evaluate(std::size_t aFrame, std::string const& aExpression, std::string& aError, std::optional<std::uint32_t> aThread) override
+                    {
+                        // (a variable or a part of one; else an expression of them (see expression))
+                        if (parse_path(aExpression))
+                            return evaluate_path(aFrame, aExpression, aError, aThread);
+                        return expression(aFrame, aExpression, aError, aThread);
+                    }
+                private:
+                    // (a variable or a part of one: a name, then .<name>, [<index>] or ["<key>"] for each part)
+                    std::optional<debug::variable> evaluate_path(std::size_t aFrame, std::string const& aExpression, std::string& aError, std::optional<std::uint32_t> aThread)
+                    {
+                        auto const path = parse_path(aExpression);
+                        if (!path)
+                        {
+                            aError = "Cannot evaluate \"" + aExpression + "\": expected a variable or a part of one (e.g. a.b[2])";
+                            return {};
+                        }
+                        // (a name as it is, else ignoring case (as gdb's: e.g. Ada's, whose names are case insensitive))
+                        auto const same = [](std::string_view aName, std::string_view aWanted, bool aIgnoreCase)
+                        {
+                            return aIgnoreCase ? 
+                                aName.size() == aWanted.size() && std::equal(aName.begin(), aName.end(), aWanted.begin(), [](char a, char b) 
+                                    { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }) :
+                                aName == aWanted;
+                        };
+                        std::optional<debug::variable> current;
+                        for (bool const ignoreCase : { false, true })
+                        {
+                            for (auto const& [v, flags] : frame_variables(aFrame, aThread))
+                                if (same(v.name, path->front(), ignoreCase))
+                                    current = v;
+                            if (!current)
+                                for (auto const& v : globals(aFrame, aThread))
+                                    if (same(v.name, path->front(), ignoreCase))
+                                        current = v;
+                            if (!current)
+                                for (auto const& v : module_variables(aFrame, aThread))
+                                    if (same(v.name, path->front(), ignoreCase))
+                                        current = v;
+                            if (current)
+                                break;
+                        }
+                        if (!current)
+                        {
+                            aError = "No symbol \"" + path->front() + "\" in current context.";
+                            return {};
+                        }
+                        auto name = path->front();
+                        for (std::size_t i = 1u; i < path->size(); ++i)
+                        {
+                            auto const& part = (*path)[i];
+                            std::optional<debug::variable> found;
+                            if (current->reference != 0u)
+                            {
+                                auto const allParts = parts(current->reference, 0u, ~std::size_t{ 0u });
+                                for (auto const& p : allParts)
+                                    if (p.name == part || "[" + part + "]" == p.name || "." + part == p.name || "[" + debug_quoted(part) + "]" == p.name || 
+                                        "'" + part + "'" == p.name || debug_quoted(part) == p.name)
+                                    {
+                                        found = p;
+                                        break;
+                                    }
+                                if (!found)
+                                    for (auto const& p : allParts)
+                                        if (same(p.name, part, true) || same(p.name, "." + part, true))
+                                        {
+                                            found = p;
+                                            break;
+                                        }
+                            }
+                            if (!found)
+                            {
+                                aError = "\"" + name + "\" has no part \"" + part + "\".";
+                                return {};
+                            }
+                            name += part.front() == '[' ? part : "." + part;
+                            current = found;
+                        }
+                        current->name = aExpression;
+                        return current;
+                    }
+                    // an expression of variables (and parts of them) and literals, as the debugger evaluates it (the program's code does not 
+                    // run): numbers, strings ("..." or '...'), true, false, nil (None, null, undefined); unary - and ! (not); * / % + - (strings: 
+                    // + concatenates); < <= > >= == != (= /= === !== ~=); && (and) || (or); parentheses. A value is its text as the variable shows it: a number,
+                    // a quoted string, a boolean or nil; anything else compares by its text
+                    struct operand
+                    {
+                        enum class kind { Number, String, Boolean, Nil, Other } k = kind::Nil;
+                        double number = 0.0;
+                        bool integral = false;
+                        std::int64_t integer = 0;
+                        std::string text;
+                        bool boolean = false;
+                    };
+                    static operand operand_of(debug::variable const& aVariable)
+                    {
+                        operand result;
+                        auto const& v = aVariable.value;
+                        if (v == "true" || v == "True" || v == "TRUE")
+                        {
+                            result.k = operand::kind::Boolean;
+                            result.boolean = true;
+                            return result;
+                        }
+                        if (v == "false" || v == "False" || v == "FALSE")
+                        {
+                            result.k = operand::kind::Boolean;
+                            return result;
+                        }
+                        if (v == "nil" || v == "None" || v == "null" || v == "undefined" || v == "<no value>")
+                            return result;
+                        if (v.size() >= 2u && (v.front() == '"' || v.front() == '\'') && v.back() == v.front())
+                        {
+                            result.k = operand::kind::String;
+                            for (std::size_t i = 1u; i + 1u < v.size(); ++i)
+                            {
+                                if (v[i] == '\\' && i + 2u < v.size())
+                                {
+                                    ++i;
+                                    switch (v[i])
+                                    {
+                                    case 'n': result.text += '\n'; break;
+                                    case 't': result.text += '\t'; break;
+                                    case 'r': result.text += '\r'; break;
+                                    default: result.text += v[i]; break;
+                                    }
+                                }
+                                else
+                                    result.text += v[i];
+                            }
+                            return result;
+                        }
+                        // (a number: its text, up to a space (e.g. a C char's "65 'A'"))
+                        auto const number = v.substr(0u, v.find(' '));
+                        std::int64_t i = 0;
+                        if (auto const [p, ec] = std::from_chars(number.data(), number.data() + number.size(), i); ec == std::errc{} && p == number.data() + number.size() && !number.empty())
+                        {
+                            result.k = operand::kind::Number;
+                            result.integral = true;
+                            result.integer = i;
+                            result.number = static_cast<double>(i);
+                            return result;
+                        }
+                        double d = 0.0;
+                        if (auto const [p, ec] = std::from_chars(number.data(), number.data() + number.size(), d); ec == std::errc{} && p == number.data() + number.size() && !number.empty())
+                        {
+                            result.k = operand::kind::Number;
+                            result.number = d;
+                            return result;
+                        }
+                        result.k = operand::kind::Other;
+                        result.text = v;
+                        return result;
+                    }
+                    static std::string text_of(operand const& aOperand)
+                    {
+                        switch (aOperand.k)
+                        {
+                        case operand::kind::Number: return aOperand.integral ? std::to_string(aOperand.integer) : debug_number(aOperand.number);
+                        case operand::kind::String: return debug_quoted(aOperand.text);
+                        case operand::kind::Boolean: return aOperand.boolean ? "true" : "false";
+                        case operand::kind::Nil: return "nil";
+                        default: return aOperand.text;
+                        }
+                    }
+                    static bool truth(operand const& aOperand)
+                    {
+                        switch (aOperand.k)
+                        {
+                        case operand::kind::Number: return aOperand.number != 0.0;
+                        case operand::kind::String: return !aOperand.text.empty();
+                        case operand::kind::Boolean: return aOperand.boolean;
+                        case operand::kind::Nil: return false;
+                        default: return debug_true(aOperand.text);
+                        }
+                    }
+                    std::optional<debug::variable> expression(std::size_t aFrame, std::string const& aExpression, std::string& aError, std::optional<std::uint32_t> aThread)
+                    {
+                        // (its tokens)
+                        struct token
+                        {
+                            enum class kind { Operand, Operator, Open, Close } k;
+                            std::string text;
+                        };
+                        std::vector<token> tokens;
+                        std::size_t i = 0u;
+                        auto const n = aExpression.size();
+                        auto const is_name = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$' || static_cast<unsigned char>(c) >= 0x80u; };
+                        while (i < n)
+                        {
+                            auto const c = aExpression[i];
+                            if (std::isspace(static_cast<unsigned char>(c)))
+                            {
+                                ++i;
+                                continue;
+                            }
+                            if (c == '(' || c == ')')
+                            {
+                                tokens.push_back({ c == '(' ? token::kind::Open : token::kind::Close, std::string(1u, c) });
+                                ++i;
+                                continue;
+                            }
+                            if (c == '"' || c == '\'')
+                            {
+                                auto const start = i++;
+                                while (i < n && aExpression[i] != c)
+                                    i += aExpression[i] == '\\' ? 2u : 1u;
+                                if (i >= n)
+                                {
+                                    aError = "Unterminated string in \"" + aExpression + "\".";
+                                    return {};
+                                }
+                                ++i;
+                                tokens.push_back({ token::kind::Operand, aExpression.substr(start, i - start) });
+                                continue;
+                            }
+                            if (std::isdigit(static_cast<unsigned char>(c)) || (c == '.' && i + 1u < n && std::isdigit(static_cast<unsigned char>(aExpression[i + 1u]))))
+                            {
+                                auto const start = i;
+                                while (i < n && (std::isalnum(static_cast<unsigned char>(aExpression[i])) || aExpression[i] == '.' || 
+                                    ((aExpression[i] == '+' || aExpression[i] == '-') && (aExpression[i - 1u] == 'e' || aExpression[i - 1u] == 'E'))))
+                                    ++i;
+                                tokens.push_back({ token::kind::Operand, aExpression.substr(start, i - start) });
+                                continue;
+                            }
+                            if (is_name(c))
+                            {
+                                // (a variable, or a part of one: the longest path; an index in [] or, right after a name or another
+                                // index, in () (e.g. Ada's: there are no calls here))
+                                auto const start = i;
+                                std::string closers;
+                                while (i < n)
+                                {
+                                    auto const ch = aExpression[i];
+                                    if (!closers.empty())
+                                    {
+                                        if (ch == closers.back())
+                                            closers.pop_back();
+                                        else if (ch == '[')
+                                            closers.push_back(']');
+                                        ++i;
+                                        continue;
+                                    }
+                                    auto const sofar = std::string_view{ aExpression }.substr(start, i - start);
+                                    if (ch == '[' || (ch == '(' && sofar != "and" && sofar != "or" && sofar != "not" && (is_name(aExpression[i - 1u]) || aExpression[i - 1u] == ']' || aExpression[i - 1u] == ')')))
+                                        closers.push_back(ch == '[' ? ']' : ')');
+                                    else if (!is_name(ch) && ch != '.')
+                                        break;
+                                    ++i;
+                                }
+                                auto const word = aExpression.substr(start, i - start);
+                                if (word == "and" || word == "or" || word == "not")
+                                    tokens.push_back({ token::kind::Operator, word == "and" ? "&&" : word == "or" ? "||" : "!" });
+                                else
+                                    tokens.push_back({ token::kind::Operand, word });
+                                continue;
+                            }
+                            static char const* const sOperators[] = { "===", "!==", "&&", "||", "==", "!=", "~=", "/=", "<=", ">=", "<", ">", "=", "+", "-", "*", "/", "%", "!" };
+                            bool found = false;
+                            for (auto const* op : sOperators)
+                                if (aExpression.compare(i, std::strlen(op), op) == 0)
+                                {
+                                    std::string text = op;
+                                    // (equality as languages write it: there is no assignment here, so Ada's (and Pascal's) = and /= too)
+                                    if (text == "===" || text == "=")
+                                        text = "==";
+                                    else if (text == "!==" || text == "~=" || text == "/=")
+                                        text = "!=";
+                                    tokens.push_back({ token::kind::Operator, text });
+                                    i += std::strlen(op);
+                                    found = true;
+                                    break;
+                                }
+                            if (!found)
+                            {
+                                aError = "Cannot evaluate \"" + aExpression + "\": unexpected '" + std::string(1u, c) + "'.";
+                                return {};
+                            }
+                        }
+                        // (precedence climbing)
+                        std::size_t at = 0u;
+                        std::string error;
+                        std::function<std::optional<operand>(int)> parse;
+                        auto const primary = [&]() -> std::optional<operand>
+                        {
+                            if (at >= tokens.size())
+                            {
+                                error = "Cannot evaluate \"" + aExpression + "\": incomplete expression.";
+                                return {};
+                            }
+                            auto const t = tokens[at++];
+                            if (t.k == token::kind::Open)
+                            {
+                                auto inner = parse(0);
+                                if (!inner)
+                                    return {};
+                                if (at >= tokens.size() || tokens[at].k != token::kind::Close)
+                                {
+                                    error = "Cannot evaluate \"" + aExpression + "\": expected ')'.";
+                                    return {};
+                                }
+                                ++at;
+                                return inner;
+                            }
+                            if (t.k == token::kind::Operator && (t.text == "-" || t.text == "!"))
+                            {
+                                auto inner = parse(7);
+                                if (!inner)
+                                    return {};
+                                operand result;
+                                if (t.text == "!")
+                                {
+                                    result.k = operand::kind::Boolean;
+                                    result.boolean = !truth(*inner);
+                                    return result;
+                                }
+                                if (inner->k != operand::kind::Number)
+                                {
+                                    error = "Cannot negate " + text_of(*inner) + ".";
+                                    return {};
+                                }
+                                result = *inner;
+                                result.number = -result.number;
+                                result.integer = -result.integer;
+                                return result;
+                            }
+                            if (t.k != token::kind::Operand)
+                            {
+                                error = "Cannot evaluate \"" + aExpression + "\": unexpected '" + t.text + "'.";
+                                return {};
+                            }
+                            // (a literal, or a variable's value)
+                            static std::set<std::string> const sTrue{ "true", "True" };
+                            static std::set<std::string> const sFalse{ "false", "False" };
+                            static std::set<std::string> const sNil{ "nil", "None", "null", "undefined" };
+                            debug::variable literal;
+                            if (std::isdigit(static_cast<unsigned char>(t.text[0])) || t.text[0] == '.' || t.text[0] == '"' || t.text[0] == '\'' || 
+                                sTrue.contains(t.text) || sFalse.contains(t.text) || sNil.contains(t.text))
+                            {
+                                literal.value = t.text;
+                                auto result = operand_of(literal);
+                                if (result.k == operand::kind::Other)
+                                {
+                                    error = "Invalid number \"" + t.text + "\".";
+                                    return {};
+                                }
+                                return result;
+                            }
+                            auto const v = evaluate_path(aFrame, t.text, error, aThread);
+                            if (!v)
+                            {
+                                // (not a variable: a literal of an enumeration type (whose values show as their literals))
+                                std::optional<std::string> enumLiteral;
+                                if (auto const* program = frame_program(aFrame, aThread); program != nullptr && parse_path(t.text) && parse_path(t.text)->size() == 1u)
+                                    enumLiteral = program->debug_enum_literal(t.text);
+                                if (!enumLiteral)
+                                    return {};
+                                error.clear();
+                                debug::variable literalValue;
+                                literalValue.value = *enumLiteral;
+                                return operand_of(literalValue);
+                            }
+                            return operand_of(*v);
+                        };
+                        auto const precedence = [](std::string const& aOperator)
+                        {
+                            if (aOperator == "||") return 1;
+                            if (aOperator == "&&") return 2;
+                            if (aOperator == "==" || aOperator == "!=") return 3;
+                            if (aOperator == "<" || aOperator == "<=" || aOperator == ">" || aOperator == ">=") return 4;
+                            if (aOperator == "+" || aOperator == "-") return 5;
+                            if (aOperator == "*" || aOperator == "/" || aOperator == "%") return 6;
+                            return -1;
+                        };
+                        auto const apply = [&](std::string const& aOperator, operand const& aLeft, operand const& aRight) -> std::optional<operand>
+                        {
+                            operand result;
+                            if (aOperator == "&&" || aOperator == "||")
+                            {
+                                result.k = operand::kind::Boolean;
+                                result.boolean = aOperator == "&&" ? truth(aLeft) && truth(aRight) : truth(aLeft) || truth(aRight);
+                                return result;
+                            }
+                            if (aOperator == "==" || aOperator == "!=")
+                            {
+                                bool equal = false;
+                                if (aLeft.k == operand::kind::Number && aRight.k == operand::kind::Number)
+                                    equal = aLeft.integral && aRight.integral ? aLeft.integer == aRight.integer : aLeft.number == aRight.number;
+                                else if (aLeft.k == aRight.k)
+                                    equal = aLeft.k == operand::kind::Boolean ? aLeft.boolean == aRight.boolean : aLeft.k == operand::kind::Nil || aLeft.text == aRight.text;
+                                result.k = operand::kind::Boolean;
+                                result.boolean = aOperator == "==" ? equal : !equal;
+                                return result;
+                            }
+                            if (aLeft.k == operand::kind::String && aRight.k == operand::kind::String)
+                            {
+                                if (aOperator == "+")
+                                {
+                                    result.k = operand::kind::String;
+                                    result.text = aLeft.text + aRight.text;
+                                    return result;
+                                }
+                                if (precedence(aOperator) == 4)
+                                {
+                                    auto const c = aLeft.text.compare(aRight.text);
+                                    result.k = operand::kind::Boolean;
+                                    result.boolean = aOperator == "<" ? c < 0 : aOperator == "<=" ? c <= 0 : aOperator == ">" ? c > 0 : c >= 0;
+                                    return result;
+                                }
+                            }
+                            if (aLeft.k != operand::kind::Number || aRight.k != operand::kind::Number)
+                            {
+                                error = "Cannot apply '" + aOperator + "' to " + text_of(aLeft) + " and " + text_of(aRight) + ".";
+                                return {};
+                            }
+                            if (precedence(aOperator) == 4)
+                            {
+                                result.k = operand::kind::Boolean;
+                                auto const l = aLeft.number;
+                                auto const r = aRight.number;
+                                result.boolean = aOperator == "<" ? l < r : aOperator == "<=" ? l <= r : aOperator == ">" ? l > r : l >= r;
+                                return result;
+                            }
+                            result.k = operand::kind::Number;
+                            bool const integral = aLeft.integral && aRight.integral && aOperator != "/";
+                            if (integral)
+                            {
+                                if (aOperator == "%" && aRight.integer == 0)
+                                {
+                                    error = "Division by zero.";
+                                    return {};
+                                }
+                                result.integral = true;
+                                result.integer = aOperator == "+" ? aLeft.integer + aRight.integer : aOperator == "-" ? aLeft.integer - aRight.integer :
+                                    aOperator == "*" ? aLeft.integer * aRight.integer : aLeft.integer % aRight.integer;
+                                result.number = static_cast<double>(result.integer);
+                                return result;
+                            }
+                            result.number = aOperator == "+" ? aLeft.number + aRight.number : aOperator == "-" ? aLeft.number - aRight.number :
+                                aOperator == "*" ? aLeft.number * aRight.number : aOperator == "/" ? aLeft.number / aRight.number : std::fmod(aLeft.number, aRight.number);
+                            return result;
+                        };
+                        parse = [&](int aMinimum) -> std::optional<operand>
+                        {
+                            auto left = primary();
+                            if (!left)
+                                return {};
+                            while (at < tokens.size() && tokens[at].k == token::kind::Operator)
+                            {
+                                auto const op = tokens[at].text;
+                                auto const p = precedence(op);
+                                if (p < 0 || p < aMinimum)
+                                    break;
+                                ++at;
+                                auto right = parse(p + 1);
+                                if (!right)
+                                    return {};
+                                left = apply(op, *left, *right);
+                                if (!left)
+                                    return {};
+                            }
+                            return left;
+                        };
+                        auto const result = parse(0);
+                        if (!result)
+                        {
+                            aError = error;
+                            return {};
+                        }
+                        if (at != tokens.size())
+                        {
+                            aError = "Cannot evaluate \"" + aExpression + "\": unexpected '" + tokens[at].text + "'.";
+                            return {};
+                        }
+                        debug::variable v;
+                        v.name = aExpression;
+                        v.value = text_of(*result);
+                        v.type = result->k == operand::kind::Number ? "number" : result->k == operand::kind::String ? "string" : 
+                            result->k == operand::kind::Boolean ? "bool" : result->k == operand::kind::Nil ? "nil" : "";
+                        return v;
+                    }
+                private:
+                    // (the variables of the top level of a frame's module (see VariableModule): those of the outermost frame of its program that has 
+                    // them, if it is not the frame itself)
+                    std::vector<debug::variable> module_variables(std::size_t aFrame, std::optional<std::uint32_t> aThread)
+                    {
+                        std::optional<std::size_t> outer;
+                        on(aThread, [&]()
+                        {
+                            auto const frames = debug_frames();
+                            if (aFrame >= frames.size())
+                                return;
+                            for (auto i = frames.size(); i-- > aFrame + 1u;)
+                                if (frames[i].program == frames[aFrame].program)
+                                    if (auto const* variables = frames[i].program->variables_of(frames[i].function); variables != nullptr &&
+                                        std::any_of(variables->begin(), variables->end(), [](auto const& v) { return (v.flags & bytecode::VariableModule) != 0u; }))
+                                    {
+                                        outer = i;
+                                        return;
+                                    }
+                        });
+                        std::vector<debug::variable> result;
+                        if (outer)
+                            for (auto& [v, flags] : frame_variables(*outer, aThread))
+                                if ((flags & bytecode::VariableModule) != 0u)
+                                    result.push_back(std::move(v));
+                        return result;
+                    }
+                    // (the variables that a frame can see (its parameters first) with their flags (see VariablesSection): of those of the 
+                    // same name, the innermost (declared last))
+                    // (the program whose code a frame is)
+                    machine const* frame_program(std::size_t aFrame, std::optional<std::uint32_t> aThread)
+                    {
+                        machine const* result = nullptr;
+                        on(aThread, [&]()
+                        {
+                            auto const frames = debug_frames();
+                            if (aFrame < frames.size())
+                                result = frames[aFrame].program;
+                        });
+                        return result;
+                    }
+                    std::vector<std::pair<debug::variable, std::uint8_t>> frame_variables(std::size_t aFrame, std::optional<std::uint32_t> aThread)
+                    {
+                        std::vector<std::pair<debug::variable, std::uint8_t>> result;
+                        auto const thread = aThread.value_or(iThread);
+                        on(aThread, [&]()
+                        {
+                            auto const frames = debug_frames();
+                            if (aFrame >= frames.size())
+                                return;
+                            auto const& f = frames[aFrame];
+                            auto& program = *f.program;
+                            auto const* variables = program.variables_of(f.function);
+                            if (variables == nullptr)
+                            {
+                                if (program.has_variables())
+                                    return;
+                                // (the compiler did not describe the function's variables: its locals, by their indices (its parameters first))
+                                auto const& type = program.type_of(f.function);
+                                auto const& localTypes = program.local_types(f.function);
+                                for (std::size_t i = 0u; f.locals != nullptr && i < f.locals->size(); ++i)
+                                {
+                                    bool const parameter = i < type.parameters.size();
+                                    auto const wasmType = parameter ? type.parameters[i] : i - type.parameters.size() < localTypes.size() ? 
+                                        localTypes[i - type.parameters.size()] : std::uint8_t{ 0u };
+                                    auto v = make_variable("$" + std::to_string(i), thread, program, {}, debug_wasm_type(wasmType), (*f.locals)[i]);
+                                    v.argument = parameter;
+                                    result.emplace_back(std::move(v), parameter ? bytecode::VariableParameter : std::uint8_t{ 0u });
+                                }
+                                return;
+                            }
+                            auto const line = program.line_at(f.function, f.token);
+                            std::vector<machine::variable_info const*> visible;
+                            for (auto const& v : *variables)
+                            {
+                                if (v.firstLine != 0u && line != 0u && (line < v.firstLine || (v.lastLine != 0u && line > v.lastLine)))
+                                    continue;
+                                auto existing = std::find_if(visible.begin(), visible.end(), [&](auto const* e) { return e->name == v.name; });
+                                if (existing == visible.end())
+                                    visible.push_back(&v);
+                                else if (v.firstLine >= (*existing)->firstLine)
+                                    *existing = &v;
+                            }
+                            std::stable_partition(visible.begin(), visible.end(), [](auto const* v) { return (v->flags & bytecode::VariableParameter) != 0u; });
+                            for (auto const* v : visible)
+                            {
+                                std::optional<value> word;
+                                if (v->storage == bytecode::VariableLocal && f.locals != nullptr && v->index < f.locals->size())
+                                    word = (*f.locals)[v->index];
+                                else if (v->storage == bytecode::VariableAddress)
+                                    word = v->index;
+                                else if (v->storage == bytecode::VariableGlobal)
+                                    if (auto const* g = program.debug_global(v->index))
+                                        word = *g;
+                                if (!word)
+                                    continue;
+                                auto variable = make_variable(v->name, thread, program, v->language, v->type, *word);
+                                variable.argument = (v->flags & bytecode::VariableParameter) != 0u;
+                                result.emplace_back(std::move(variable), v->flags);
+                            }
+                        });
+                        return result;
+                    }
+                    // (the VM's types of objects in memory (see VariablesSection): a scalar's size; the top level parts of a structure's 
+                    // members; reading a scalar)
+                    static std::size_t scalar_size(std::string_view aType)
+                    {
+                        if (aType.starts_with("enum"))
+                        {
+                            auto rest = aType.substr(4u);
+                            return static_cast<std::size_t>(parse_number(rest));
+                        }
+                        if (aType == "i8" || aType == "u8" || aType == "cchar" || aType == "bool")
+                            return 1u;
+                        if (aType == "i16" || aType == "u16")
+                            return 2u;
+                        if (aType == "i32" || aType == "u32" || aType == "f32" || aType == "char")
+                            return 4u;
+                        if (aType == "i64" || aType == "u64" || aType == "f64" || aType.starts_with('*'))
+                            return 8u;
+                        return 0u;
+                    }
+                    static std::vector<std::string_view> split_members(std::string_view aMembers)
+                    {
+                        std::vector<std::string_view> result;
+                        int depth = 0;
+                        std::size_t start = 0u;
+                        for (std::size_t i = 0u; i < aMembers.size(); ++i)
+                        {
+                            auto const c = aMembers[i];
+                            if (c == '{' || c == '[')
+                                ++depth;
+                            else if (c == '}' || c == ']')
+                                --depth;
+                            else if (c == ';' && depth == 0)
+                            {
+                                if (i > start)
+                                    result.push_back(aMembers.substr(start, i - start));
+                                start = i + 1u;
+                            }
+                        }
+                        if (start < aMembers.size())
+                            result.push_back(aMembers.substr(start));
+                        return result;
+                    }
+                    static std::uint64_t parse_number(std::string_view& aText)
+                    {
+                        std::uint64_t result = 0u;
+                        bool negative = !aText.empty() && aText.front() == '-';
+                        if (negative)
+                            aText.remove_prefix(1u);
+                        while (!aText.empty() && std::isdigit(static_cast<unsigned char>(aText.front())))
+                        {
+                            result = result * 10u + static_cast<std::uint64_t>(aText.front() - '0');
+                            aText.remove_prefix(1u);
+                        }
+                        return negative ? static_cast<std::uint64_t>(-static_cast<std::int64_t>(result)) : result;
+                    }
+                    // (an object at an address (type "@<offset>:<type>"): its type and address; or a value of a scalar or pointer type as is)
+                    // (a type's memory (a prefix "#<memory>:": an external memory's index; none: the program's own memory, 0): removed)
+                    static std::uint32_t memory_of(std::string_view& aType)
+                    {
+                        if (!aType.starts_with('#'))
+                            return 0u;
+                        auto rest = aType.substr(1u);
+                        auto const memory = static_cast<std::uint32_t>(parse_number(rest));
+                        if (!rest.starts_with(':'))
+                            return 0u;
+                        aType = rest.substr(1u);
+                        return memory;
+                    }
+                    static std::string in_memory(std::uint32_t aMemory, std::string_view aType)
+                    {
+                        return (aMemory != 0u ? "#" + std::to_string(aMemory) + ":" : std::string{}) + std::string{ aType };
+                    }
+                    static bool located(machine const& aProgram, std::string_view aType, value aWord, std::string& aObjectType, std::uint64_t& aAddress, 
+                        std::uint32_t& aMemory)
+                    {
+                        aType = aProgram.debug_named_type(aType);
+                        aMemory = memory_of(aType);
+                        aType = aProgram.debug_named_type(aType);
+                        if (!aType.starts_with('@'))
+                            return false;
+                        aType.remove_prefix(1u);
+                        auto const offset = parse_number(aType);
+                        if (!aType.starts_with(':'))
+                            return false;
+                        aType.remove_prefix(1u);
+                        aObjectType = std::string{ aProgram.debug_named_type(aType) };
+                        aAddress = aWord + offset;
+                        return true;
+                    }
+                    static std::optional<value> read_scalar(machine const& aProgram, std::uint32_t aMemory, std::string_view aType, std::uint64_t aAddress)
+                    {
+                        auto const size = scalar_size(aType);
+                        if (size == 0u)
+                            return {};
+                        std::uint64_t bits = 0u;
+                        if (!aProgram.debug_read(aMemory, aAddress, &bits, size))
+                            return {};
+                        if (aType == "f32")
+                            return static_cast<value>(static_cast<std::uint32_t>(bits));
+                        return bits;
+                    }
+                    // (an array object of type "[<count>*<size>]<type>" (its elements at its address, indexed from 0) or "[@<dimensions>*<size>]<type>" 
+                    // (at its address a descriptor: its elements' offset from it, then each dimension's first and last index (i64s)): its elements' 
+                    // address, its dimensions (first index and length), its elements' size and type)
+                    struct array_shape
+                    {
+                        std::uint64_t elements = 0u;
+                        std::vector<std::pair<std::int64_t, std::uint64_t>> dimensions;
+                        std::uint64_t size = 0u;
+                        std::string type;
+                        bool described = false;
+                        std::uint64_t count() const
+                        {
+                            std::uint64_t result = 1u;
+                            for (auto const& d : dimensions)
+                                result *= d.second;
+                            return result;
+                        }
+                        std::string index(std::uint64_t aElement) const
+                        {
+                            // (its index in each dimension (the last varies fastest))
+                            std::vector<std::int64_t> indexes(dimensions.size());
+                            for (std::size_t d = dimensions.size(); d-- > 0u;)
+                            {
+                                auto const length = std::max<std::uint64_t>(dimensions[d].second, 1u);
+                                indexes[d] = dimensions[d].first + static_cast<std::int64_t>(aElement % length);
+                                aElement /= length;
+                            }
+                            std::string result = "[";
+                            for (std::size_t d = 0u; d < indexes.size(); ++d)
+                                result += (d != 0u ? "," : "") + std::to_string(indexes[d]);
+                            return result + "]";
+                        }
+                    };
+                    static std::optional<array_shape> array_at(machine const& aProgram, std::uint32_t aMemory, std::string_view aType, std::uint64_t aAddress)
+                    {
+                        if (!aType.starts_with('['))
+                            return {};
+                        aType.remove_prefix(1u);
+                        array_shape result;
+                        result.described = aType.starts_with('@');
+                        if (result.described)
+                            aType.remove_prefix(1u);
+                        auto const number = parse_number(aType);
+                        if (!aType.starts_with('*'))
+                            return {};
+                        aType.remove_prefix(1u);
+                        result.size = parse_number(aType);
+                        if (!aType.starts_with(']'))
+                            return {};
+                        aType.remove_prefix(1u);
+                        result.type = std::string{ aProgram.debug_named_type(aType) };
+                        if (!result.described)
+                        {
+                            result.elements = aAddress;
+                            result.dimensions.emplace_back(0, number);
+                            return result;
+                        }
+                        if (number == 0u || number > 8u || !aProgram.debug_read(aMemory, aAddress, &result.elements, 8u))
+                            return {};
+                        result.elements += aAddress;
+                        for (std::uint64_t d = 0u; d < number; ++d)
+                        {
+                            std::int64_t bounds[2] = {};
+                            if (!aProgram.debug_read(aMemory, aAddress + 8u + d * 16u, bounds, sizeof(bounds)))
+                                return {};
+                            result.dimensions.emplace_back(bounds[0], bounds[1] < bounds[0] ? 0u : static_cast<std::uint64_t>(bounds[1] - bounds[0]) + 1u);
+                        }
+                        return result;
+                    }
+                    std::string memory_type_name(machine const& aProgram, std::string_view aType) const
+                    {
+                        aType = aProgram.debug_named_type(aType);
+                        memory_of(aType);
+                        aType = aProgram.debug_named_type(aType);
+                        if (aType.starts_with('@'))
+                        {
+                            auto const colon = aType.find(':');
+                            return colon == std::string_view::npos ? std::string{ aType } : memory_type_name(aProgram, aType.substr(colon + 1u));
+                        }
+                        if (aType.starts_with('*'))
+                            return memory_type_name(aProgram, aType.substr(1u)) + "*";
+                        if (aType.starts_with('['))
+                        {
+                            auto rest = aType.substr(1u);
+                            bool const described = rest.starts_with('@');
+                            if (described)
+                                rest.remove_prefix(1u);
+                            auto const count = parse_number(rest);
+                            auto const close = rest.find(']');
+                            return close == std::string_view::npos ? std::string{ aType } : memory_type_name(aProgram, rest.substr(close + 1u)) + 
+                                (described ? "[" + std::string(count > 1u ? static_cast<std::size_t>(count) - 1u : 0u, ',') + "]" : "[" + std::to_string(count) + "]");
+                        }
+                        if (auto const brace = aType.find('{'); brace != std::string_view::npos)
+                            return brace == 0u ? std::string{ "struct" } : std::string{ aType.substr(0u, brace) };
+                        if (aType.starts_with("enum"))
+                            return "enum";
+                        return aType == "cchar" ? std::string{ "char" } : std::string{ aType };
+                    }
+                    // (the text of a value of a memory type: aDepth levels of a structure's or array's parts are shown)
+                    std::string memory_text(machine& aProgram, std::string_view aType, value aWord, std::size_t aDepth)
+                    {
+                        std::string objectType;
+                        std::uint64_t address = 0u;
+                        std::uint32_t memory = 0u;
+                        if (located(aProgram, aType, aWord, objectType, address, memory))
+                        {
+                            if (scalar_size(objectType) != 0u)
+                            {
+                                auto const v = read_scalar(aProgram, memory, objectType, address);
+                                if (!v)
+                                    return "<invalid address>";
+                                return objectType.starts_with('*') ? memory_text(aProgram, in_memory(memory, objectType), *v, aDepth) : make_variable({}, iThread, aProgram, {}, objectType, *v).value;
+                            }
+                            if (objectType.starts_with('['))
+                            {
+                                auto const array = array_at(aProgram, memory, objectType, address);
+                                if (!array)
+                                    return "<invalid address>";
+                                auto const count = array->count();
+                                if (array->type == "cchar" && array->dimensions.size() == 1u)
+                                {
+                                    // (a char array: its characters (a fixed one's: to its first NUL))
+                                    std::string text;
+                                    for (std::uint64_t i = 0u; i < count && i < 256u; ++i)
+                                    {
+                                        char c = 0;
+                                        if (!aProgram.debug_read(memory, array->elements + i, &c, 1u) || (c == '\0' && !array->described))
+                                            break;
+                                        text += c;
+                                    }
+                                    return debug_quoted(text) + (array->described && count > 256u ? "..." : "");
+                                }
+                                if (aDepth == 0u)
+                                    return "{...}";
+                                std::string text = "{";
+                                for (std::uint64_t i = 0u; i < count && i < 16u; ++i)
+                                    text += (i != 0u ? ", " : "") + memory_text(aProgram, in_memory(memory, "@" + std::to_string(i * array->size) + ":" + array->type), array->elements, aDepth - 1u);
+                                if (count > 16u)
+                                    text += ", ...";
+                                return text + "}";
+                            }
+                            if (auto const brace = objectType.find('{'); brace != std::string::npos)
+                            {
+                                if (aDepth == 0u)
+                                    return "{...}";
+                                std::string text = "{";
+                                bool first = true;
+                                std::string_view members{ objectType };
+                                members = members.substr(brace + 1u, members.size() - brace - 2u);
+                                for (auto const member : split_members(members))
+                                {
+                                    auto const at = member.find('@');
+                                    if (at == std::string_view::npos)
+                                        continue;
+                                    text += (first ? "" : ", ") + std::string{ member.substr(0u, at) } + " = " + 
+                                        memory_text(aProgram, in_memory(memory, member.substr(at)), address, aDepth - 1u);
+                                    first = false;
+                                }
+                                return text + "}";
+                            }
+                            return "?";
+                        }
+                        auto type = aProgram.debug_named_type(aType);
+                        memory = memory_of(type);
+                        type = aProgram.debug_named_type(type);
+                        if (type.starts_with('*'))
+                        {
+                            // (a pointer: its address (a char pointer's: and its string))
+                            std::ostringstream oss;
+                            oss << "0x" << std::hex << aWord;
+                            if (aProgram.debug_named_type(type.substr(1u)) == "cchar" && aWord != 0u)
+                            {
+                                std::string text;
+                                for (std::uint64_t i = 0u; i < 256u; ++i)
+                                {
+                                    char c = 0;
+                                    if (!aProgram.debug_read(memory, aWord + i, &c, 1u) || c == '\0')
+                                        break;
+                                    text += c;
+                                }
+                                oss << " " << debug_quoted(text);
+                            }
+                            return oss.str();
+                        }
+                        return make_variable({}, iThread, aProgram, {}, std::string{ type }, aWord).value;
+                    }
+                    // (the parts of a value of a memory type: a pointer's object (*), an array's elements, a structure's members)
+                    template <typename Visitor>
+                    void memory_parts(machine& aProgram, std::string_view aType, value aWord, Visitor&& aVisitor)
+                    {
+                        std::string objectType;
+                        std::uint64_t address = 0u;
+                        std::uint32_t memory = 0u;
+                        if (!located(aProgram, aType, aWord, objectType, address, memory))
+                        {
+                            auto type = aProgram.debug_named_type(aType);
+                            memory = memory_of(type);
+                            type = aProgram.debug_named_type(type);
+                            if (type.starts_with('*') && aWord != 0u)
+                            {
+                                auto const target = std::string{ aProgram.debug_named_type(type.substr(1u)) };
+                                if (target != "void" && !target.empty() && target != "function")
+                                    aVisitor("*", in_memory(memory, "@0:" + std::string{ type.substr(1u) }), aWord);
+                            }
+                            return;
+                        }
+                        if (scalar_size(objectType) != 0u)
+                        {
+                            if (objectType.starts_with('*'))
+                                if (auto const v = read_scalar(aProgram, memory, objectType, address); v && *v != 0u)
+                                    aVisitor("*", in_memory(memory, "@0:" + objectType.substr(1u)), *v);
+                            return;
+                        }
+                        if (objectType.starts_with('['))
+                        {
+                            auto const array = array_at(aProgram, memory, objectType, address);
+                            if (!array)
+                                return;
+                            auto const count = array->count();
+                            for (std::uint64_t i = 0u; i < count && i < 100000u; ++i)
+                                if (!aVisitor(array->index(i), in_memory(memory, "@" + std::to_string(i * array->size) + ":" + array->type), array->elements))
+                                    return;
+                            return;
+                        }
+                        if (auto const brace = objectType.find('{'); brace != std::string::npos)
+                        {
+                            std::string_view members{ objectType };
+                            members = members.substr(brace + 1u, members.size() - brace - 2u);
+                            for (auto const member : split_members(members))
+                            {
+                                auto const at = member.find('@');
+                                if (at != std::string_view::npos && !aVisitor(std::string{ member.substr(0u, at) }, in_memory(memory, member.substr(at)), address))
+                                    return;
+                            }
+                        }
+                    }
+                    template <typename Request>
+                    bool on(std::optional<std::uint32_t> aThread, Request&& aRequest)
+                    {
+                        if (!aThread || *aThread == iThread)
+                        {
+                            aRequest();
+                            return true;
+                        }
+                        return iSession.run_on(*aThread, std::function<void()>{ std::forward<Request>(aRequest) });
+                    }
+                    static std::optional<std::vector<std::string>> parse_path(std::string const& aExpression)
+                    {
+                        std::vector<std::string> result;
+                        std::size_t i = 0u;
+                        auto const n = aExpression.size();
+                        auto skip = [&]() { while (i < n && std::isspace(static_cast<unsigned char>(aExpression[i]))) ++i; };
+                        auto identifier = [&]() -> std::optional<std::string>
+                        {
+                            skip();
+                            auto const start = i;
+                            while (i < n && (std::isalnum(static_cast<unsigned char>(aExpression[i])) || aExpression[i] == '_' || aExpression[i] == '$' || 
+                                static_cast<unsigned char>(aExpression[i]) >= 0x80u))
+                                ++i;
+                            if (i == start || std::isdigit(static_cast<unsigned char>(aExpression[start])))
+                                return {};
+                            return aExpression.substr(start, i - start);
+                        };
+                        auto root = identifier();
+                        if (!root)
+                            return {};
+                        result.push_back(*root);
+                        for (;;)
+                        {
+                            skip();
+                            if (i == n)
+                                return result;
+                            if (aExpression[i] == '.')
+                            {
+                                ++i;
+                                auto member = identifier();
+                                if (!member)
+                                    return {};
+                                result.push_back(*member);
+                            }
+                            else if (aExpression[i] == '[' || aExpression[i] == '(')
+                            {
+                                auto const close = aExpression[i] == '[' ? ']' : ')';
+                                ++i;
+                                skip();
+                                if (i < n && (aExpression[i] == '"' || aExpression[i] == '\''))
+                                {
+                                    auto const quote = aExpression[i++];
+                                    std::string key;
+                                    while (i < n && aExpression[i] != quote)
+                                    {
+                                        if (aExpression[i] == '\\' && i + 1u < n)
+                                            ++i;
+                                        key += aExpression[i++];
+                                    }
+                                    if (i == n)
+                                        return {};
+                                    ++i;
+                                    result.push_back(key);
+                                }
+                                else
+                                {
+                                    auto const start = i;
+                                    if (i < n && aExpression[i] == '-')
+                                        ++i;
+                                    while (i < n && std::isdigit(static_cast<unsigned char>(aExpression[i])))
+                                        ++i;
+                                    if (i == start)
+                                        return {};
+                                    result.push_back(aExpression.substr(start, i - start));
+                                }
+                                skip();
+                                if (i == n || aExpression[i] != close)
+                                    return {};
+                                ++i;
+                            }
+                            else
+                                return {};
+                        }
+                    }
+                    debug::frame describe(debug_frame const& aFrame) const
+                    {
+                        auto const& program = *aFrame.program;
+                        auto const& info = program.frame_of(aFrame.function);
+                        debug::frame result;
+                        result.function = info.name;
+                        result.source = program.source_name(info.source);
+                        result.line = program.line_at(aFrame.function, aFrame.token);
+                        if (auto const position = program.position_at(aFrame.token); position != 0u && bytecode::position_line(position) == result.line)
+                        {
+                            result.column = bytecode::position_column(position) + 1u;
+                            result.endLine = bytecode::position_end_line(position);
+                            result.endColumn = bytecode::position_end_column(position) + 1u;
+                        }
+                        if (auto const* variables = program.variables_of(aFrame.function))
+                            for (auto const& v : *variables)
+                                if (!v.language.empty())
+                                {
+                                    result.language = v.language;
+                                    break;
+                                }
+                        return result;
+                    }
+                    debug::variable make_variable(std::string aName, std::uint32_t aThread, machine& aProgram, std::string const& aLanguage, std::string const& aType, value aWord)
+                    {
+                        debug::variable result;
+                        result.name = std::move(aName);
+                        // (a runtime plugin's object (see NEOS_RT_OBJECT): its handle; an integer of any size (NEOS_RT_INTEGER): a small one 
+                        // shifted left one bit, else its object's handle so (with the low bit set): the plugin is given the object)
+                        std::string type = aType;
+                        if (!aLanguage.empty() && (aType == "object" || aType == "integer"))
+                        {
+                            if (aType == "integer" && (aWord & 1u) == 0u)
+                            {
+                                result.type = "int";
+                                result.value = std::to_string(static_cast<std::int64_t>(aWord) >> 1);
+                                return result;
+                            }
+                            void* object = nullptr;
+                            try
+                            {
+                                object = aProgram.object_pointer(aType == "integer" ? static_cast<std::uint32_t>(aWord >> 1u) : as_u32(aWord));
+                            }
+                            catch (...)
+                            {
+                            }
+                            if (object == nullptr)
+                            {
+                                result.value = "<no value>";
+                                result.type = aType;
+                                return result;
+                            }
+                            aWord = static_cast<value>(reinterpret_cast<std::uintptr_t>(object));
+                            type = "pointer";
+                        }
+                        if (!aLanguage.empty())
+                        {
+                            auto const* hooks = static_cast<neos_rt_debug const*>(runtime::debug_hooks(aLanguage));
+                            if (hooks != nullptr && hooks->describe != nullptr)
+                            {
+                                char const* typeName = nullptr;
+                                auto const text = hooks->describe(type.c_str(), aWord, 256u, &typeName);
+                                result.value = text != nullptr ? text : "";
+                                result.type = typeName != nullptr ? typeName : type;
+                                if (hooks->part_count != nullptr)
+                                    if (auto const count = hooks->part_count(type.c_str(), aWord); count > 0u)
+                                    {
+                                        iValues.push_back(held_value{ aThread, &aProgram, aLanguage, type, aWord });
+                                        result.reference = iValues.size();
+                                        result.partCount = count;
+                                    }
+                                return result;
+                            }
+                            // (the language's runtime plugin cannot describe it)
+                            std::ostringstream oss;
+                            oss << "0x" << std::hex << aWord;
+                            result.value = oss.str();
+                            result.type = aLanguage + ":" + type;
+                            return result;
+                        }
+                        // (the VM's types of objects in memory (see VariablesSection))
+                        auto const named = std::string{ aProgram.debug_named_type(aType) };
+                        if (!named.empty() && (named.front() == '#' || named.front() == '@' || named.front() == '*' || named.front() == '[' || (named.find('{') != std::string::npos && !named.starts_with("enum"))))
+                        {
+                            result.type = memory_type_name(aProgram, named);
+                            result.value = memory_text(aProgram, named, aWord, 1u);
+                            std::size_t count = 0u;
+                            memory_parts(aProgram, named, aWord, [&](std::string const&, std::string const&, value) { ++count; return true; });
+                            if (count > 0u)
+                            {
+                                iValues.push_back(held_value{ aThread, &aProgram, {}, named, aWord });
+                                result.reference = iValues.size();
+                                result.partCount = count;
+                            }
+                            return result;
+                        }
+                        result.type = aType;
+                        if (named.starts_with("enum"))
+                        {
+                            // (an enumeration: its literal of the position)
+                            auto const brace = named.find('{');
+                            result.type = "enum";
+                            if (brace == std::string::npos)
+                            {
+                                result.value = std::to_string(aWord);
+                                return result;
+                            }
+                            std::string_view literals{ named };
+                            literals = literals.substr(brace + 1u, literals.size() - brace - 2u);
+                            std::size_t position = 0u;
+                            for (std::size_t start = 0u; start <= literals.size(); ++position)
+                            {
+                                auto const comma = literals.find(',', start);
+                                auto const literal = literals.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+                                if (position == static_cast<std::size_t>(aWord & 0xFFFFFFFFu))
+                                {
+                                    result.value = std::string{ literal };
+                                    return result;
+                                }
+                                if (comma == std::string_view::npos)
+                                    break;
+                                start = comma + 1u;
+                            }
+                            result.value = std::to_string(aWord);
+                            return result;
+                        }
+                        if (aType == "i8")
+                            result.value = std::to_string(static_cast<std::int8_t>(aWord));
+                        else if (aType == "u8")
+                            result.value = std::to_string(static_cast<std::uint8_t>(aWord));
+                        else if (aType == "i16")
+                            result.value = std::to_string(static_cast<std::int16_t>(aWord));
+                        else if (aType == "u16")
+                            result.value = std::to_string(static_cast<std::uint16_t>(aWord));
+                        else if (aType == "cchar")
+                        {
+                            auto const c = static_cast<std::int8_t>(aWord);
+                            static char const* const sEscapes[] = { "\\0", "\\x01", "\\x02", "\\x03", "\\x04", "\\x05", "\\x06", "\\a", "\\b", "\\t", "\\n", "\\v", "\\f", "\\r" };
+                            std::string text;
+                            if (c >= 0x20 && c < 0x7F)
+                                text = c == '\'' ? "\\'" : c == '\\' ? "\\\\" : std::string(1u, static_cast<char>(c));
+                            else if (c >= 0 && c < 14)
+                                text = sEscapes[c];
+                            else
+                            {
+                                char escape[8];
+                                std::snprintf(escape, sizeof(escape), "\\x%02x", static_cast<unsigned>(static_cast<unsigned char>(c)));
+                                text = escape;
+                            }
+                            result.value = std::to_string(c) + " '" + text + "'";
+                        }
+                        else if (aType == "i32")
+                            result.value = std::to_string(as_i32(aWord));
+                        else if (aType == "u32")
+                            result.value = std::to_string(as_u32(aWord));
+                        else if (aType == "i64")
+                            result.value = std::to_string(as_i64(aWord));
+                        else if (aType == "u64")
+                            result.value = std::to_string(aWord);
+                        else if (aType == "f32")
+                            result.value = debug_number(as_f32(aWord));
+                        else if (aType == "f64")
+                            result.value = debug_number(as_f64(aWord));
+                        else if (aType == "bool")
+                            result.value = as_u32(aWord) != 0u ? "true" : "false";
+                        else if (aType == "char")
+                            result.value = debug_code_point(as_u32(aWord));
+                        else if (aType == "string")
+                            result.value = debug_quoted(aProgram.debug_string(as_u32(aWord)));
+                        else
+                        {
+                            std::ostringstream oss;
+                            oss << "0x" << std::hex << aWord;
+                            result.value = oss.str();
+                        }
+                        return result;
+                    }
+                private:
+                    debug::session& iSession;
+                    debug::stop_reason const iReason;
+                    std::optional<std::uint32_t> const iBreakpoint;
+                    std::string const iMessage;
+                    std::uint32_t const iThread;
+                    std::vector<held_value> iValues;
+                };
+
+                // (the debugger ends the program: its own thread exits; another thread stops with an error (as a trap); not while an exception 
+                // is being thrown (e.g. in a destructor))
+                void debug_terminate()
+                {
+                    if (std::uncaught_exceptions() > 0)
+                        return;
+                    if (tDebugProgramThread)
+                        throw exit_request{ EXIT_FAILURE };
+                    tDebugErrorStopped = true;
+                    throw trap{ "terminated (by the debugger)" };
+                }
+
+                // (the calling thread stops: its session's front end decides how it resumes)
+                void debug_stop_thread(debug::session& aSession, debug::stop_reason aReason, std::optional<std::uint32_t> aBreakpoint, std::string const& aMessage)
+                {
+                    debug::action action = debug::action::Continue;
+                    {
+                        debug_stop stop{ aSession, aReason, aBreakpoint, aMessage };
+                        tDebugBusy = true;
+                        struct not_busy { ~not_busy() { tDebugBusy = false; } } const notBusy;
+                        action = aSession.stop(stop);
+                    }
+                    tDebugStep = debug_step{ action, debug_depth() };
+                    if (action == debug::action::Terminate)
+                        debug_terminate();
+                }
+
+                // (a breakpoint's condition, as the frame that reached it evaluates it: an error stops the program (as gdb's))
+                bool debug_condition(debug::session& aSession, std::string const& aCondition)
+                {
+                    debug_stop probe{ aSession, debug::stop_reason::Breakpoint, {}, {} };
+                    tDebugBusy = true;
+                    struct not_busy { ~not_busy() { tDebugBusy = false; } } const notBusy;
+                    std::string error;
+                    auto const result = probe.evaluate(0u, aCondition, error, {});
+                    return !result || debug_true(result->value);
+                }
+            }
+
+            namespace
+            {
+                // (a runtime plugin: an error that the program does not handle (see neos_rt_debugger::error))
+                int host_debug_error(char const* aMessage)
+                {
+                    auto* const session = tDebugSession;
+                    if (session == nullptr)
+                        return 0;
+                    // (the debugger is ending the program (e.g. "kill" where the error was thrown): the plugin need not report the error)
+                    if (session->terminate_requested())
+                        return 1;
+                    if (tDebugBusy || tDebugErrorStopped || !session->break_on_error())
+                        return 0;
+                    tDebugErrorStopped = true;
+                    debug::action action = debug::action::Continue;
+                    {
+                        debug_stop stop{ *session, debug::stop_reason::Error, {}, aMessage != nullptr ? aMessage : "error" };
+                        tDebugBusy = true;
+                        struct not_busy { ~not_busy() { tDebugBusy = false; } } const notBusy;
+                        action = session->stop(stop);
+                    }
+                    tDebugStep = debug_step{ action, debug_depth() };
+                    return action == debug::action::Terminate ? 1 : 0;
+                }
+
+                // (a runtime plugin: whether an exception thrown could stop the program (a catchpoint))
+                int host_debug_catching()
+                {
+                    auto* const session = tDebugSession;
+                    return session != nullptr && !tDebugBusy && session->catching() && !session->terminate_requested() ? 1 : 0;
+                }
+
+                // (a runtime plugin: an exception that the program's code throws, where it is thrown (see neos_rt_debugger::thrown))
+                int host_debug_thrown(char const* aType, char const* aMessage, int aControl)
+                {
+                    if (host_debug_catching() == 0)
+                        return 0;
+                    auto* const session = tDebugSession;
+                    std::string const type = aType != nullptr ? aType : "";
+                    std::string const message = aMessage != nullptr ? aMessage : "";
+                    for (auto const id : session->catchpoints_for(type, aControl != 0))
+                    {
+                        if (!session->hit(id, [&](std::string const& aCondition) { return debug_condition(*session, aCondition); }))
+                            continue;
+                        debug::action action = debug::action::Continue;
+                        {
+                            debug_stop stop{ *session, debug::stop_reason::Throw, id, message.empty() ? type : type + ": " + message };
+                            tDebugBusy = true;
+                            struct not_busy { ~not_busy() { tDebugBusy = false; } } const notBusy;
+                            action = session->stop(stop);
+                        }
+                        tDebugStep = debug_step{ action, debug_depth() };
+                        if (action != debug::action::Terminate)
+                            return 0;
+                        tDebugTerminating = true;
+                        return 1;
+                    }
+                    return 0;
+                }
+
+                neos_rt_debugger const sDebugger{ NEOS_RUNTIME_DEBUG_VERSION, host_debug_error, host_debug_catching, host_debug_thrown };
+
+                void machine::debug_prepare()
+                {
+                    auto const version = iDebug->version();
+                    if (version == iDebugVersion.load(std::memory_order_acquire) && !iDebugMarks.empty())
+                        return;
+                    std::vector<std::pair<std::uint32_t, std::uint32_t>> bound;
+                    {
+                        std::lock_guard lock{ iDebugMutex };
+                        if (version == iDebugVersion.load(std::memory_order_acquire) && !iDebugMarks.empty())
+                            return;
+                        if (iDebugMarks.empty())
+                        {
+                            // (the statements: those of functions that have frames (the compiler's helpers have none))
+                            iDebugMarks.assign(iTokens.size() + 1u, 0u);
+                            iDebugTokenLines.assign(iTokens.size() + 1u, 0u);
+                            for (auto const& [token, line] : iLines)
+                            {
+                                auto const f = function_at(token);
+                                // (nor those of hidden functions (as debug_frames hides their frames: e.g. a C thread's start, "__neos_start_thrd"))
+                                if (!f || *f >= iFrames.size() || !iFrames[*f].frame || iFrames[*f].name.starts_with("__neos") || token >= iDebugMarks.size())
+                                    continue;
+                                iDebugMarks[token] |= DebugStatement;
+                                iDebugTokenLines[token] = line;
+                                iDebugLines[iFrames[*f].source][line].push_back(token);
+                            }
+                        }
+                        for (auto& mark : iDebugMarks)
+                            mark &= ~DebugBreakpoint;
+                        iDebugBreakpoints.clear();
+                        // (a breakpoint is on the first line at or after its line that has statements: on each of them)
+                        for (auto const& b : iDebug->breakpoints())
+                        {
+                            if (!b.enabled || b.exception)
+                                continue;
+                            for (auto const& [source, lines] : iDebugLines)
+                            {
+                                if (source >= iSources.size() || !debug::same_source(b.requested.source, iSources[source]))
+                                    continue;
+                                auto const l = lines.lower_bound(b.requested.line);
+                                if (l == lines.end())
+                                    continue;
+                                // (a column: the line's statements that begin there (else at the first column after it), if their positions are known)
+                                auto tokens = l->second;
+                                if (b.requested.column != 0u && l->first == b.requested.line)
+                                {
+                                    std::optional<std::uint32_t> best;
+                                    for (auto const token : tokens)
+                                        if (auto const position = position_at(token); position != 0u && bytecode::position_line(position) == l->first)
+                                            if (auto const column = bytecode::position_column(position) + 1u; column >= b.requested.column && (!best || column < *best))
+                                                best = column;
+                                    if (best)
+                                        std::erase_if(tokens, [&](std::size_t aToken)
+                                        {
+                                            auto const position = position_at(aToken);
+                                            return position == 0u || bytecode::position_column(position) + 1u != *best;
+                                        });
+                                }
+                                for (auto const token : tokens)
+                                {
+                                    iDebugMarks[token] |= DebugBreakpoint;
+                                    iDebugBreakpoints[token].emplace_back(b.id, b.requested.column != 0u);
+                                }
+                                bound.emplace_back(b.id, l->first);
+                            }
+                        }
+                        iDebugVersion.store(version, std::memory_order_release);
+                    }
+                    for (auto const& [id, line] : bound)
+                        iDebug->bound(id, line);
+                }
+
+                // (debugging: a statement begins (see DebugStatement): the program stops if a breakpoint is there, or as it steps, 
+                // or as its session asks (pause, terminate, another thread stopped); a breakpoint (and a step) stops only on a new 
+                // line: one that is not the line of the thread's previous statement in the same frame)
+                void machine::debug_statement(activation& aActivation, std::size_t aToken)
+                {
+                    if (tDebugBusy)
+                        return;
+                    auto& session = *iDebug;
+                    tDebugErrorStopped = false;
+                    if (session.version() != iDebugVersion.load(std::memory_order_acquire))
+                        debug_prepare();
+                    struct last_statement
+                    {
+                        std::uint64_t serial = 0u;
+                        std::uint32_t line = 0u;
+                    };
+                    thread_local last_statement tLast;
+                    auto const serial = aActivation.frames != nullptr && !aActivation.frames->empty() ? aActivation.frames->back().serial : 0u;
+                    auto const line = debug_line(aToken);
+                    bool const newLine = serial != tLast.serial || line != tLast.line;
+                    tLast = last_statement{ serial, line };
+                    if (session.terminate_requested())
+                        debug_terminate();
+                    if (session.any_stopped())
+                    {
+                        tDebugBusy = true;
+                        session.park();
+                        tDebugBusy = false;
+                        if (session.terminate_requested())
+                            debug_terminate();
+                    }
+                    std::optional<debug::stop_reason> reason;
+                    std::optional<std::uint32_t> hit;
+                    if (tDebugEntry)
+                    {
+                        tDebugEntry = false;
+                        reason = debug::stop_reason::Entry;
+                    }
+                    else if (session.pause_requested())
+                        reason = debug::stop_reason::Pause;
+                    else
+                    {
+                        if ((iDebugMarks[aToken] & DebugBreakpoint) != 0u)
+                        {
+                            std::vector<std::pair<std::uint32_t, bool>> breakpoints;
+                            {
+                                std::lock_guard lock{ iDebugMutex };
+                                if (auto const existing = iDebugBreakpoints.find(aToken); existing != iDebugBreakpoints.end())
+                                    breakpoints = existing->second;
+                            }
+                            for (auto const& [id, exact] : breakpoints)
+                                if ((newLine || exact) && session.hit(id, [&](std::string const& aCondition) { return debug_condition(session, aCondition); }))
+                                {
+                                    reason = debug::stop_reason::Breakpoint;
+                                    hit = id;
+                                    break;
+                                }
+                        }
+                        if (!reason && tDebugStep.mode != debug::action::Continue && newLine)
+                        {
+                            auto const depth = debug_depth();
+                            switch (tDebugStep.mode)
+                            {
+                            case debug::action::StepInto:
+                                reason = debug::stop_reason::Step;
+                                break;
+                            case debug::action::StepOver:
+                                if (depth <= tDebugStep.depth)
+                                    reason = debug::stop_reason::Step;
+                                break;
+                            case debug::action::StepOut:
+                                if (depth < tDebugStep.depth)
+                                    reason = debug::stop_reason::Step;
+                                break;
+                            default:
+                                break;
+                            }
+                        }
+                    }
+                    if (reason)
+                        debug_stop_thread(session, *reason, hit, {});
+                }
+
+                // (debugging: an error is thrown: the program stops (once, before its frames are unwound) if its session breaks on errors)
+                void machine::debug_error(activation& aActivation, std::string const& aMessage)
+                {
+                    (void)aActivation;
+                    if (tDebugBusy || tDebugErrorStopped || !iDebug->break_on_error() || iDebug->terminate_requested())
+                        return;
+                    tDebugErrorStopped = true;
+                    debug_stop_thread(*iDebug, debug::stop_reason::Error, {}, aMessage);
+                }
+
                 void host_values(neos_rt_coroutine* aCoroutine, void (*aVisit)(void* aData, unsigned long long const* aValues, size_t aCount), void* aData)
                 {
                     if (aVisit == nullptr)
@@ -3271,16 +5303,69 @@ namespace neos
                     return aCount;
                 }
 
+                // (debugging: a read of the program's input that failed: if Ctrl+C or a stop of the program interrupted it (see 
+                // debug::blocking_read), the thread stops there, as Ctrl+C pauses the program (or parks, if another thread has stopped 
+                // it), then reads again (true), the same on every platform; else it is the end of input (false))
+                bool debug_read_again(std::istream& aStream, std::uint32_t aInterrupts, bool aInterrupted)
+                {
+                    auto* const session = tDebugSession;
+                    if (session == nullptr || tDebugBusy)
+                        return false;
+#if defined(_WIN32)
+                    // (Ctrl+C also aborts a console read itself; its handler runs on a thread of its own, which can be just after)
+                    for (int wait = 0; wait < 25 && !aInterrupted && session->interrupts() == aInterrupts && !session->any_stopped(); ++wait)
+                        std::this_thread::sleep_for(std::chrono::milliseconds{ 10 });
+#endif
+                    if (!aInterrupted && session->interrupts() == aInterrupts && !session->any_stopped() && !session->pause_requested())
+                        return false;
+                    aStream.clear();
+                    if (&aStream == &std::cin)
+                        std::clearerr(stdin);
+                    // (not thrown from here (a plugin's call): an end of the program is the end of input, and it ends at its next statement)
+                    if (session->terminate_requested())
+                    {
+                        tDebugTerminating = true;
+                        return false;
+                    }
+                    if (session->any_stopped())
+                        session->park();
+                    else if (session->pause_requested())
+                    {
+                        debug::action action = debug::action::Continue;
+                        {
+                            debug_stop stop{ *session, debug::stop_reason::Pause, {}, {} };
+                            tDebugBusy = true;
+                            struct not_busy { ~not_busy() { tDebugBusy = false; } } const notBusy;
+                            action = session->stop(stop);
+                        }
+                        tDebugStep = debug_step{ action, debug_depth() };
+                    }
+                    if (session->terminate_requested())
+                    {
+                        tDebugTerminating = true;
+                        return false;
+                    }
+                    return true;
+                }
+
                 // (the end of input is not kept: a stream that has more input later (e.g. a terminal's) can be read again)
                 size_t host_std_read(int aStream, char* aBuffer, size_t aCount)
                 {
                     auto* const stream = input_stream(aStream);
                     if (stream == nullptr || aBuffer == nullptr)
                         return 0u;
-                    stream->read(aBuffer, static_cast<std::streamsize>(aCount));
-                    auto const result = static_cast<size_t>(stream->gcount());
-                    stream->clear();
-                    return result;
+                    size_t result = 0u;
+                    for (;;)
+                    {
+                        auto const interrupts = tDebugSession != nullptr ? tDebugSession->interrupts() : 0u;
+                        debug::blocking_read reading{ tDebugSession != nullptr };
+                        stream->read(aBuffer + result, static_cast<std::streamsize>(aCount - result));
+                        bool const interrupted = reading.finish();
+                        result += static_cast<size_t>(stream->gcount());
+                        stream->clear();
+                        if (result == aCount || !debug_read_again(*stream, interrupts, interrupted))
+                            return result;
+                    }
                 }
 
                 int host_std_getc(int aStream)
@@ -3288,13 +5373,18 @@ namespace neos
                     auto* const stream = input_stream(aStream);
                     if (stream == nullptr)
                         return -1;
-                    auto const c = stream->get();
-                    if (c == std::istream::traits_type::eof())
+                    for (;;)
                     {
+                        auto const interrupts = tDebugSession != nullptr ? tDebugSession->interrupts() : 0u;
+                        debug::blocking_read reading{ tDebugSession != nullptr };
+                        auto const c = stream->get();
+                        bool const interrupted = reading.finish();
+                        if (c != std::istream::traits_type::eof())
+                            return static_cast<unsigned char>(std::istream::traits_type::to_char_type(c));
                         stream->clear();
-                        return -1;
+                        if (!debug_read_again(*stream, interrupts, interrupted))
+                            return -1;
                     }
-                    return static_cast<unsigned char>(std::istream::traits_type::to_char_type(c));
                 }
 
                 int host_std_ungetc(int aCharacter, int aStream)
@@ -3486,6 +5576,11 @@ namespace neos
                 return &sHost;
             }
 
+            void const* runtime::debugger()
+            {
+                return &sDebugger;
+            }
+
             void set_program_arguments(std::vector<std::string> aArguments)
             {
                 program_arguments() = std::move(aArguments);
@@ -3503,6 +5598,7 @@ namespace neos
                 iErrorOutput{ aError },
                 iCompileService{ the_compile_service() },
                 iArguments{ program_arguments() },
+                iSession{ debug::current_session() },
                 iRestricted{ aRestricted }
             {
                 // start executing only once all members have been constructed
@@ -3516,6 +5612,15 @@ namespace neos
                 {
                     if (iText.empty())
                         throw exceptions::no_text();
+                    // (debugging: the program's machines (and those it loads) are its session's; it stops at its first statement if its
+                    // session asks)
+                    tDebugSession = iSession.get();
+                    tDebugStep = debug_step{};
+                    tDebugEntry = iSession != nullptr && iSession->stop_on_entry();
+                    tDebugProgramThread = true;
+                    if (iSession != nullptr)
+                        iSession->thread_id();  // (the program's own thread is its session's thread 1)
+                    struct debug_end { ~debug_end() { tDebugSession = nullptr; tDebugEntry = false; tDebugProgramThread = false; } } const debugEnd;
                     machine m{ iText, iOutput, iInput, iErrorOutput, iInstructions, iRestricted, iCompileService, iArguments };
                     auto const entry = m.export_function("main");
                     if (!entry)
@@ -3528,6 +5633,9 @@ namespace neos
 #endif
                     if (auto const setting = environment_variable("NEOS_JIT"))
                         useJit = *setting != "0";
+                    // (debugging: the program is interpreted)
+                    if (iSession != nullptr)
+                        useJit = false;
                     jit::compiled_module_ptr native;
                     if (useJit)
                         native = m.compile();
@@ -3540,7 +5648,8 @@ namespace neos
                     // (then the objects it did not release (it is still running))
                     struct release { machine& m; ~release() { m.release_objects(); } } const releasing{ m };
                     // (when it returns, the plugins finish their work (e.g. threads) while the program's state exists)
-                    struct end { ~end() { runtime::program_end(); } } const ending;
+                    // (debugging: the code that runs as the plugins finish (e.g. atexit's) does not stop)
+                    struct end { ~end() { tDebugBusy = true; runtime::program_end(); tDebugBusy = false; } } const ending;
                     auto const results = native ? m.invoke(*native, *entry, {}) : m.invoke(*entry, {});
                     auto const& type = m.type_of(*entry);
                     if (!results.empty())

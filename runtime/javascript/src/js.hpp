@@ -1938,6 +1938,7 @@ namespace neos::javascript_runtime
     // e.g. to a window: see neos_rt_host::std_write), else the process's (stdout and stderr)
     void write_standard(int aStream, std::string_view aText);
     void flush_standard(int aStream);
+    int read_standard();                                        ///< (a character of the program's input (as fgetc's): EOF at its end)
 
     // --- abstract operations (operations.cpp)
 

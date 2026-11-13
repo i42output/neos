@@ -232,7 +232,12 @@ namespace neos::compilers::c
     {
         for (auto* c : aDeclaration->children)
             if (c->is(construct::InitDeclarator) && c->ent != nullptr && c->ent->kind == entity_kind::Object)
+            {
+                // (debugging: an initialization is a statement)
+                if (c->ent->initializer != nullptr || c->size() > 1u)
+                    debug_statement(aDeclaration);
                 declare_object(c->ent, c);
+            }
     }
 
     // --- labels
@@ -793,9 +798,23 @@ namespace neos::compilers::c
         branch_to(0u);
     }
 
+    // (debugging: a statement's line and position (see bytecode::LineMarker), where the debugger can stop)
+    void function_generator::debug_statement(node const* aStatement)
+    {
+        if (!iProgram.comp().debug_info() || aStatement == nullptr || aStatement->unit == nullptr || aStatement->source.empty())
+            return;
+        auto const first = aStatement->unit->location_of(aStatement->source);
+        auto const last = aStatement->unit->location_of(aStatement->source.substr(aStatement->source.size() - 1u));
+        iProgram.comp().mark_line(iCode, first.line);
+        if (first.file == last.file && first.column != 0u && last.column != 0u)
+            iProgram.comp().mark_statement(iCode, bytecode::position(first.line, last.line, first.column - 1u, last.column));
+    }
+
     void function_generator::statement(node* aStatement)
     {
         auto* s = aStatement;
+        if (!s->is(construct::Compound))
+            debug_statement(s);
         if (iDispatch && s != iStructured && contains_target(s))
         {
             dispatched_statement(s);

@@ -340,6 +340,20 @@ namespace neos::compilers::javascript
         std::optional<std::uint32_t> current_environment() const;
         void environment_value();                   ///< (the innermost environment (or undefined))
         void enter_scope(scope* aScope);
+        // (debugging: the function's variables (see describe_variables): its scopes' bindings, as their scopes are entered)
+        struct debug_record
+        {
+            std::string name;
+            std::uint8_t flags = 0u;
+            std::uint32_t local = 0u;
+            std::uint32_t firstLine = 0u;
+            std::uint32_t lastLine = 0u;
+            std::string language;
+            std::string type;
+        };
+        std::vector<debug_record> iDebugRecords;
+        void debug_scope(scope* aScope);
+        void describe_variables(std::uint32_t aIndex);
         void leave_scope(scope* aScope);
         void initialize_scope(scope* aScope, node* aStatements = nullptr);
         // bindings
@@ -605,6 +619,7 @@ namespace neos::compilers::javascript
         std::uint32_t stub_function(function_generator::stub aStub);   ///< (the stub's function (defined when the code first calls it))
         std::uint32_t tail_depth_global();      ///< (the global (an i64): the tail calls made as calls that are running (see call_value))
         std::uint32_t source_line_of(std::string_view aSource) const;
+        std::uint64_t source_position(std::string_view aSource) const;   ///< (its span (see bytecode::position): 0 if it does not fit)
         mutable std::vector<std::size_t> iNewlines;     ///< (see source_line_of)
         mutable char const* iNewlinesOf = nullptr;
         mutable std::size_t iNewlinesSize = 0u;

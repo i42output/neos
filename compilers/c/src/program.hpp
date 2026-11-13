@@ -235,6 +235,9 @@ namespace neos::compilers::c
         type wasm_result(c_type const* aFunctionType) const;
         type wasm(vkind aKind) const;
         bool returns_record(c_type const* aFunctionType) const;
+        // (debugging: a type as the VM's debugger describes it (see bytecode::VariablesSection); the program's static objects' variables)
+        std::string debug_type(qtype aType);
+        void describe_globals();
         std::uint32_t sp_global() const { return iSpGlobal; }
         std::uint32_t limit_global() const { return iLimitGlobal; }
         std::uint32_t tls_global() const { return iTlsGlobal; }
@@ -281,6 +284,7 @@ namespace neos::compilers::c
         std::map<std::pair<translation_unit*, std::string>, entity*> iUnitDeclarations;  ///< (a unit's declarations of a function with external 
                                                                                         ///< linkage that conflict with another unit's)
         std::vector<entity*> iObjects;                  ///< (objects of static storage duration, canonical)
+        std::map<record_info const*, std::uint32_t> iDebugRecords;  ///< (debugging: the structures and unions described, by their numbers)
         std::vector<entity*> iFunctions;                ///< (functions, canonical)
         std::vector<std::pair<std::int64_t, entity*>> iConstructors;   ///< (gnu::constructor functions: their priorities and functions)
         std::vector<std::pair<std::int64_t, entity*>> iDestructors;

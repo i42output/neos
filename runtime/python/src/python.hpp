@@ -44,8 +44,9 @@ namespace neos::python_runtime
 {
     // repr() of a float: the shortest round-tripping digits; scientific notation if the exponent is < -4 or >= 16
     std::string python_float(double aValue);
-    // raise a Python exception (it stops the script: the plugin's error is "type: message")
-    void raise(std::string const& aType, std::string const& aMessage);
+    // raise a Python exception (it stops the script: the plugin's error is "type: message"); aThrown: false if it is one that propagates
+    // from code that threw it (e.g. the error of a call of the program's code), not one thrown here (see the debugger's catchpoints)
+    void raise(std::string const& aType, std::string const& aMessage, bool aThrown = true);
     bool failed();
     // (a trap: the program stops with the runtime error aMessage when the plugin function the calling thread is in returns (e.g. a function
     // that can change the host environment, called in restricted mode))

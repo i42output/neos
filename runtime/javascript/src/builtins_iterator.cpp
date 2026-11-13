@@ -41,6 +41,9 @@
 #include "js.hpp"
 #include "api.hpp"
 
+
+void neos_javascript_debugger_thrown_value(neos::javascript_runtime::value aValue);   // (debug.cpp)
+
 namespace neos::javascript_runtime
 {
     namespace
@@ -209,9 +212,10 @@ namespace neos::javascript_runtime
 
         [[noreturn]] void close_and_throw(iterator_record const& aRecord, value aErrorPrototype, std::string const& aMessage)
         {
-            auto const error = make_error(aErrorPrototype, make_string_utf8(aMessage));
+            js_exception const error{ make_error(aErrorPrototype, make_string_utf8(aMessage)) };
+            ::neos_javascript_debugger_thrown_value(error.thrown);
             iterator_close_on_throw(aRecord);
-            throw_value(error);
+            throw error;
         }
 
         // (GetIteratorFlattenable)

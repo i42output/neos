@@ -131,6 +131,83 @@ namespace neos::compilers::c
         }
         assign_static_addresses();
         generate_code();
+        if (comp().debug_info())
+            describe_globals();
+    }
+
+    std::string program::debug_type(qtype aType)
+    {
+        if (!aType)
+            return "void";
+        auto const* t = aType.type;
+        switch (t->kind)
+        {
+        case type_kind::Void: return "void";
+        case type_kind::Bool: return "bool";
+        case type_kind::Char: case type_kind::SChar: return "cchar";
+        case type_kind::UChar: return "u8";
+        case type_kind::Short: return "i16";
+        case type_kind::UShort: return "u16";
+        case type_kind::Int: return "i32";
+        case type_kind::UInt: return "u32";
+        case type_kind::Long: case type_kind::LongLong: return "i64";
+        case type_kind::ULong: case type_kind::ULongLong: return "u64";
+        case type_kind::BitInt: return size_of(aType) <= 4u ? "i32" : "i64";
+        case type_kind::UBitInt: return size_of(aType) <= 4u ? "u32" : "u64";
+        case type_kind::Float: return "f32";
+        case type_kind::Double: case type_kind::LongDouble: return "f64";
+        case type_kind::NullPtr: return "*void";
+        case type_kind::Enum: return size_of(aType) <= 4u ? "i32" : "i64";
+        case type_kind::Pointer: return t->base && t->base->is_function() ? std::string{ "*function" } : "*" + debug_type(t->base);
+        case type_kind::Function: return "function";
+        case type_kind::Array:
+            return "[" + std::to_string(t->length.value_or(0u)) + "*" + std::to_string(t->base ? size_of(t->base) : 0u) + "]" + debug_type(t->base);
+        case type_kind::Struct:
+        case type_kind::Union:
+            {
+                // (a structure or union: by its number (its description, once, among the globals: "%type<n>"), as a member may point to it)
+                auto const* record = t->record;
+                if (record == nullptr || !record->complete)
+                    return "void";
+                auto existing = iDebugRecords.find(record);
+                if (existing != iDebugRecords.end())
+                    return "%" + std::to_string(existing->second);
+                auto const number = static_cast<std::uint32_t>(iDebugRecords.size());
+                iDebugRecords.emplace(record, number);
+                std::string description = (record->isUnion ? "union " : "struct ") + (record->tag.empty() ? std::string{ "(anonymous)" } : record->tag) + "{";
+                bool first = true;
+                for (auto const& m : record->members)
+                {
+                    if (m.bitWidth || m.name.empty())
+                        continue;
+                    description += (first ? "" : ";") + m.name + "@" + std::to_string(m.offset) + ":" + debug_type(m.type);
+                    first = false;
+                }
+                description += "}";
+                comp().debug_variable(bytecode::NoFunction, "%type" + std::to_string(number), bytecode::VariableHidden, bytecode::VariableAddress, 0u, 0u, 0u, 
+                    {}, description);
+                return "%" + std::to_string(number);
+            }
+        default:
+            return "void";
+        }
+    }
+
+    void program::describe_globals()
+    {
+        // (the objects of static storage duration that are not local to a function (whose are its own: see function_generator::generate))
+        std::set<entity const*> locals;
+        for (auto* f : iFunctions)
+            if (f->function != nullptr)
+                for (auto* l : f->function->locals)
+                    locals.insert(l->self());
+        for (auto* o : iObjects)
+        {
+            if (o == nullptr || o->name.empty() || o->threadLocal || o->where != object_storage::Static || locals.contains(o->self()) || 
+                o->name.starts_with("__") || (o->decl != nullptr && o->decl->unit != nullptr && o->decl->unit->prelude))
+                continue;
+            comp().debug_variable(bytecode::NoFunction, o->name, 0u, bytecode::VariableAddress, static_cast<std::uint32_t>(o->address), 0u, 0u, {}, "#" + std::to_string(language::c::layout::Memory) + ":@0:" + debug_type(o->type));
+        }
     }
 
     type program::wasm(vkind aKind) const
@@ -447,6 +524,13 @@ namespace neos::compilers::c
         if (aFunction->definition != nullptr && aFunction->definition->unit != nullptr)
             line = aFunction->definition->unit->location_of(aFunction->definition->source).line;
         f->index = gen().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{ aFunction->name }, line);
+        // (debugging: its frame's source: the file its definition is in (a translation unit's, or a header's): the program's translation 
+        // units (and the library's) are compiled together)
+        if (gen().debug_info() && aFunction->definition != nullptr && aFunction->definition->unit != nullptr)
+        {
+            auto const* unit = aFunction->definition->unit;
+            gen().set_function_source(f->index, neolib::string{ unit->file_of(unit->location_of(aFunction->definition->source)) });
+        }
         note_function_type(f->index, wasm_parameters(aFunction->type.type), wasm_result(aFunction->type.type));
         iCompiler.frame_names()[f->index] = aFunction->name;
         f->defined = true;
@@ -1708,5 +1792,61 @@ namespace neos::compilers::c
         iProgram.gen().set_function_body(iInfo.index, code);
         iProgram.gen().set_function_locals(iInfo.index, neolib::vector<type>{ iLocals.begin(), iLocals.end() });
         (void)fixed;
+        if (iProgram.comp().debug_info() && !iPlanning)
+        {
+            // (debugging: its parameters and objects, where they are (a WebAssembly local; in its frame; in the static data), seen from
+            // their declarations to the ends of the blocks they are in)
+            auto const location = [&](std::string_view aSource) { return iFunction->definition != nullptr && iFunction->definition->unit != nullptr ? 
+                iFunction->definition->unit->location_of(aSource).line : 0u; };
+            auto describe = [&](entity* aObject, bool aParameter)
+            {
+                auto* const o = aObject->self();
+                // (not those that the compiler declares (e.g. __func__))
+                if (o->name.empty() || o->kind != entity_kind::Object || o->name.starts_with("__"))
+                    return;
+                std::uint32_t firstLine = 0u;
+                std::uint32_t lastLine = 0u;
+                if (!aParameter && o->decl != nullptr)
+                {
+                    firstLine = location(o->decl->source);
+                    for (auto const* block = o->decl->parent; block != nullptr; block = block->parent)
+                        if (block->is(construct::Compound))
+                        {
+                            if (!block->source.empty())
+                                lastLine = location(block->source.substr(block->source.size() - 1u));
+                            break;
+                        }
+                }
+                auto const flags = aParameter ? bytecode::VariableParameter : std::uint8_t{ 0u };
+                // (in C's memory (see language::c::layout::Memory))
+                std::string const memory = "#" + std::to_string(language::c::layout::Memory) + ":";
+                auto const type = iProgram.debug_type(o->type);
+                switch (o->where)
+                {
+                case object_storage::Local:
+                    iProgram.comp().debug_variable(iInfo.index, o->name, flags, bytecode::VariableLocal, o->local, firstLine, lastLine, {}, memory + type);
+                    break;
+                case object_storage::Frame:
+                    iProgram.comp().debug_variable(iInfo.index, o->name, flags, bytecode::VariableLocal, iFramePointer, firstLine, lastLine, {}, 
+                        memory + "@" + std::to_string(o->frameOffset) + ":" + type);
+                    break;
+                case object_storage::Static:
+                    if (!o->threadLocal)
+                        iProgram.comp().debug_variable(iInfo.index, o->name, flags, bytecode::VariableAddress, static_cast<std::uint32_t>(o->address), firstLine, lastLine, {}, 
+                            memory + "@0:" + type);
+                    break;
+                case object_storage::Dynamic:
+                    iProgram.comp().debug_variable(iInfo.index, o->name, flags, bytecode::VariableLocal, o->local, firstLine, lastLine, {}, 
+                        memory + "@0:[0*" + std::to_string(o->type && o->type->base ? iProgram.size_of(o->type->base) : 0u) + "]" + iProgram.debug_type(o->type->base));
+                    break;
+                default:
+                    break;
+                }
+            };
+            for (auto* p : iInfo.parameters)
+                describe(p, true);
+            for (auto* l : iInfo.locals)
+                describe(l, false);
+        }
     }
 }

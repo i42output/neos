@@ -50,4 +50,8 @@ namespace neos
     // an image of the (compiled) program (see the "img" command): its path (aPath: none, the default (<program>.exe on
     // Windows, else a.out))
     std::string write_image(context& aContext, std::string const& aPath);
+    // the debugger (see neos/debug.hpp) for the context's (compiled) program, with gdb's commands (see debug::console_frontend) read 
+    // from the context's input and written to its output: until its "quit" command (or the end of its input); returns the exit 
+    // status of the program last run
+    int debug_program(context& aContext);
 }

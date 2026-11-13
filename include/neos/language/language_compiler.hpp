@@ -164,6 +164,37 @@ namespace neos::language
             return std::vector<fragment>{ popped.begin(), popped.end() };
         }
         std::uint32_t temporary(type aType) { return iGenerator->temporary(aType); }
+        // debugging (see i_code_generator::debug_info)
+    public:
+        bool debug_info() const { return iGenerator->debug_info(); }
+        void debug_variable(std::uint32_t aFunction, std::string const& aName, std::uint8_t aFlags, std::uint8_t aStorage, std::uint32_t aIndex,
+            std::uint32_t aFirstLine, std::uint32_t aLastLine, std::string const& aLanguage, std::string const& aType)
+        {
+            iGenerator->debug_variable(aFunction, neolib::string{ aName }, aFlags, aStorage, aIndex, aFirstLine, aLastLine, neolib::string{ aLanguage }, 
+                neolib::string{ aType });
+        }
+        // (a statement's line (see bytecode::LineMarker) before its code: the debugger's statements, and frames' lines)
+        void mark_line(std::vector<std::uint8_t>& aCode, std::uint32_t aLine)
+        {
+            if (aLine == 0u)
+                return;
+            emitter::put_op(aCode, bytecode::opcode::I64Const);
+            emitter::put_s64(aCode, static_cast<std::int64_t>(bytecode::LineMarker | aLine));
+            emitter::put_op(aCode, bytecode::opcode::Drop);
+        }
+        // (debugging: a statement's position (see bytecode::PositionMarker) before its code (after its line marker, if it has one): so that a
+        // frame that stops at it has its columns)
+        void mark_statement(std::vector<std::uint8_t>& aCode, std::uint64_t aPosition)
+        {
+            if (aPosition == 0u)
+                return;
+            std::vector<std::uint8_t> marker;
+            emitter::put_op(marker, bytecode::opcode::I64Const);
+            emitter::put_s64(marker, static_cast<std::int64_t>(bytecode::PositionMarker | aPosition));
+            emitter::put_op(marker, bytecode::opcode::Drop);
+            aCode.insert(aCode.end(), marker.begin(), marker.end());
+        }
+    protected:
         std::uint32_t string_literal(std::string const& aValue) { return iGenerator->string_literal(neolib::string{ aValue }); }
         std::uint32_t runtime_function(std::string const& aName, std::vector<type> const& aParameters, type aReturnType)
         {

@@ -167,12 +167,62 @@ namespace neos::language
         iTrapOnOverflow = aTrapOnOverflow;
     }
 
+    bool compiler::debug_info() const
+    {
+        return iDebugInfo;
+    }
+
+    void compiler::set_debug_info(bool aDebugInfo)
+    {
+        iDebugInfo = aDebugInfo;
+    }
+
+    // (debugging: how the debugger shows a value of a type (see VariablesSection): the VM's types, else (e.g. an object) the language's 
+    // runtime plugin's)
+    void compiler::debug_type(type aType, std::string& aLanguage, std::string& aTypeName) const
+    {
+        aLanguage.clear();
+        switch (aType)
+        {
+        case type::Boolean: aTypeName = "bool"; break;
+        case type::U8: case type::U16: case type::U32: aTypeName = "u32"; break;
+        case type::U64: aTypeName = "u64"; break;
+        case type::I8: case type::I16: case type::I32: aTypeName = "i32"; break;
+        case type::I64: aTypeName = "i64"; break;
+        case type::F32: aTypeName = "f32"; break;
+        case type::F64: aTypeName = "f64"; break;
+        case type::String: aTypeName = "string"; break;
+        default:
+            if (auto const* schema = current_schema(); schema != nullptr)
+                for (auto c : schema->meta().language)
+                    aLanguage += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            aTypeName = type_name(aType);
+            break;
+        }
+    }
+
+    void compiler::debug_variable(std::uint32_t aFunction, neolib::i_string const& aName, std::uint8_t aFlags, std::uint8_t aStorage, std::uint32_t aIndex,
+        std::uint32_t aFirstLine, std::uint32_t aLastLine, neolib::i_string const& aLanguage, neolib::i_string const& aType)
+    {
+        if (!iDebugInfo || iDeclarationPass)
+            return;
+        debug_variable_info v{ aName.to_std_string(), aFlags, aStorage, aIndex, aFirstLine, aLastLine, aLanguage.to_std_string(), aType.to_std_string() };
+        auto& variables = aFunction == bytecode::NoFunction ? iDebugGlobals : iModule.functions.at(aFunction).variables;
+        // (described again (e.g. by a later pass): replaced)
+        auto existing = std::find_if(variables.begin(), variables.end(), [&](auto const& e) { return e.name == v.name && e.storage == v.storage && e.index == v.index; });
+        if (existing != variables.end())
+            *existing = std::move(v);
+        else
+            variables.push_back(std::move(v));
+    }
+
     bool compiler::compile(program& aProgram)
     {
         iStartTime = std::chrono::steady_clock::now();
         iPreparseTime = {};
         iParseTime = {};
         iSourceFiles.clear();
+        iDebugGlobals.clear();
         // (a linked program: it has more than one translation unit (unless they are all of a language that compiles them as one 
         // program: see i_language_compiler::one_program))
         iLinked = aProgram.translationUnits.size() > 1u;
@@ -1462,6 +1512,7 @@ namespace neos::language
                 throw std::runtime_error("redefinition of '" + aName.to_std_string() + "'");
         }
         std::uint32_t index = 0u;
+        std::optional<std::uint32_t> parameterIndex;
         if (aType == symbol_type::Function)
         {
             std::string qualifiedName = current_scope().qualified_name().to_std_string() + "::" + aName.to_std_string();
@@ -1479,7 +1530,6 @@ namespace neos::language
         {
             auto& function = current_function();
             auto const& signature = function.scope->function_signature();
-            std::optional<std::uint32_t> parameterIndex;
             std::uint32_t inParameters = 0u;
             if (signature.parameters().has_value())
                 for (auto const& parameter : signature.parameters().value())
@@ -1504,6 +1554,19 @@ namespace neos::language
         auto& info = iSymbolInfo[&entry];
         info.position = aSource.empty() ? nullptr : aSource.to_std_string_view().data();
         info.sequence = ++iSymbolSequence;
+        // (debugging: a function's variable, as the debugger shows it (see debug_variable))
+        if (iDebugInfo && !iDeclarationPass && aType != symbol_type::Function && state().function)
+        {
+            std::string language;
+            std::string typeName;
+            debug_type(aType, language, typeName);
+            auto const line = aSource.empty() ? current_function().firstLine : source_line(aSource.to_std_string_view().data());
+            std::uint8_t flags = parameterIndex.has_value() ? bytecode::VariableParameter : std::uint8_t{ 0u };
+            if (current_function().implicitEntry)
+                flags |= bytecode::VariableModule;
+            debug_variable(*state().function, neolib::string{ aName.to_std_string() }, flags, bytecode::VariableLocal, index, 
+                parameterIndex.has_value() ? 0u : line, 0u, neolib::string{ language }, neolib::string{ typeName });
+        }
         if (trace() >= 2)
             iContext.cout() << "Defined symbol: " << current_scope().qualified_name() << "::" << aName << " : " << type_name(aType) << std::endl;
     }
@@ -2601,6 +2664,9 @@ namespace neos::language
                     put_u32(code, find_symbol(current_scope(), neolib::string_view{ parameter.parameter_name() })->index());
                 }
         put_op(code, opcode::Return);
+        // (debugging: a return is a statement where the debugger can stop, wherever it is (e.g. an else's body))
+        if (iDebugInfo)
+            mark_line(statement, aSource);
         push_operand(operand_type{ statement });
     }
 
@@ -4486,6 +4552,44 @@ namespace neos::language
                 put_u32(section, sourceIndex[f.frameSource]);
                 put_u32(section, f.firstLine);
             }
+            put_section(module, 0u, section);
+        }
+        if (iDebugInfo)
+        {
+            // (debugging) the functions' variables (see bytecode::VariablesSection)
+            bytes section;
+            put_name(section, bytecode::VariablesSection);
+            auto put_variables = [&](std::vector<debug_variable_info> const& aVariables)
+            {
+                put_u32(section, aVariables.size());
+                for (auto const& v : aVariables)
+                {
+                    put_name(section, v.name);
+                    section.push_back(v.flags);
+                    section.push_back(v.storage);
+                    put_u32(section, v.index);
+                    put_u32(section, v.firstLine);
+                    put_u32(section, v.lastLine);
+                    put_name(section, v.language);
+                    put_name(section, v.type);
+                }
+            };
+            std::uint32_t entries = iDebugGlobals.empty() ? 0u : 1u;
+            for (std::uint32_t i = importCount; i < order.size(); ++i)
+                if (!iModule.functions[order[i]].variables.empty())
+                    ++entries;
+            put_u32(section, entries);
+            if (!iDebugGlobals.empty())
+            {
+                put_u32(section, bytecode::NoFunction);
+                put_variables(iDebugGlobals);
+            }
+            for (std::uint32_t i = importCount; i < order.size(); ++i)
+                if (auto const& f = iModule.functions[order[i]]; !f.variables.empty())
+                {
+                    put_u32(section, i);
+                    put_variables(f.variables);
+                }
             put_section(module, 0u, section);
         }
         if (iLinked)

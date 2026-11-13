@@ -170,6 +170,14 @@ namespace neos::language
         auto& info = iSymbolInfo[&entry];
         info.global = true;
         info.sequence = ++iSymbolSequence;
+        // (debugging: a global of the program's (not the compiler's own, e.g. "__neos_error", nor a default argument's ("f.x")))
+        if (iDebugInfo && !aName.starts_with("__neos") && aName.find_first_of(".%:") == std::string::npos)
+        {
+            std::string language;
+            std::string typeName;
+            debug_type(aType, language, typeName);
+            debug_variable(bytecode::NoFunction, neolib::string{ aName }, 0u, bytecode::VariableGlobal, index + 1u, 0u, 0u, neolib::string{ language }, neolib::string{ typeName });
+        }
         return entry;
     }
 

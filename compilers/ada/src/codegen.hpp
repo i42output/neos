@@ -224,6 +224,8 @@ namespace neos::compilers::ada
     public:
         void statements(node* aStatements);
         void statement(node* aStatement);
+        void debug_statement(node const* aStatement);   ///< (debugging: its line and position, where the debugger can stop)
+        void describe_variables();                      ///< (debugging: the subprogram's parameters and objects)
         void declarations(node* aDeclarations, bool aActivate = true);    ///< (aActivate: the tasks it creates activated at its end (not a package specification's visible part))
         void declaration(node* aDecl);
         void deferred_activation_declarations(node* aDeclarations, entity* aPackage = nullptr);
@@ -444,6 +446,7 @@ namespace neos::compilers::ada
         std::vector<control> iControls;
         std::uint32_t iFrame = 0u;              ///< (an i64 local: the frame's base)
         std::uint32_t iStackTop = 0u;           ///< (an i64 local: the frame's end (checked against the stack's limit))
+        std::vector<entity*> iDebugObjects;     ///< (debugging: the objects whose storage it assigned)
         std::uint64_t iFrameSize = 16u;         ///< (bytes: offset 0 is the static link)
         std::size_t iFrameSizePatch = 0u;       ///< (the code position of the frame size's constant)
         std::uint32_t iResult = 0u;             ///< (the result's local)

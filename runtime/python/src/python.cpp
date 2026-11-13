@@ -56,6 +56,9 @@ namespace neos::python_runtime::detail
     void resolve_raised_text(std::string& aText);
 }
 
+bool neos_python_debugger_catching();
+void neos_python_debugger_thrown(std::string const& aType, std::string const& aMessage, bool aControl);
+
 namespace neos::python_runtime
 {
     namespace
@@ -106,11 +109,29 @@ namespace neos::python_runtime
         return r.c_str();
     }
 
-    void raise(std::string const& aType, std::string const& aMessage)
+    void raise(std::string const& aType, std::string const& aMessage, bool aThrown)
     {
         // (the first exception raised is the one reported)
         if (tFailed)
             return;
+        // (debugging: a catchpoint stops here, where it is thrown (before it is pending: the program's values can be shown); its message, 
+        // if it is a token (see raise_exception), found now (a builtin exception's: no code of the program runs))
+        if (aThrown && ::neos_python_debugger_catching())
+        {
+            std::string message = aMessage;
+            if (!message.empty() && message.front() == '\x01')
+            {
+                auto text = aType + ": " + message;
+                detail::resolve_raised_text(text);
+                if (text.starts_with(aType + ": "))
+                    message = text.substr(aType.size() + 2u);
+            }
+            bool const control = aType == "StopIteration" || aType == "StopAsyncIteration" || aType == "GeneratorExit";
+            ::neos_python_debugger_thrown(aType, message, control);
+            tError = message.empty() ? aType : aType + ": " + message;
+            set_flags(true, tTrapped);
+            return;
+        }
         tError = aMessage.empty() ? aType : aType + ": " + aMessage;
         set_flags(true, tTrapped);
     }

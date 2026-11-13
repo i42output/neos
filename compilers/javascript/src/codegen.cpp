@@ -3142,6 +3142,12 @@ namespace neos::compilers::javascript
             auto const rep = rep_of(b.get());
             if (!b->captured)
                 b->slot = local(rep == numeric_rep::F64 ? F64 : rep == numeric_rep::I32 ? I32 : I64);
+        }
+        if (iCompiler.debug_info())
+            debug_scope(aScope);
+        for (auto& b : aScope->bindings)
+        {
+            auto const rep = rep_of(b.get());
             if (b->kind == binding_kind::Internal || (b->kind == binding_kind::Parameter && !b->tdz) || rep != numeric_rep::None)
                 continue;
             if (b->kind == binding_kind::Parameter)
@@ -3751,6 +3757,74 @@ namespace neos::compilers::javascript
         iCompiler.generator().set_function_body(index, code);
         // (its locals)
         iCompiler.generator().set_function_locals(index, neolib::vector<type>{ iLocals.begin(), iLocals.end() });
+        if (iCompiler.debug_info())
+            describe_variables(index);
+    }
+
+    // (debugging: a scope's bindings (as it is entered), as the debugger shows them (see neos.runtime.javascript's debug hooks): a 
+    // binding that is a local is its local's value; a captured one is in its scope's environment; a block's are seen in its lines (a 
+    // lexical declaration's from its own))
+    void function_generator::debug_scope(scope* aScope)
+    {
+        std::uint32_t firstLine = 0u;
+        std::uint32_t lastLine = 0u;
+        if (aScope->owner != nullptr && aScope->kind != scope_kind::Function && aScope->kind != scope_kind::Script && !aScope->owner->source.empty())
+        {
+            firstLine = iCompiler.source_line_of(aScope->owner->source);
+            lastLine = iCompiler.source_line_of(aScope->owner->source.substr(aScope->owner->source.size() - 1u));
+        }
+        for (auto const& b : aScope->bindings)
+        {
+            if (b->kind == binding_kind::Internal || b->name.empty() || b->name.front() == '#' || b->name.front() == '%' || b->name.front() == '*')
+                continue;
+            if (b->captured && !aScope->environmentLocal)
+                continue;
+            debug_record r;
+            r.name = b->name;
+            r.flags = b->kind == binding_kind::Parameter ? bytecode::VariableParameter : std::uint8_t{ 0u };
+            r.firstLine = firstLine;
+            r.lastLine = lastLine;
+            if (b->lexical() && b->declaration != nullptr && !b->declaration->source.empty())
+                r.firstLine = iCompiler.source_line_of(b->declaration->source);
+            r.language = "javascript";
+            if (b->captured)
+            {
+                r.local = *aScope->environmentLocal;
+                r.type = "env:0:" + std::to_string(b->slot);
+            }
+            else
+            {
+                r.local = b->slot;
+                r.type = "value";
+            }
+            iDebugRecords.push_back(std::move(r));
+        }
+    }
+
+    // (debugging: the function's variables: the captured bindings of the functions that enclose it (in its closure's environment), then
+    // its own (see debug_scope); and the global object's properties, as its scope (see bytecode::VariableScope))
+    void function_generator::describe_variables(std::uint32_t aIndex)
+    {
+        if (iFunctionEnvironment && !iBody)
+        {
+            std::uint32_t hops = 0u;
+            for (auto* s = iFunction.top != nullptr ? iFunction.top->parent : nullptr; s != nullptr; s = s->parent)
+            {
+                if (s->kind == scope_kind::Script)
+                    break;
+                if (s->kind != scope_kind::With)
+                    for (auto const& b : s->bindings)
+                        if (b->captured && b->kind != binding_kind::Internal && !b->name.empty() && b->name.front() != '#' && b->name.front() != '%' && b->name.front() != '*')
+                            iCompiler.debug_variable(aIndex, b->name, 0u, bytecode::VariableLocal, *iFunctionEnvironment, 0u, 0u, "javascript", 
+                                "env:" + std::to_string(hops) + ":" + std::to_string(b->slot));
+                if (s->hasEnvironment)
+                    ++hops;
+            }
+        }
+        for (auto const& r : iDebugRecords)
+            iCompiler.debug_variable(aIndex, r.name, r.flags, bytecode::VariableLocal, r.local, r.firstLine, r.lastLine, r.language, r.type);
+        iCompiler.debug_variable(aIndex, "globalThis", bytecode::VariableScope | bytecode::VariableHidden, bytecode::VariableLocal, CalleeLocal, 0u, 0u, 
+            "javascript", "global");
     }
 
     void function_generator::callee_value()
@@ -3852,6 +3926,18 @@ namespace neos::compilers::javascript
                 {
                     auto const rep = rep_of(b.get());
                     b->slot = local(rep == numeric_rep::F64 ? F64 : rep == numeric_rep::I32 ? I32 : I64);
+                    // (debugging: a top-level lexical declaration that no function uses (a local): the script's functions see it)
+                    if (iCompiler.debug_info() && rep == numeric_rep::None && !b->name.empty() && b->name.front() != '#' && b->name.front() != '%' && b->name.front() != '*')
+                    {
+                        debug_record r;
+                        r.name = b->name;
+                        r.flags = bytecode::VariableModule;
+                        r.local = b->slot;
+                        r.firstLine = b->declaration != nullptr && !b->declaration->source.empty() ? iCompiler.source_line_of(b->declaration->source) : 0u;
+                        r.language = "javascript";
+                        r.type = "value";
+                        iDebugRecords.push_back(std::move(r));
+                    }
                     if (rep != numeric_rep::None)
                         continue;
                     constant(values::Empty);
@@ -4174,6 +4260,12 @@ namespace neos::compilers::javascript
 
     void function_generator::statement(node* aNode)
     {
+        // (debugging: the statement's line and position (see bytecode::LineMarker), where the debugger can stop)
+        if (iCompiler.debug_info() && !aNode->is(construct::Empty) && !aNode->is(construct::Block) && !aNode->source.empty())
+        {
+            iCompiler.mark_line(iCode, iCompiler.source_line_of(aNode->source));
+            iCompiler.mark_statement(iCode, iCompiler.source_position(aNode->source));
+        }
         // (eval code's completion value: an expression statement's value; statements whose value is undefined if their own statements
         // have none (if, loops, switch, try, with) reset it)
         if (iCompletion)
@@ -9853,7 +9945,8 @@ namespace neos::compilers::javascript
         iIntrinsics.clear();
         iIntrinsicMask = 0u;
         static bool const sDisabled = std::getenv("NEOS_JS_NO_NUMERIC") != nullptr;
-        if (sDisabled || iBody || iFunction.generator || iFunction.async)
+        // (debugging: no numeric locals, so that each binding's local holds its value)
+        if (sDisabled || iCompiler.debug_info() || iBody || iFunction.generator || iFunction.async)
             return;
         struct use
         {
@@ -10555,7 +10648,7 @@ namespace neos::compilers::javascript
         // (a function (not a generator, async function, class constructor, ...) with simple parameters and without the arguments object, direct
         // eval, with statements, functions or tagged templates (whose code would be generated twice))
         static bool const sDisabled = std::getenv("NEOS_JS_NO_NUMERIC") != nullptr || std::getenv("NEOS_JS_NO_VERSIONS") != nullptr;
-        if (sDisabled || iBody || iFunction.script || iFunction.generator || iFunction.async || iFunction.classConstructor || iFunction.fieldInitializer ||
+        if (sDisabled || iCompiler.debug_info() || iBody || iFunction.script || iFunction.generator || iFunction.async || iFunction.classConstructor || iFunction.fieldInitializer ||
             iFunction.staticBlock || iFunction.directEval || iFunction.usesArguments || iFunction.argumentsBinding != nullptr || !iFunction.simpleParameters ||
             !iFunction.functions.empty() || iFunction.declaration == nullptr || iCompiler.eval_code() || iFunction.declaration->source.size() > 20000u)
             return false;

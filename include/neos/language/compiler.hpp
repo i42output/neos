@@ -261,6 +261,18 @@ namespace neos::language
             bool stub = false;
             bool inferred = false;
         };
+        // (debugging: a variable (see i_code_generator::debug_variable))
+        struct debug_variable_info
+        {
+            std::string name;
+            std::uint8_t flags = 0u;
+            std::uint8_t storage = 0u;
+            std::uint32_t index = 0u;
+            std::uint32_t firstLine = 0u;
+            std::uint32_t lastLine = 0u;
+            std::string language;
+            std::string type;
+        };
         struct wasm_function
         {
             std::string name;
@@ -284,6 +296,7 @@ namespace neos::language
             std::string frameSource;
             std::uint32_t firstLine = 0u;
             i_language_compiler* language = nullptr;    ///< (that of the code that defines it)
+            std::vector<debug_variable_info> variables; ///< (debugging: its variables (see debug_variable))
         };
         struct wasm_module
         {
@@ -385,6 +398,8 @@ namespace neos::language
         void set_preparse(bool aPreparse);                          ///< (e.g. Python's joining of lines within brackets); on by default)
         bool trap_on_overflow() const;                              ///< (integer arithmetic whose result overflows its (fixed size) type 
         void set_trap_on_overflow(bool aTrapOnOverflow);            ///< traps; off by default: it wraps)
+        bool debug_info() const final;                              ///< (the program is compiled to be debugged (see 
+        void set_debug_info(bool aDebugInfo);                       ///< i_code_generator::debug_info); off by default)
                                                                     ///< (bigint_promotion: a language's integers are of any size: a result that overflows 
         std::optional<bool> bigint_promotion_override() const;      ///< is promoted to an arbitrary precision integer (e.g. Python's int); 
         void set_bigint_promotion_override(std::optional<bool> aBigintPromotion); ///< the schema's bigint.promotion, unless overridden)
@@ -398,6 +413,9 @@ namespace neos::language
         bool bigint_promotion() const final;
         bool overflow_traps() const final;
         bool linked() const final;
+        void set_function_source(std::uint32_t aFunction, neolib::i_string const& aSource) final;
+        void debug_variable(std::uint32_t aFunction, neolib::i_string const& aName, std::uint8_t aFlags, std::uint8_t aStorage, std::uint32_t aIndex,
+            std::uint32_t aFirstLine, std::uint32_t aLastLine, neolib::i_string const& aLanguage, neolib::i_string const& aType) final;
         std::size_t operand_count() const final;
         std::size_t operand_base() const final;
         i_operand_type const& operand(std::size_t aIndex) const final;
@@ -515,6 +533,9 @@ namespace neos::language
         bool iShowParseTimes = false;
         bool iPreparse = true;
         bool iTrapOnOverflow = false;
+        bool iDebugInfo = false;
+        void debug_type(type aType, std::string& aLanguage, std::string& aTypeName) const;
+        std::vector<debug_variable_info> iDebugGlobals;
         bool iQuiet = false;
         bool iLinked = false;                                   ///< (see linked)
         program const* iLinkedProgram = nullptr;                ///< (the linked program being compiled)

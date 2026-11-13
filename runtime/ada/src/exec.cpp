@@ -54,9 +54,13 @@
 #include "int128.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <neos/runtime/debug.h>
 
 namespace neos::ada_runtime
 {
+    // (the debugger's functions (see neos/runtime/debug.h))
+    neos_rt_debugger const* gDebugger = nullptr;
+
     namespace
     {
         constexpr std::uint64_t StaticBase = language::ada::layout::StaticBase; ///< (static data: its address (the region's first block))
@@ -107,6 +111,9 @@ namespace neos::ada_runtime
 
     void raise(std::int64_t aId, std::string const& aMessage)
     {
+        // (debugging: a catchpoint stops here, where it is raised (not where it is raised again: see neos_ada_reraise))
+        if (gDebugger != nullptr && gDebugger->version >= 2u && gDebugger->catching != nullptr && gDebugger->thrown != nullptr && gDebugger->catching() != 0)
+            gDebugger->thrown(exception_name(aId).c_str(), aMessage.c_str(), 0);
         auto& s = state();
         s.current.id = aId;
         s.current.message = aMessage;
@@ -470,6 +477,10 @@ namespace
         if (!s.current.message.empty())
             report += " : " + s.current.message;
         report += "\n";
+        // (debugging: the program stops (see neos/runtime/debug.h))
+        // (if the debugger ends it: its error is not reported)
+        if (neos::ada_runtime::gDebugger != nullptr && neos::ada_runtime::gDebugger->error != nullptr && neos::ada_runtime::gDebugger->error(report.c_str() + 1) != 0)
+            return 1;
         std_write(2, report.data(), report.size());
         std_flush(2);
         return 1;
@@ -1044,4 +1055,9 @@ namespace neos::ada_runtime
     {
         neos_ada_release_occurrence(aHandle);
     }
+}
+
+NEOS_RUNTIME_PLUGIN_SET_DEBUGGER
+{
+    neos::ada_runtime::gDebugger = aDebugger;
 }

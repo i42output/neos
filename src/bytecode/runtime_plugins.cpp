@@ -43,6 +43,7 @@
 #include <algorithm>
 #define NEOS_RUNTIME_PLUGIN_HOST
 #include <neos/runtime/plugin.h>
+#include <neos/runtime/debug.h>
 #include <neos/bytecode/vm/runtime_plugins.hpp>
 
 #if __has_include(<ffi.h>) && !defined(NEOS_NO_LIBFFI)
@@ -281,6 +282,7 @@ namespace neos
                         std::map<std::string, function> functions;
                         neos_rt_plugin_end end = nullptr;
                         neos_rt_plugin_link link = nullptr;     ///< (a language runtime's: see neos_rt_link_type)
+                        neos_rt_debug const* debug = nullptr;   ///< (a language runtime's: see neos/runtime/debug.h)
                     };
 
                     class registry
@@ -331,6 +333,14 @@ namespace neos
                                     link = p->second.link;
                             }
                             return link != nullptr && link(aName, aType, aValue) != 0;
+                        }
+                        // (the debugger: the hooks of aNamespace's plugin, if it is loaded and has them)
+                        neos_rt_debug const* debug_hooks(std::string const& aNamespace)
+                        {
+                            std::lock_guard<std::recursive_mutex> lock{ iMutex };
+                            if (auto const p = iPlugins.find(aNamespace); p != iPlugins.end())
+                                return p->second.debug;
+                            return nullptr;
                         }
                         function const& resolve(std::string const& aImport)
                         {
@@ -431,6 +441,11 @@ namespace neos
                                 long const* const pending = error != nullptr && errorPending != nullptr ? errorPending() : nullptr;
                                 p.end = reinterpret_cast<neos_rt_plugin_end>(lib->symbol(NEOS_RUNTIME_PLUGIN_END_NAME));
                                 p.link = reinterpret_cast<neos_rt_plugin_link>(lib->symbol(NEOS_RUNTIME_PLUGIN_LINK_NAME));
+                                if (auto const setDebugger = reinterpret_cast<neos_rt_plugin_set_debugger>(lib->symbol(NEOS_RUNTIME_PLUGIN_SET_DEBUGGER_NAME)); setDebugger != nullptr)
+                                    setDebugger(static_cast<neos_rt_debugger const*>(debugger()));
+                                if (auto const debug = reinterpret_cast<neos_rt_plugin_debug>(lib->symbol(NEOS_RUNTIME_PLUGIN_DEBUG_NAME)); debug != nullptr)
+                                    if (auto const hooks = debug(); hooks != nullptr && hooks->version >= 1u)
+                                        p.debug = hooks;
                                 for (unsigned i = 0u; i < description->functionCount; ++i)
                                 {
                                     auto const& d = description->functions[i];
@@ -491,6 +506,11 @@ namespace neos
 #else
                     return false;
 #endif
+                }
+
+                void const* debug_hooks(std::string const& aNamespace)
+                {
+                    return registry::instance().debug_hooks(aNamespace);
                 }
 
                 bool plugin_available(std::string const& aNamespace)

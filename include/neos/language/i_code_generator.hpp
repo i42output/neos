@@ -57,6 +57,17 @@ namespace neos::language
         virtual bool linked() const = 0;                        ///< (the program has more than one translation unit: the code of each uses 
                                                                 ///< the others' globals by their names (see neos_rt_link_type); each is compiled
                                                                 ///< on its own, a program of its own)
+        // debugging (see neos/debug.hpp)
+    public:
+        virtual bool debug_info() const = 0;                    ///< (the program is compiled to be debugged: its functions' variables are 
+                                                                ///< described (see debug_variable) and their values kept (no optimization 
+                                                                ///< loses them))
+        virtual void debug_variable(std::uint32_t aFunction, neolib::i_string const& aName, std::uint8_t aFlags, std::uint8_t aStorage, std::uint32_t aIndex,
+            std::uint32_t aFirstLine, std::uint32_t aLastLine, neolib::i_string const& aLanguage, neolib::i_string const& aType) = 0; ///< (a variable 
+                                                                ///< that the debugger shows (see bytecode::VariablesSection): of the function 
+                                                                ///< aFunction (as define_function's) or (bytecode::NoFunction) a global of the 
+                                                                ///< program; aFlags: bytecode::VariableParameter, ...; aStorage: bytecode::VariableLocal (aIndex: the function's local, its
+                                                                ///< parameters first) or bytecode::VariableGlobal (aIndex: the global's index))
         // the operand stack (bottom: 0)
     public:
         virtual std::size_t operand_count() const = 0;
@@ -114,6 +125,9 @@ namespace neos::language
                                                                 ///< that follow its parameters); its body is set with set_function_body; its 
                                                                 ///< frame's name (empty: it has no frame) and the line (1-based) of its source 
                                                                 ///< that it begins on)
+        virtual void set_function_source(std::uint32_t aFunction, neolib::i_string const& aSource) = 0; ///< (the source (its name: see 
+                                                                ///< bytecode::FramesSection) that a function that define_function defined is
+                                                                ///< in, if it is not the one being compiled (e.g. a unit of a library))
         virtual type inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex) const = 0; ///< (UNKNOWN: none)
         virtual void set_inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex, std::uint32_t aCount, type aType) = 0;
         virtual void infer(neolib::i_string const& aWhat, type aOld, type aNew) = 0; ///< (aOld UNKNOWN: none)

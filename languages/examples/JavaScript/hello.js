@@ -1,3 +1,4 @@
 // Hello, world! example JavaScript program
 
-console.log("Hello, world!");
+const name = prompt("Enter your name:");
+console.log(`Hello ${name}!`);

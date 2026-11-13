@@ -1,3 +1,5 @@
 -- Hello, world! example Lua program
 
-print("Hello, world!")
+io.write("Enter your name: ")
+local name = io.read()
+print("Hello " .. name .. "!")

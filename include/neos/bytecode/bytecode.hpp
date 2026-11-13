@@ -88,6 +88,35 @@ namespace neos
         // source (an index) and its first line
         inline constexpr char FramesSection[] = "neos.frames";
 
+        // the custom section that describes the variables of a module's functions to the debugger (see neos/debug.hpp), in a module 
+        // compiled to be debugged (see i_code_generator::debug_info): its entries (a count, then each): a function's index (that of 
+        // the module's function index space; NoFunction: the module's globals), then its variables (a count, then each): its name, its 
+        // flags (VariableParameter; VariableScope: its parts are names that the function's code can see (e.g. Lua's _ENV, a module's 
+        // globals): the debugger looks a name up in them after the function's variables), where it is (VariableLocal: the function's local (its parameters first) of the index that follows; 
+        // VariableGlobal: the module's global of the index that follows), the lines of its source where it can be seen (its first and 
+        // last: 0 and 0, all of the function's), and its value's language (the namespace of the runtime plugin that describes its 
+        // values (see neos/runtime/debug.h); empty: the VM's) and type (as that language describes it). The VM's types: i8, u8, i16, 
+        // u16, i32, u32, i64, u64, f32, f64, bool, char (a code point), cchar (a C char: a byte), string (a string in linear memory: 
+        // its address (see string_header)); and those of objects in linear memory (e.g. C's), whose values are addresses: 
+        // "@<offset>:<type>" (the object of <type> at the value plus <offset>), "*<type>" (a pointer to an object of <type>), 
+        // "[<count>*<size>]<type>" (an array of <count> elements of <type>, each <size> bytes, indexed from 0), "[@<dimensions>*<size>]<type>" 
+        // (an array with a descriptor: at its address its elements' offset from it, then each dimension's first and last index (i64s); the last
+        // dimension varies fastest), "<name>{<member>@<offset>:<type>;...}" (a 
+        // structure or union), "%<n>" (the type named "%type<n>" among the module's globals (NoFunction, VariableHidden): e.g. a 
+        // structure that a member points to)
+        inline constexpr char VariablesSection[] = "neos.variables";
+        inline constexpr std::uint32_t NoFunction = 0xFFFFFFFFu;
+        inline constexpr std::uint8_t VariableParameter = 0x01u;
+        inline constexpr std::uint8_t VariableScope = 0x02u;
+        inline constexpr std::uint8_t VariableHidden = 0x04u;   ///< (not shown among the function's variables: e.g. a scope (VariableScope) shown as the globals)
+        inline constexpr std::uint8_t VariableModule = 0x08u;   ///< (a variable of the code of a module's (or script's) top level: the module's functions can 
+                                                                ///< see it (the debugger looks a name up in the outermost frame of the module's top level, 
+                                                                ///< after the frame's own variables and the globals))
+        inline constexpr std::uint8_t VariableLocal = 0u;
+        inline constexpr std::uint8_t VariableGlobal = 1u;
+        inline constexpr std::uint8_t VariableAddress = 2u;     ///< (its value (a word) is the index that follows: e.g. the address of a static object 
+                                                                ///< (see the VM's memory types below))
+
         // linking (a program of more than one translation unit, of any languages: see neos_rt_link_type): the custom section of the modules 
         // of the translation units after the first (each compiled on its own, a program of its own: its top level runs when its turn comes, 
         // when the program calls the VM's function neos::link_run(its index)): a count, then for each its language 

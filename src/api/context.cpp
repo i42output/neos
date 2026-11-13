@@ -47,6 +47,7 @@
 #include <neolib/app/application.hpp>
 #include <neolib/file/file.hpp>
 #include <neos/context.hpp>
+#include <neos/debug.hpp>
 
 namespace neos
 {
@@ -325,6 +326,16 @@ namespace neos
         iArguments = aArguments;
     }
 
+    std::shared_ptr<debug::session> const& context::debug_session() const
+    {
+        return iDebugSession;
+    }
+
+    void context::set_debug_session(std::shared_ptr<debug::session> aSession)
+    {
+        iDebugSession = std::move(aSession);
+    }
+
     void context::run()
     {
         if (text().empty())
@@ -342,6 +353,9 @@ namespace neos
         // (the program's arguments and the compile service above: the VM thread takes them from this thread (so that contexts that 
         // run programs at the same time each have their own))
         bytecode::vm::set_program_arguments(iArguments);
+        // (and the debugger's session, if the program is debugged)
+        debug::set_session(iDebugSession);
+        struct no_session { ~no_session() { debug::set_session(nullptr); } } const noSession;
         iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), cin(), cerr(), iRestricted));
         iThreads.back()->join(); // run to completion: the program reads cin(), so the console must not read it concurrently
     }

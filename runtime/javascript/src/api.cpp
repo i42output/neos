@@ -48,6 +48,10 @@
 #include "gc.hpp"
 #include "typed_arrays.hpp"
 
+
+// (debugging: an error that the program does not handle (see debug.cpp))
+bool neos_javascript_debugger_error(std::string const& aMessage);
+void neos_javascript_debugger_thrown_value(neos::javascript_runtime::value aValue);
 namespace neos::javascript_runtime
 {
     namespace
@@ -244,6 +248,14 @@ namespace neos::javascript_runtime
             std::fwrite(aText.data(), 1u, aText.size(), aStream == 2 ? stderr : stdout);
     }
 
+    int read_standard()
+    {
+        // (the host's (e.g. one that the debugger can interrupt: see neos_rt_host::std_read))
+        if (sHost != nullptr && sHost->version >= 9u && sHost->std_getc != nullptr)
+            return sHost->std_getc(0);
+        return std::fgetc(stdin);
+    }
+
     void flush_standard(int aStream)
     {
         if (sHost != nullptr && sHost->version >= 9u && sHost->std_flush != nullptr)
@@ -385,7 +397,9 @@ namespace neos::javascript_runtime
             // jobs it queued run)
             if (aResult == Exception)
             {
-                report_uncaught(calls().pending);
+                // (debugging: the program stops (its script's frame as it is))
+                if (!::neos_javascript_debugger_error("Uncaught " + inspect(calls().pending, false, 0)))
+                    report_uncaught(calls().pending);
                 calls().pending = Undefined;
                 return 1;
             }
@@ -397,6 +411,8 @@ namespace neos::javascript_runtime
         value throw_(value aValue)
         {
             calls().pending = checked(aValue);
+            // (debugging: a catchpoint stops here, at the throw statement)
+            ::neos_javascript_debugger_thrown_value(calls().pending);
             return Exception;
         }
 

@@ -692,6 +692,28 @@ namespace neos::javascript_runtime
         {
             return number(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sTimeOrigin).count());
         }
+
+        // (prompt(message, defaultValue): a host API, as Deno's and Bun's: the message (by default "Prompt") and a space are written;
+        // a line of the program's input is read (without its line ending): it, or defaultValue if it is empty and one is given; null
+        // at the end of input)
+        value prompt(value, arguments aArguments, value, function_object&)
+        {
+            auto const message = argument(aArguments, 0u);
+            write_standard(1, (message == Undefined ? std::string{ "Prompt" } : utf8(to_string(message))) + " ");
+            flush_standard(1);
+            std::string line;
+            int c = EOF;
+            while ((c = read_standard()) != EOF && c != '\n')
+                line += static_cast<char>(c);
+            if (c == EOF && line.empty())
+                return Null;
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            auto const defaultValue = argument(aArguments, 1u);
+            if (line.empty() && defaultValue != Undefined)
+                return to_string(defaultValue);
+            return make_string_utf8(line);
+        }
     }
 
     void init_console(realm& aRealm)
@@ -707,5 +729,6 @@ namespace neos::javascript_runtime
         auto const performance = make_object();
         method(performance, "now", 0u, performance_now);
         obj(aRealm.global).put(ascii("performance"), performance);
+        method(aRealm.global, "prompt", 1u, prompt);
     }
 }
