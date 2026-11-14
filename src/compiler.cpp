@@ -1861,16 +1861,22 @@ namespace neos::language
 
     std::vector<fragment> compiler::pop_fragments(neolib::i_string_view const& aSource, fragment_kind aKind)
     {
+        auto result = peek_fragments(aSource, aKind);
+        state().operandStack.resize(state().operandStack.size() - result.size());
+        return result;
+    }
+
+    // (the fragments that pop_fragments would pop, not popped)
+    std::vector<fragment> compiler::peek_fragments(neolib::i_string_view const& aSource, fragment_kind aKind)
+    {
         std::vector<fragment> result;
-        auto& stack = state().operandStack;
-        while (stack.size() > (state().function ? current_function().operandBase : 0u) &&
-            stack.back().holds_alternative<i_fragment>() &&
-            stack.back().get<i_fragment>().kind() == aKind &&
-            within(stack.back().get<i_fragment>().source(), aSource))
-        {
-            result.insert(result.begin(), fragment{ stack.back().get<i_fragment>() });
-            stack.pop_back();
-        }
+        auto const& stack = state().operandStack;
+        auto const base = state().function ? current_function().operandBase : 0u;
+        for (auto i = stack.size(); i > base &&
+            stack[i - 1u].holds_alternative<i_fragment>() &&
+            stack[i - 1u].get<i_fragment>().kind() == aKind &&
+            within(stack[i - 1u].get<i_fragment>().source(), aSource); --i)
+            result.insert(result.begin(), fragment{ stack[i - 1u].get<i_fragment>() });
         return result;
     }
 
@@ -2746,17 +2752,16 @@ namespace neos::language
         }
     }
 
-    void compiler::emit_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource)
+    bool compiler::can_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource)
     {
-        using bytecode::opcode;
-        auto arguments = pop_fragments(aSource, fragment_kind::Argument);
         if (iDeclarationPass)
-        {
-            fragment dummy;
-            dummy.valueType = type::I32;
-            push_operand(operand_type{ dummy });
-            return;
-        }
+            return true; // (emit_call emits a placeholder)
+        auto const resolution = resolve_call(aFunctionName, peek_fragments(aSource, fragment_kind::Argument));
+        return resolution.function || resolution.forward;
+    }
+
+    compiler::call_resolution compiler::resolve_call(neolib::i_string_view const& aFunctionName, std::vector<fragment> const& aArguments)
+    {
         std::vector<std::string> path;
         {
             std::string name = aFunctionName.to_std_string();
@@ -2776,9 +2781,7 @@ namespace neos::language
         std::string joined;
         for (auto const& part : path)
             joined += (joined.empty() ? "" : "::") + part;
-        std::optional<std::uint32_t> chosen;
-        std::optional<function_signature> forwardSignature;
-        for (i_scope const* scope = &current_scope(); scope != nullptr && !chosen; scope = scope->has_parent() ? &scope->parent() : nullptr)
+        for (i_scope const* scope = &current_scope(); scope != nullptr; scope = scope->has_parent() ? &scope->parent() : nullptr)
         {
             std::optional<std::uint32_t> best;
             std::int32_t bestScore = -1;
@@ -2798,7 +2801,7 @@ namespace neos::language
                 {
                     if (symbol.first().to_std_string() != path.back() || symbol.second().type() != type::Function)
                         continue;
-                    auto const score = overload_score(signature_of(iModule.functions[symbol.second().index()]), arguments);
+                    auto const score = overload_score(signature_of(iModule.functions[symbol.second().index()]), aArguments);
                     // (a function defined in the program is preferred to a host function with the same parameters)
                     if (score > bestScore || (score == bestScore && score >= 0 && best && 
                         iModule.functions[*best].stub && !iModule.functions[symbol.second().index()].stub))
@@ -2818,7 +2821,7 @@ namespace neos::language
                 auto const& declaration = iForwardDeclarations[i];
                 if (declaration.name != qualified)
                     continue;
-                auto const score = overload_score(declaration.signature, arguments);
+                auto const score = overload_score(declaration.signature, aArguments);
                 if (score > bestScore || (score == bestScore && score >= 0 && !forward && best && 
                     iModule.functions[*best].stub && !declaration.stub))
                 {
@@ -2827,18 +2830,41 @@ namespace neos::language
                 }
             }
             if (forward)
-            {
-                auto const& declaration = iForwardDeclarations[*forward];
-                forwardSignature = declaration.signature;
-                std::vector<type> parameterTypes;
-                if (declaration.signature.parameters().has_value())
-                    for (auto const& p : declaration.signature.parameters().value())
-                        parameterTypes.push_back(p.parameter_type());
-                chosen = DeferredCall | static_cast<std::uint32_t>(iModule.deferredCalls.size());
-                iModule.deferredCalls.emplace_back(declaration.name, parameterTypes);
-            }
-            else if (best)
-                chosen = best;
+                return call_resolution{ std::nullopt, forward };
+            if (best)
+                return call_resolution{ best, std::nullopt };
+        }
+        return {};
+    }
+
+    void compiler::emit_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource)
+    {
+        using bytecode::opcode;
+        auto arguments = pop_fragments(aSource, fragment_kind::Argument);
+        if (iDeclarationPass)
+        {
+            fragment dummy;
+            dummy.valueType = type::I32;
+            push_operand(operand_type{ dummy });
+            return;
+        }
+        auto signature_of = [&](wasm_function const& aFunction) -> i_function_signature const&
+        {
+            return aFunction.scope != nullptr ? aFunction.scope->function_signature() : static_cast<i_function_signature const&>(aFunction.signature);
+        };
+        auto const resolution = resolve_call(aFunctionName, arguments);
+        std::optional<std::uint32_t> chosen = resolution.function;
+        std::optional<function_signature> forwardSignature;
+        if (resolution.forward)
+        {
+            auto const& declaration = iForwardDeclarations[*resolution.forward];
+            forwardSignature = declaration.signature;
+            std::vector<type> parameterTypes;
+            if (declaration.signature.parameters().has_value())
+                for (auto const& p : declaration.signature.parameters().value())
+                    parameterTypes.push_back(p.parameter_type());
+            chosen = DeferredCall | static_cast<std::uint32_t>(iModule.deferredCalls.size());
+            iModule.deferredCalls.emplace_back(declaration.name, parameterTypes);
         }
         if (!chosen)
             throw std::runtime_error("no matching function for call to '" + aFunctionName.to_std_string() + "' with " + std::to_string(arguments.size()) + " argument(s)");

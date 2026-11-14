@@ -281,6 +281,10 @@ namespace neos::language
         virtual void emit_assignment(neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) = 0;
         virtual void emit_argument(neolib::i_string_view const& aSource) = 0;
         virtual void emit_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource) = 0;
+        // whether emit_call would find a function to call with the arguments emitted (the argument fragments within aSource on top 
+        // of the operand stack (not popped)): a language can try a call that may have no function (e.g. a builtin that may be a host 
+        // function) without an exception being thrown
+        virtual bool can_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource) = 0;
         virtual void emit_if(neolib::i_string_view const& aSource) = 0;
         virtual void emit_else_if(neolib::i_string_view const& aSource) = 0;
         virtual void emit_else(neolib::i_string_view const& aSource) = 0;

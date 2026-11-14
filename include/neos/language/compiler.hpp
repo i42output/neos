@@ -367,6 +367,7 @@ namespace neos::language
         void emit_assignment(neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) final;
         void emit_argument(neolib::i_string_view const& aSource) final;
         void emit_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource) final;
+        bool can_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource) final;
         void emit_if(neolib::i_string_view const& aSource) final;
         void emit_else_if(neolib::i_string_view const& aSource) final;
         void emit_else(neolib::i_string_view const& aSource) final;
@@ -498,6 +499,15 @@ namespace neos::language
         i_language_compiler* language(std::string const& aLanguage) const;
         fragment pop_value();
         std::vector<fragment> pop_fragments(neolib::i_string_view const& aSource, fragment_kind aKind);
+        std::vector<fragment> peek_fragments(neolib::i_string_view const& aSource, fragment_kind aKind);
+        // (the function that a call is to (see emit_call): one defined (its index), or one declared later (its forward declaration's 
+        // index), whichever matches the arguments best in the innermost scope that has one; neither: none)
+        struct call_resolution
+        {
+            std::optional<std::uint32_t> function;
+            std::optional<std::size_t> forward;
+        };
+        call_resolution resolve_call(neolib::i_string_view const& aFunctionName, std::vector<fragment> const& aArguments);
         bool compile_module(program& aProgram);                 ///< (its translation units, but those of iLinkedUnits)
         void emit_module(program& aProgram);
         std::string link_signature(wasm_function const& aFunction) const;

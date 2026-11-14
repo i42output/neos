@@ -5918,25 +5918,31 @@ namespace neos::compilers::python
                     {
                         for (auto const& argument : ordered)
                             push_operand(operand_type{ argument });
-                        generator().emit_call(neolib::string_view{ neolib::string{ name } }, aSource);
-                        operand_type result{ operands().back() };
-                        if (result.holds_alternative<i_fragment>())
+                        // (a builtin that no host function (or function of the program) matches is called as an object (below): that 
+                        // is known without emit_call throwing (for every call of one that no function matches))
+                        if (!builtin_names().contains(name) || generator().can_call(neolib::string_view{ neolib::string{ name } }, aSource))
                         {
-                            fragment called{ result.get<i_fragment>() };
-                            mark_position(called, py_position(aSource));
-                            operands().set_back(operand_type{ called });
-                            result = operand_type{ called };
+                            generator().emit_call(neolib::string_view{ neolib::string{ name } }, aSource);
+                            operand_type result{ operands().back() };
+                            if (result.holds_alternative<i_fragment>())
+                            {
+                                fragment called{ result.get<i_fragment>() };
+                                mark_position(called, py_position(aSource));
+                                operands().set_back(operand_type{ called });
+                                result = operand_type{ called };
+                            }
+                            if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Object)
+                                operands().set_back(operand_type{ py_owned(fragment{ result.get<i_fragment>() }) }); // (a function returns a new reference)
+                            else if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Integer)
+                            {
+                                result = operand_type{ py_park_integer(fragment{ result.get<i_fragment>() }) };
+                                if (!py_big_integers())
+                                    result = operand_type{ materialize(result, type::I64) }; // (64-bit ints: a runtime plugin's int is one)
+                                operands().set_back(result);
+                            }
+                            return;
                         }
-                        if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Object)
-                            operands().set_back(operand_type{ py_owned(fragment{ result.get<i_fragment>() }) }); // (a function returns a new reference)
-                        else if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Integer)
-                        {
-                            result = operand_type{ py_park_integer(fragment{ result.get<i_fragment>() }) };
-                            if (!py_big_integers())
-                                result = operand_type{ materialize(result, type::I64) }; // (64-bit ints: a runtime plugin's int is one)
-                            operands().set_back(result);
-                        }
-                        return;
+                        operands().resize(base);
                     }
                     catch (std::runtime_error const&)
                     {
