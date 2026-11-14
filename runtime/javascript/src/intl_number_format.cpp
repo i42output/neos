@@ -265,7 +265,7 @@ namespace neos::javascript_runtime::intl
             else
                 add("group-auto");
             add(sign_skeleton(d));
-            add("numbering-system/" + d.numberingSystem);
+            add("numbering-system/" + icu_numbering_system(d.numberingSystem));     // (see map_digits)
             return s;
         }
 
@@ -435,7 +435,9 @@ namespace neos::javascript_runtime::intl
         {
             auto const result = format_value(d, x);
             UErrorCode status = U_ZERO_ERROR;
-            return formatted_value_string(unumf_resultAsValue(result.get(), &status));
+            auto text = formatted_value_string(unumf_resultAsValue(result.get(), &status));
+            map_digits(text, d.numberingSystem);
+            return text;
         }
 
         struct number_part_context
@@ -502,7 +504,9 @@ namespace neos::javascript_runtime::intl
             if (x.is_nan() && spans.empty() && !text.empty())
                 spans.push_back({ UFIELD_CATEGORY_NUMBER, UNUM_INTEGER_FIELD, 0, static_cast<std::int32_t>(text.size()) });
             number_part_context context{ &x, nullptr, d.style == "unit" };
-            return make_parts(text, spans, number_field_type, &context);
+            auto parts = make_parts(text, spans, number_field_type, &context);
+            map_digits(parts, d.numberingSystem);
+            return parts;
         }
 
         // --- ranges
@@ -576,6 +580,7 @@ namespace neos::javascript_runtime::intl
                 p.source = source;
                 offset += static_cast<std::int32_t>(p.text.size());
             }
+            map_digits(parts, d.numberingSystem);
             return parts;
         }
 #else
@@ -664,7 +669,9 @@ namespace neos::javascript_runtime::intl
 #if defined(NEOS_JS_ICU_NUMBER_RANGES)
                 auto const result = format_range_value(d, x, y);
                 UErrorCode status = U_ZERO_ERROR;
-                return u16_value(formatted_value_string(unumrf_resultAsValue(result.get(), &status)));
+                auto text = formatted_value_string(unumrf_resultAsValue(result.get(), &status));
+                map_digits(text, d.numberingSystem);
+                return u16_value(text);
 #else
                 std::u16string text;
                 for (auto const& p : format_range_to_parts(d, x, y))

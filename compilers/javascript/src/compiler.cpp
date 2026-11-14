@@ -13,7 +13,9 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/language/emit.hpp>
 #include "compiler.hpp"
@@ -107,6 +109,429 @@ namespace neos::compilers::javascript
     {
         --iDepth;
     }
+
+    namespace
+    {
+        // (the yields and awaits of a source that are identifiers (outside generators; outside async functions and a module's top level)
+        // followed by a slash (a division), found by a scan of its tokens (their contexts: the functions that their braces open), for the
+        // preparse to rename them before the source is parsed, where the parse would take the slash to begin a regular expression literal
+        // (as the operand of a yield or await expression: perhaps a parse that fails); the scan is conservative (where it cannot tell a
+        // context, the keyword is an operator: as the parse has it), and the tree that the parse makes checks it (see keyword_operators))
+        std::set<std::size_t> keyword_division_sites(std::string_view s, bool aModule)
+        {
+            std::set<std::size_t> result;
+            auto const is_space = [](char c) { return c == ' ' || c == '\t' || c == '\v' || c == '\f'; };
+            // (a keyword followed by a slash on its line (not a comment's): else nothing to find)
+            auto const slash_follows = [&](std::size_t aAfter)
+            {
+                auto i = aAfter;
+                while (i < s.size() && is_space(s[i]))
+                    ++i;
+                return i < s.size() && s[i] == '/' && (i + 1u >= s.size() || (s[i + 1u] != '/' && s[i + 1u] != '*'));
+            };
+            {
+                bool any = false;
+                for (std::string_view const keyword : { std::string_view{ "yield" }, std::string_view{ "await" } })
+                    for (auto p = s.find(keyword); p != std::string_view::npos && !any; p = s.find(keyword, p + 1u))
+                        any = slash_follows(p + keyword.size());
+                if (!any)
+                    return result;
+            }
+            auto const identifier_start = [](char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '$' || c == '\\' ||
+                static_cast<unsigned char>(c) >= 0x80u; };
+            auto const identifier_part = [&](char c) { return identifier_start(c) || std::isdigit(static_cast<unsigned char>(c)); };
+            enum class kind { None, Name, Keyword, Literal, Close, Punctuator };
+            struct token
+            {
+                kind k = kind::None;
+                std::string_view text;
+                bool newlineBefore = false;
+            };
+            struct brace
+            {
+                bool function = false;      ///< (a function's body)
+                bool generator = false;
+                bool async = false;         ///< (an async function's, or a static block's (await is no identifier there))
+                bool substitution = false;  ///< (a template literal's substitution)
+            };
+            struct paren
+            {
+                bool function = false;      ///< (a function's (or a method's) parameters, if a body follows)
+                bool generator = false;
+                bool async = false;
+                bool asyncArrow = false;    ///< (async (...) => ...)
+            };
+            std::vector<brace> braces;
+            std::vector<paren> parens;
+            std::vector<token> brackets;    ///< (the token before each open [ (a computed key's: what precedes it))
+            token previous, beforePrevious, beforeThat;
+            bool newline = false;
+            std::optional<brace> pendingBody;       ///< (the next token a {: a function's body)
+            bool pendingFunction = false;           ///< (after the keyword function (and its *, name): its parameters next)
+            bool pendingFunctionGenerator = false;
+            bool pendingFunctionAsync = false;
+            auto const in_generator = [&]() { for (auto b = braces.rbegin(); b != braces.rend(); ++b) if (b->function) return b->generator; return false; };
+            auto const in_await = [&]() { for (auto b = braces.rbegin(); b != braces.rend(); ++b) if (b->function) return b->async; return aModule; };
+            auto const push = [&](kind aKind, std::string_view aText)
+            {
+                beforeThat = beforePrevious;
+                beforePrevious = previous;
+                previous = token{ aKind, aText, newline };
+                newline = false;
+            };
+            // (a slash after this token: a division (else the beginning of a regular expression literal))
+            auto const division = [&]()
+            {
+                switch (previous.k)
+                {
+                case kind::Name:
+                case kind::Literal:
+                case kind::Close:
+                    return true;
+                default:
+                    return false;
+                }
+            };
+            static constexpr std::string_view sOperatorKeywords[] = { "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
+                "case", "do", "else", "extends" };
+            static constexpr std::string_view sControl[] = { "if", "while", "for", "switch", "catch", "with" };
+            std::size_t i = 0u;
+            // (a template literal's text, to its end or a substitution (true))
+            auto const template_text = [&]()
+            {
+                while (i < s.size())
+                {
+                    if (s[i] == '\\')
+                        i += 2u;
+                    else if (s[i] == '`')
+                    {
+                        ++i;
+                        return false;
+                    }
+                    else if (s[i] == '$' && i + 1u < s.size() && s[i + 1u] == '{')
+                    {
+                        i += 2u;
+                        return true;
+                    }
+                    else
+                        ++i;
+                }
+                return false;
+            };
+            while (i < s.size())
+            {
+                auto const c = s[i];
+                if (c == '\n' || c == '\r')
+                {
+                    newline = true;
+                    ++i;
+                    continue;
+                }
+                if (is_space(c))
+                {
+                    ++i;
+                    continue;
+                }
+                if (c == '/' && i + 1u < s.size() && s[i + 1u] == '/')
+                {
+                    while (i < s.size() && s[i] != '\n' && s[i] != '\r')
+                        ++i;
+                    continue;
+                }
+                if (c == '/' && i + 1u < s.size() && s[i + 1u] == '*')
+                {
+                    auto const end = s.find("*/", i + 2u);
+                    if (s.substr(i, end == std::string_view::npos ? std::string_view::npos : end - i).find('\n') != std::string_view::npos)
+                        newline = true;
+                    i = end == std::string_view::npos ? s.size() : end + 2u;
+                    continue;
+                }
+                std::optional<brace> body;
+                if (pendingBody.has_value())
+                {
+                    body = pendingBody;
+                    pendingBody.reset();
+                }
+                if (c == '\'' || c == '"')
+                {
+                    auto const start = i++;
+                    while (i < s.size() && s[i] != c && s[i] != '\n')
+                        i += s[i] == '\\' ? 2u : 1u;
+                    ++i;
+                    push(kind::Literal, s.substr(start, std::min(i, s.size()) - start));
+                    continue;
+                }
+                if (c == '`')
+                {
+                    ++i;
+                    if (template_text())
+                        braces.push_back(brace{ false, false, false, true });
+                    push(kind::Literal, "`");
+                    continue;
+                }
+                if (std::isdigit(static_cast<unsigned char>(c)) || (c == '.' && i + 1u < s.size() && std::isdigit(static_cast<unsigned char>(s[i + 1u]))))
+                {
+                    auto const start = i;
+                    while (i < s.size() && (std::isalnum(static_cast<unsigned char>(s[i])) || s[i] == '_' || s[i] == '.' ||
+                        ((s[i] == '+' || s[i] == '-') && (s[i - 1u] == 'e' || s[i - 1u] == 'E') && !(s[start] == '0' && start + 1u < s.size() &&
+                        (s[start + 1u] == 'x' || s[start + 1u] == 'X')))))
+                        ++i;
+                    push(kind::Literal, s.substr(start, i - start));
+                    continue;
+                }
+                if (identifier_start(c) || c == '#')
+                {
+                    auto const start = i++;
+                    while (i < s.size() && identifier_part(s[i]))
+                        i += s[i] == '\\' ? 2u : 1u;
+                    auto const word = s.substr(start, i - start);
+                    if ((word == "yield" && !in_generator()) || (word == "await" && !in_await()))
+                    {
+                        // (an identifier (as the keyword is here): a slash after it is a division)
+                        if (slash_follows(i) && previous.text != "." && previous.text != "?.")
+                            result.insert(start);
+                        push(kind::Name, word);
+                        continue;
+                    }
+                    if (word == "yield" || word == "await")
+                    {
+                        push(kind::Keyword, word);
+                        continue;
+                    }
+                    if (word == "function" && previous.text != ".")
+                    {
+                        pendingFunction = true;
+                        pendingFunctionAsync = previous.text == "async" && !newline;
+                        pendingFunctionGenerator = false;
+                        push(kind::Keyword, word);
+                        continue;
+                    }
+                    if (word == "static" && i < s.size())
+                    {
+                        // (a class's static block: await is no identifier there)
+                        auto j = i;
+                        while (j < s.size() && (is_space(s[j]) || s[j] == '\n' || s[j] == '\r'))
+                            ++j;
+                        if (j < s.size() && s[j] == '{')
+                        {
+                            push(kind::Keyword, word);
+                            pendingBody = brace{ true, false, true, false };
+                            continue;
+                        }
+                    }
+                    bool keyword = false;
+                    for (auto const k : sOperatorKeywords)
+                        keyword = keyword || word == k;
+                    push(keyword && previous.text != "." ? kind::Keyword : kind::Name, word);
+                    continue;
+                }
+                if (c == '/')
+                {
+                    if (division())
+                    {
+                        ++i;
+                        push(kind::Punctuator, "/");
+                        continue;
+                    }
+                    // (a regular expression literal (one that is not: a slash))
+                    auto j = i + 1u;
+                    bool inClass = false;
+                    bool closed = false;
+                    while (j < s.size() && s[j] != '\n' && s[j] != '\r')
+                    {
+                        if (s[j] == '\\')
+                            j += 2u;
+                        else if (s[j] == '[')
+                            inClass = true, ++j;
+                        else if (s[j] == ']')
+                            inClass = false, ++j;
+                        else if (s[j] == '/' && !inClass)
+                        {
+                            closed = true;
+                            ++j;
+                            break;
+                        }
+                        else
+                            ++j;
+                    }
+                    if (!closed)
+                    {
+                        ++i;
+                        push(kind::Punctuator, "/");
+                        continue;
+                    }
+                    while (j < s.size() && identifier_part(s[j]))
+                        ++j;
+                    push(kind::Literal, s.substr(i, j - i));
+                    i = j;
+                    continue;
+                }
+                if (c == '=' && i + 1u < s.size() && s[i + 1u] == '>')
+                {
+                    // (an arrow function: its body (a brace's) is not a generator's, and is an async function's if it is async)
+                    // (async (...) => (see the parameters' closing parenthesis), or async x =>)
+                    bool const asyncArrow = (previous.text == ")" && body.has_value() && body->async) ||
+                        (previous.k == kind::Name && beforePrevious.text == "async" && !previous.newlineBefore);
+                    i += 2u;
+                    push(kind::Punctuator, "=>");
+                    pendingBody = brace{ true, false, asyncArrow, false };
+                    continue;
+                }
+                if (c == '*' && pendingFunction && previous.text == "function")
+                {
+                    pendingFunctionGenerator = true;
+                    ++i;
+                    push(kind::Punctuator, "*");
+                    continue;
+                }
+                if (c == '(')
+                {
+                    paren p;
+                    if (pendingFunction)
+                    {
+                        p.function = true;
+                        p.generator = pendingFunctionGenerator;
+                        p.async = pendingFunctionAsync;
+                        pendingFunction = false;
+                    }
+                    else if (previous.text == "async" && !previous.newlineBefore)
+                        p.asyncArrow = true;
+                    else
+                    {
+                        bool control = false;
+                        for (auto const k : sControl)
+                            control = control || previous.text == k;
+                        // (a method's parameters, if a body follows: its name (or computed key) and what precedes it)
+                        token before = beforePrevious;
+                        if (previous.text == "]" && !brackets.empty())
+                            before = brackets.back();
+                        if (!control && (previous.k == kind::Name || previous.k == kind::Literal || previous.text == "]") && before.text != "." &&
+                            before.text != "function")
+                        {
+                            p.function = true;
+                            p.generator = before.text == "*";
+                            p.async = before.text == "async" || (before.text == "*" && beforeThat.text == "async");
+                        }
+                    }
+                    parens.push_back(p);
+                    ++i;
+                    push(kind::Punctuator, "(");
+                    continue;
+                }
+                if (c == ')')
+                {
+                    paren p;
+                    if (!parens.empty())
+                    {
+                        p = parens.back();
+                        parens.pop_back();
+                    }
+                    ++i;
+                    push(kind::Close, ")");
+                    if (p.function)
+                        pendingBody = brace{ true, p.generator, p.async, false };
+                    else if (p.asyncArrow)
+                        pendingBody = brace{ false, false, true, false };   // (for an arrow that follows (see =>): not a body itself)
+                    continue;
+                }
+                if (c == '[')
+                {
+                    brackets.push_back(previous);
+                    ++i;
+                    push(kind::Punctuator, "[");
+                    continue;
+                }
+                if (c == ']')
+                {
+                    if (!brackets.empty())
+                        brackets.pop_back();
+                    ++i;
+                    push(kind::Close, "]");
+                    continue;
+                }
+                if (c == '{')
+                {
+                    ++i;
+                    if (body.has_value() && body->function)
+                        braces.push_back(*body);
+                    else
+                        braces.push_back(brace{});
+                    push(kind::Punctuator, "{");
+                    continue;
+                }
+                if (c == '}')
+                {
+                    ++i;
+                    bool substitution = false;
+                    if (!braces.empty())
+                    {
+                        substitution = braces.back().substitution;
+                        braces.pop_back();
+                    }
+                    if (substitution)
+                    {
+                        if (template_text())
+                            braces.push_back(brace{ false, false, false, true });
+                        push(kind::Literal, "`");
+                        continue;
+                    }
+                    push(kind::Close, "}");
+                    continue;
+                }
+                ++i;
+                push(kind::Punctuator, s.substr(i - 1u, 1u));
+                if (c == '.' && i < s.size() && s[i] == '.' && i + 1u < s.size() && s[i + 1u] == '.')
+                    i += 2u;
+                else if (c == '?' && i < s.size() && s[i] == '.' && !(i + 1u < s.size() && std::isdigit(static_cast<unsigned char>(s[i + 1u]))))
+                {
+                    ++i;
+                    previous.text = "?.";
+                }
+            }
+            return result;
+        }
+    }
+
+    void compiler::preparse(i_source_fragment& aFragment)
+    {
+        // (the keywords that a previous pass found to be identifiers parsed as operators (see keyword_operators): their first letters
+        // capitalized (the source's length and offsets unchanged), so that they parse as identifiers (see identifier_text))
+        auto const text = aFragment.source().to_std_string();
+        auto const preparsed = iPreparsedSources.find(text);
+        std::string const original = preparsed != iPreparsedSources.end() ? preparsed->second : text;
+        // (those that a scan of its tokens finds, and those that a pass's tree found (see keyword_operators), but those that a pass's tree
+        // found to be operators)
+        auto sites = keyword_division_sites(original, iKind == code_kind::Module);
+        if (auto const found = iKeywordIdentifiers.find(original); found != iKeywordIdentifiers.end())
+            sites.insert(found->second.begin(), found->second.end());
+        if (auto const operators = iKeywordOperators.find(original); operators != iKeywordOperators.end())
+            for (auto const offset : operators->second)
+                sites.erase(offset);
+        if (sites.empty() && preparsed == iPreparsedSources.end())
+            return;
+        if (!sites.empty())
+            iKeywordIdentifiers[original] = sites;
+        std::string renamed = original;
+        for (auto const offset : sites)
+            if (offset < renamed.size())
+                renamed[offset] = static_cast<char>(std::toupper(static_cast<unsigned char>(renamed[offset])));
+        if (renamed != text)
+        {
+            if (renamed != original)
+                iPreparsedSources[renamed] = original;
+            aFragment.set_source(neolib::string_view{ renamed });
+        }
+        if (iDepth == 1)
+            iSource = aFragment.source().to_std_string_view();
+    }
+
+    std::string compiler::original_source() const
+    {
+        std::string const text{ iSource };
+        auto const preparsed = iPreparsedSources.find(text);
+        return preparsed != iPreparsedSources.end() ? preparsed->second : text;
+    }
+
 
     bool compiler::frame_name(std::uint32_t aFunction, neolib::i_string& aName)
     {
@@ -244,6 +669,13 @@ namespace neos::compilers::javascript
 
         std::string identifier_text(node const* aNode)
         {
+            // (yield or await renamed by the preparse (see compiler::preparse): the keyword)
+            if (aNode->keywordIdentifier)
+            {
+                std::string keyword{ aNode->source };
+                keyword[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(keyword[0])));
+                return keyword;
+            }
             // (an identifier: its unicode escapes are its characters)
             std::string const text{ aNode->source };
             if (text.find('\\') == std::string::npos)
@@ -409,8 +841,8 @@ namespace neos::compilers::javascript
         }
     }
 
-    void compiler::diagnose(i_source_fragment const&, std::uint32_t&, std::uint32_t&, std::uint32_t&, std::uint32_t&, neolib::i_string& aType,
-        neolib::i_string& aMessage, neolib::i_string&)
+    void compiler::diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t&, std::uint32_t&,
+        neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport)
     {
         // (a source that does not parse: ECMAScript's SyntaxError)
         std::string const type = aType.to_std_string();
@@ -420,6 +852,32 @@ namespace neos::compilers::javascript
         for (auto const prefix : { "failed to fold semantic concepts: ", "failed to fold semantic concept: " })
             if (message.starts_with(prefix))
                 aMessage = neolib::string{ message.substr(std::char_traits<char>::length(prefix)) };
+        // (a source whose keywords the preparse renamed (see preparse): the report (as the compiler's has it) shows it as written)
+        if (auto const preparsed = iPreparsedSources.find(aFragment.source().to_std_string()); preparsed != iPreparsedSources.end())
+        {
+            std::vector<std::string> lines;
+            std::istringstream input{ preparsed->second };
+            for (std::string line; std::getline(input, line);)
+                lines.push_back(line);
+            auto const width = std::to_string(lines.size()).size();
+            std::ostringstream report;
+            std::uint32_t number = 1u;
+            for (auto const& line : lines)
+            {
+                if (std::abs(static_cast<int>(aLine) - static_cast<int>(number)) <= 5)
+                {
+                    std::string shown;
+                    for (auto const c : line)
+                        shown += c == '\0' ? std::string{ "\\0" } : std::string(1u, c);
+                    report << std::setw(static_cast<int>(width)) << number << (number == aLine ? ">" : "|") << shown << std::endl;
+                }
+                ++number;
+            }
+            report << std::string(aColumn + width, '-') << "^" << std::endl;
+            report << (aFragment.source_file_path() != std::nullopt ? aFragment.source_file_path()->to_std_string() : std::string{}) << "(" << aLine <<
+                "," << aColumn << "): " << aType.to_std_string() << ": " << aMessage.to_std_string();
+            aReport = neolib::string{ report.str() };
+        }
     }
 
     bool compiler::directive_strict(node* aStatements) const
@@ -470,9 +928,40 @@ namespace neos::compilers::javascript
                     invalid();
             }
         }
+        // (yield and await that are identifiers where they parsed as operators of a regular expression literal: renamed by the next pass's
+        // preparse (this pass's tree is not the program's: its early errors are not reported); those renamed: identifiers)
+        bool keywordsFound = false;
+        {
+            auto const original = original_source();
+            if (auto const keywords = iKeywordIdentifiers.find(original); keywords != iKeywordIdentifiers.end())
+                mark_keyword_identifiers(aScript, keywords->second);
+            std::set<std::size_t> offsets;
+            std::set<std::size_t> operators;
+            keyword_operators(aScript, false, iKind == code_kind::Module, offsets, operators);
+            if (!offsets.empty())
+            {
+                auto& known = iKeywordIdentifiers[original];
+                auto const before = known.size();
+                known.insert(offsets.begin(), offsets.end());
+                if (known.size() != before)
+                    keywordsFound = true;
+            }
+            if (!operators.empty())
+            {
+                // (renamed where they are operators (the scan's mistake): not renamed by the next pass)
+                auto& known = iKeywordOperators[original];
+                auto const before = known.size();
+                known.insert(operators.begin(), operators.end());
+                if (known.size() != before)
+                    keywordsFound = true;
+            }
+            if (keywordsFound)
+                generator().set_changed();
+        }
         // (await operators that parse as calls of a function named await (e.g. await (x), await `x`))
         await_operators(aScript, iKind == code_kind::Module);
-        check_early_errors(aScript);
+        if (!keywordsFound)
+            check_early_errors(aScript);
         if_clause_functions(aScript);
         yield_identifiers(aScript, false);
         array_commas(aScript);
@@ -649,6 +1138,65 @@ namespace neos::compilers::javascript
             }
         for (auto* c : aNode->children)
             if_clause_functions(c);
+    }
+
+    void compiler::keyword_operators(node* aNode, bool aGenerator, bool aAwait, std::set<std::size_t>& aOffsets, std::set<std::size_t>& aOperators) const
+    {
+        // (the contexts as yield_identifiers and await_operators have them: a generator's code (yield an operator), an async function's
+        // or a module's (await an operator))
+        if (aNode->function != nullptr || aNode->is(construct::Function) || aNode->is(construct::FunctionExpression) ||
+            aNode->is(construct::AsyncFunction) || aNode->is(construct::AsyncFunctionExpression) || aNode->is(construct::Method) ||
+            aNode->is(construct::GeneratorMethod) || aNode->is(construct::AsyncMethod) || aNode->is(construct::AsyncGeneratorMethod) ||
+            aNode->is(construct::Getter) || aNode->is(construct::Setter))
+            aGenerator = generator_header(aNode);
+        switch (aNode->kind)
+        {
+        case construct::AsyncFunction:
+        case construct::AsyncFunctionExpression:
+        case construct::AsyncArrow:
+        case construct::AsyncMethod:
+        case construct::AsyncGeneratorMethod:
+            aAwait = true;
+            break;
+        case construct::Function:
+        case construct::FunctionExpression:
+        case construct::Arrow:
+        case construct::Method:
+        case construct::GeneratorMethod:
+        case construct::Getter:
+        case construct::Setter:
+        case construct::Field:
+        case construct::StaticBlock:
+            aAwait = false;
+            break;
+        default:
+            break;
+        }
+        // (an operator whose operand begins with a slash (a regular expression literal) where the keyword is an identifier: a division)
+        auto const slashed = [&](std::string_view aKeyword)
+        {
+            if (!aNode->source.starts_with(aKeyword) || aNode->size() == 0u)
+                return false;
+            auto rest = aNode->source.substr(aKeyword.size());
+            while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t' || rest.front() == '\v' || rest.front() == '\f'))
+                rest.remove_prefix(1u);
+            return rest.starts_with("/");
+        };
+        if ((aNode->is(construct::Yield) && !aGenerator && slashed("yield")) || (aNode->is(construct::Await) && !aAwait && slashed("await")))
+            aOffsets.insert(static_cast<std::size_t>(aNode->source.data() - iSource.data()));
+        // (a renamed keyword where it is an operator)
+        if (aNode->keywordIdentifier && ((aNode->source.starts_with("Yield") && aGenerator) || (aNode->source.starts_with("Await") && aAwait)))
+            aOperators.insert(static_cast<std::size_t>(aNode->source.data() - iSource.data()));
+        for (auto* c : aNode->children)
+            keyword_operators(c, aGenerator, aAwait, aOffsets, aOperators);
+    }
+
+    void compiler::mark_keyword_identifiers(node* aNode, std::set<std::size_t> const& aOffsets) const
+    {
+        if (aNode->is(construct::Identifier) && aOffsets.contains(static_cast<std::size_t>(aNode->source.data() - iSource.data())))
+            aNode->keywordIdentifier = true;
+        for (auto* c : aNode->children)
+            mark_keyword_identifiers(c, aOffsets);
     }
 
     void compiler::yield_identifiers(node* aNode, bool aGenerator)
@@ -1640,14 +2188,24 @@ namespace neos::compilers::javascript
     {
         if (!iSourceLiteral)
         {
-            // (the script's source text as a literal (UTF-8, NUL as C0 80: see utf8_encoding))
+            // (the script's source text as a literal (UTF-8, NUL as C0 80: see utf8_encoding)), as written (the keywords that the preparse
+            // renamed: see preparse)
+            std::string written{ iSourceText };
+            if (auto const keywords = iKeywordIdentifiers.find(original_source()); keywords != iKeywordIdentifiers.end() &&
+                iSourceText.data() >= iSource.data() && iSourceText.data() + iSourceText.size() <= iSource.data() + iSource.size())
+            {
+                auto const base = static_cast<std::size_t>(iSourceText.data() - iSource.data());
+                for (auto const offset : keywords->second)
+                    if (offset >= base && offset - base < written.size())
+                        written[offset - base] = static_cast<char>(std::tolower(static_cast<unsigned char>(written[offset - base])));
+            }
             std::string text;
-            if (iSourceText.find('\0') == std::string_view::npos)
-                text = iSourceText;
+            if (written.find('\0') == std::string::npos)
+                text = written;
             else
             {
-                text.reserve(iSourceText.size());
-                for (auto c : iSourceText)
+                text.reserve(written.size());
+                for (auto c : written)
                 {
                     if (c == '\0')
                         text.append("\xC0\x80");

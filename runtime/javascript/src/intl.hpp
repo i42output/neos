@@ -130,7 +130,9 @@ namespace neos::javascript_runtime::intl
         std::vector<relevant_key> const& aKeys, locale_data const& aData);
     bool is_type_sequence(std::u16string_view aValue);     ///< (a Unicode locale type: (3*8alphanum) *("-" (3*8alphanum)))
     std::string default_numbering_system(std::string const& aDataLocale);
-    bool is_supported_numbering_system(std::string const& aDataLocale, std::string const& aValue);  ///< (the default, or ICU's not algorithmic)
+    bool is_supported_numbering_system(std::string const& aDataLocale, std::string const& aValue);  ///< (the default, ECMA-402's simple digit mappings, or ICU's not algorithmic)
+    std::string icu_numbering_system(std::string const& aSystem);  ///< (the numbering system that ICU formats with: latn for a simple digit mapping that ICU's data lacks)
+    void map_digits(std::u16string& aText, std::string const& aSystem);    ///< (ICU's latn digits as a simple digit mapping's that ICU's data lacks)
     value supported_locales(service aService, value aLocales, value aOptions);  ///< (FilterLocales: an array)
     std::string insert_unicode_extension(std::string const& aLocale, std::vector<std::pair<std::string, std::string>> const& aKeywords);
 
@@ -211,6 +213,7 @@ namespace neos::javascript_runtime::intl
         std::optional<std::u16string> unit;     ///< (RelativeTimeFormat, DurationFormat: the unit)
     };
     value parts_array(std::vector<part> const& aParts);
+    void map_digits(std::vector<part>& aParts, std::string const& aSystem);    ///< (map_digits of each part's text)
 
     // (an ICU formatted value's fields, as spans of its text: parts of the text (the innermost field of each code unit: its type by
     // aType (none: a literal); runs of a field are one part (a field that recurs adjacently, e.g. two integer groups, is a part each)))

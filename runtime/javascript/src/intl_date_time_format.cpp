@@ -104,7 +104,7 @@ namespace neos::javascript_runtime::intl
             auto const* calendar = uloc_toLegacyType("ca", aCalendar.c_str());
             icu += "@calendar=" + std::string{ calendar != nullptr ? calendar : aCalendar.c_str() };
             if (!aNumberingSystem.empty())
-                icu += ";numbers=" + aNumberingSystem;
+                icu += ";numbers=" + icu_numbering_system(aNumberingSystem);    // (see map_digits)
             return icu;
         }
 
@@ -855,7 +855,9 @@ namespace neos::javascript_runtime::intl
         std::u16string format_date_time(date_time_format_data& d, formattable const& x)
         {
             auto* f = format_for(d, x.k);
-            return web_compatible(icu_string([&](UChar* b, std::int32_t c, UErrorCode* s) { return udat_format(f, x.ms, b, c, nullptr, s); }));
+            auto text = web_compatible(icu_string([&](UChar* b, std::int32_t c, UErrorCode* s) { return udat_format(f, x.ms, b, c, nullptr, s); }));
+            map_digits(text, d.numberingSystem);
+            return text;
         }
 
         std::u16string date_field_type(std::int32_t aField)
@@ -916,7 +918,9 @@ namespace neos::javascript_runtime::intl
                     break;
                 spans.push_back({ UFIELD_CATEGORY_DATE, field, begin, end });
             }
-            return make_parts(text, spans, date_part_type, nullptr);
+            auto parts = make_parts(text, spans, date_part_type, nullptr);
+            map_digits(parts, d.numberingSystem);
+            return parts;
         }
 
         // --- ranges
@@ -1004,6 +1008,7 @@ namespace neos::javascript_runtime::intl
                 p.source = source;
                 offset += static_cast<std::int32_t>(p.text.size());
             }
+            map_digits(parts, d.numberingSystem);
             return parts;
         }
 

@@ -87,7 +87,7 @@ namespace neos::javascript_runtime::intl
             d.numberingSystem = r.keywords.at("nu");
             d.style = to_ascii(*get_string_option(options, "style", { "long", "short", "narrow" }, "long"));
             d.numeric = to_ascii(*get_string_option(options, "numeric", { "always", "auto" }, "always"));
-            auto const icu = icu_locale(r.dataLocale) + "@numbers=" + d.numberingSystem;
+            auto const icu = icu_locale(r.dataLocale) + "@numbers=" + icu_numbering_system(d.numberingSystem);   // (see map_digits)
             UErrorCode status = U_ZERO_ERROR;
             auto* number = unum_open(UNUM_DECIMAL, nullptr, 0, icu.c_str(), nullptr, &status);
             if (U_FAILURE(status))
@@ -160,6 +160,7 @@ namespace neos::javascript_runtime::intl
             for (auto& p : parts)
                 if (p.type != u"literal")
                     p.unit = from_ascii(singular);
+            map_digits(parts, d.numberingSystem);
             return parts;
         }
 

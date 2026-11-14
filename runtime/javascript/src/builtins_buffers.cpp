@@ -585,17 +585,19 @@ namespace neos::javascript_runtime
 
         value data_view_byte_length(value aThis, arguments, value, function_object&)
         {
+            // (an out of bounds view (its buffer detached, or shrunk past it): +0 (get DataView.prototype.byteLength, step 5))
             auto& v = this_view(aThis, "byteLength");
             if (view_out_of_bounds(v))
-                throw_type_error("DataView is out of bounds");
+                return number(0.0);
             return number(static_cast<double>(view_byte_length(v)));
         }
 
         value data_view_byte_offset(value aThis, arguments, value, function_object&)
         {
+            // (an out of bounds view: +0 (get DataView.prototype.byteOffset, step 5))
             auto& v = this_view(aThis, "byteOffset");
             if (view_out_of_bounds(v))
-                throw_type_error("DataView is out of bounds");
+                return number(0.0);
             return number(static_cast<double>(v.byteOffset));
         }
 

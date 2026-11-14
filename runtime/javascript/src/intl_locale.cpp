@@ -530,6 +530,12 @@ namespace neos::javascript_runtime::intl
             if (auto const s = aliases().subdivisions.find(value); s != aliases().subdivisions.end())
                 value = s->second;
         }
+        else if (aKey == "tz" && (value == "est" || value == "mst" || value == "hst"))
+        {
+            // (CLDR 46's aliases (tzdata 2024b links EST, MST and HST to America/Panama, America/Phoenix and Pacific/Honolulu): an
+            // older ICU's data has the fixed offset zones (utcw05, utcw07, utcw10))
+            value = value == "est" ? "papty" : value == "mst" ? "usphx" : "ushnl";
+        }
         else if (!value.empty())
         {
             auto const key = std::string{ aKey };

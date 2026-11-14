@@ -61,6 +61,7 @@ namespace neos::compilers::javascript
         function_info* function = nullptr;  ///< (a function node: its function)
         std::int32_t site = -1;             ///< (a tagged template: its site)
         bool annexB = false;                ///< (a block's function declaration that also assigns its function's var binding (Annex B.3.3))
+        bool keywordIdentifier = false;     ///< (yield or await as an identifier, renamed by the preparse so that it parses as one (see preparse))
 
         bool is(construct aKind) const { return kind == aKind; }
         node* child(std::size_t aIndex) const { return aIndex < children.size() ? children[aIndex] : nullptr; }
@@ -556,6 +557,7 @@ namespace neos::compilers::javascript
         void end_pass() override;
         void begin_fragment(i_source_fragment& aFragment) override;
         void end_fragment() override;
+        void preparse(i_source_fragment& aFragment) override;
         void emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
         void set_options(neolib::i_string const& aOptions) override;
@@ -573,6 +575,16 @@ namespace neos::compilers::javascript
     private:
         void yield_identifiers(node* aNode, bool aGenerator);
         void yield_identifiers_child(node* aNode, std::size_t aIndex, bool aGenerator);
+        // (yield and await where they are identifiers but parsed as operators of a regular expression literal (e.g. "yield /a; b/g" outside
+        // generators: a division, which the literal hides): their offsets (in the fragment's source as written), for the next pass's preparse
+        // to rename them (their first letter capitalized: an identifier that parses as one, named by its node's keywordIdentifier))
+        std::string original_source() const;
+        void keyword_operators(node* aNode, bool aGenerator, bool aAwait, std::set<std::size_t>& aOffsets, std::set<std::size_t>& aOperators) const;
+        void mark_keyword_identifiers(node* aNode, std::set<std::size_t> const& aOffsets) const;
+        std::map<std::string, std::set<std::size_t>, std::less<>> iKeywordIdentifiers;  ///< (a fragment's source as written: the offsets)
+        std::map<std::string, std::string, std::less<>> iPreparsedSources;              ///< (a source as the preparse renamed its keywords: as written)
+        std::map<std::string, std::set<std::size_t>, std::less<>> iKeywordOperators;    ///< (a fragment's source as written: the offsets of keywords
+                                                                                        ///< that the scan took to be identifiers but are operators)
         bool keyword_identifier_operand(node* aKeyword, node* aLeftmost, node* aBoundary);
         void array_commas(node* aNode);
         void eval_context_errors(node* aNode);

@@ -316,14 +316,16 @@ namespace neos::javascript_runtime
         {
             auto const& text = str(aS);
             auto const length = static_cast<double>(text.size());
+            // (ToLength(lastIndex) (step 2), before the flags and the matcher are read (steps 3, 8): its valueOf can recompile the
+            // regexp; a number's ToLength has no effect, so it is done only if it is used (global or sticky))
+            auto const lastIndexValue = last_index(aR, aRValue, aState);
+            bool const numberIndex = is_number(lastIndexValue);
+            double lastIndex = numberIndex ? 0.0 : to_length(lastIndexValue);
             auto const bits = aR.flagBits;
             bool const global = (bits & regexp::FlagGlobal) != 0u;
             bool const sticky = (bits & regexp::FlagSticky) != 0u;
             bool const fullUnicode = (bits & (regexp::FlagUnicode | regexp::FlagUnicodeSets)) != 0u;
-            // (ToLength(lastIndex): unless it is a number (ToLength has no effect) that is not used (neither global nor sticky))
-            auto const lastIndexValue = last_index(aR, aRValue, aState);
-            double lastIndex = 0.0;
-            if (global || sticky || !is_number(lastIndexValue))
+            if (numberIndex && (global || sticky))
                 lastIndex = to_length(lastIndexValue);
             if (!global && !sticky)
                 lastIndex = 0.0;

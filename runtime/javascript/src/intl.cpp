@@ -227,13 +227,100 @@ namespace neos::javascript_runtime::intl
         return U_SUCCESS(status) && unumsys_getName(ns.get()) != nullptr ? unumsys_getName(ns.get()) : "latn";
     }
 
+    namespace
+    {
+        // (ECMA-402's numbering systems with simple digit mappings (the table "Numbering systems with simple digit mappings"): each
+        // one's zero (its digits are the ten code points from it), but hanidec's, whose digits are not consecutive)
+        struct simple_digits
+        {
+            char const* name;
+            char32_t zero;
+        };
+        constexpr simple_digits sSimpleDigits[] =
+        {
+            { "adlm", 0x1E950 }, { "ahom", 0x11730 }, { "arab", 0x0660 }, { "arabext", 0x06F0 }, { "bali", 0x1B50 }, { "beng", 0x09E6 },
+            { "bhks", 0x11C50 }, { "brah", 0x11066 }, { "cakm", 0x11136 }, { "cham", 0xAA50 }, { "deva", 0x0966 }, { "diak", 0x11950 },
+            { "fullwide", 0xFF10 }, { "gara", 0x10D40 }, { "gong", 0x11DA0 }, { "gonm", 0x11D50 }, { "gujr", 0x0AE6 }, { "gukh", 0x16130 },
+            { "guru", 0x0A66 }, { "hanidec", 0 }, { "hmng", 0x16B50 }, { "hmnp", 0x1E140 }, { "java", 0xA9D0 }, { "kali", 0xA900 },
+            { "kawi", 0x11F50 }, { "khmr", 0x17E0 }, { "knda", 0x0CE6 }, { "krai", 0x16D70 }, { "lana", 0x1A80 }, { "lanatham", 0x1A90 },
+            { "laoo", 0x0ED0 }, { "latn", 0x0030 }, { "lepc", 0x1C40 }, { "limb", 0x1946 }, { "mathbold", 0x1D7CE }, { "mathdbl", 0x1D7D8 },
+            { "mathmono", 0x1D7F6 }, { "mathsanb", 0x1D7EC }, { "mathsans", 0x1D7E2 }, { "mlym", 0x0D66 }, { "modi", 0x11650 },
+            { "mong", 0x1810 }, { "mroo", 0x16A60 }, { "mtei", 0xABF0 }, { "mymr", 0x1040 }, { "mymrepka", 0x116DA }, { "mymrpao", 0x116D0 },
+            { "mymrshan", 0x1090 }, { "mymrtlng", 0xA9F0 }, { "nagm", 0x1E4F0 }, { "newa", 0x11450 }, { "nkoo", 0x07C0 }, { "olck", 0x1C50 },
+            { "onao", 0x1E5F1 }, { "orya", 0x0B66 }, { "osma", 0x104A0 }, { "outlined", 0x1CCF0 }, { "rohg", 0x10D30 }, { "saur", 0xA8D0 },
+            { "segment", 0x1FBF0 }, { "shrd", 0x111D0 }, { "sind", 0x112F0 }, { "sinh", 0x0DE6 }, { "sora", 0x110F0 }, { "sund", 0x1BB0 },
+            { "sunu", 0x11BF0 }, { "takr", 0x116C0 }, { "talu", 0x19D0 }, { "tamldec", 0x0BE6 }, { "telu", 0x0C66 }, { "thai", 0x0E50 },
+            { "tibt", 0x0F20 }, { "tirh", 0x114D0 }, { "tnsa", 0x16AC0 }, { "tols", 0x11DE0 }, { "vaii", 0xA620 }, { "wara", 0x118E0 },
+            { "wcho", 0x1E2F0 }
+        };
+        constexpr char16_t sHanidec[] = u"\u3007\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D";
+
+        simple_digits const* simple_digits_of(std::string_view aSystem)
+        {
+            for (auto const& s : sSimpleDigits)
+                if (aSystem == s.name)
+                    return &s;
+            return nullptr;
+        }
+
+        bool icu_has_numbering_system(std::string const& aSystem)
+        {
+            UErrorCode status = U_ZERO_ERROR;
+            numbering_system_ptr ns{ unumsys_openByName(aSystem.c_str(), &status) };
+            return U_SUCCESS(status) && ns && !unumsys_isAlgorithmic(ns.get());
+        }
+    }
+
     bool is_supported_numbering_system(std::string const& aDataLocale, std::string const& aValue)
     {
         if (default_numbering_system(aDataLocale) == aValue)
             return true;
-        UErrorCode status = U_ZERO_ERROR;
-        numbering_system_ptr ns{ unumsys_openByName(aValue.c_str(), &status) };
-        return U_SUCCESS(status) && ns && !unumsys_isAlgorithmic(ns.get());
+        // (ECMA-402's numbering systems with simple digit mappings are supported whether or not ICU's data has them (its older
+        // versions lack the newer ones): see icu_numbering_system and map_digits)
+        return simple_digits_of(aValue) != nullptr || icu_has_numbering_system(aValue);
+    }
+
+    std::string icu_numbering_system(std::string const& aSystem)
+    {
+        if (aSystem.empty() || icu_has_numbering_system(aSystem) || simple_digits_of(aSystem) == nullptr)
+            return aSystem;
+        return "latn";
+    }
+
+    void map_digits(std::u16string& aText, std::string const& aSystem)
+    {
+        if (aSystem.empty() || icu_numbering_system(aSystem) == aSystem)
+            return;
+        auto const* digits = simple_digits_of(aSystem);
+        if (digits == nullptr)
+            return;
+        std::u16string result;
+        result.reserve(aText.size() * 2u);
+        for (auto const c : aText)
+        {
+            if (c < u'0' || c > u'9')
+            {
+                result += c;
+                continue;
+            }
+            auto const i = static_cast<char32_t>(c - u'0');
+            if (digits->zero == 0)
+                result += sHanidec[i];
+            else if (auto const cp = digits->zero + i; cp < 0x10000)
+                result += static_cast<char16_t>(cp);
+            else
+            {
+                result += static_cast<char16_t>(0xD800 + ((cp - 0x10000) >> 10));
+                result += static_cast<char16_t>(0xDC00 + ((cp - 0x10000) & 0x3FF));
+            }
+        }
+        aText = std::move(result);
+    }
+
+    void map_digits(std::vector<part>& aParts, std::string const& aSystem)
+    {
+        for (auto& p : aParts)
+            map_digits(p.text, aSystem);
     }
 
     std::vector<field_span> formatted_value_spans(UFormattedValue const* aValue)
@@ -841,6 +928,9 @@ namespace neos::javascript_runtime::intl
                     if (U_SUCCESS(s) && !unumsys_isAlgorithmic(ns.get()))
                         values.insert(v);
                 }
+                // (and ECMA-402's numbering systems with simple digit mappings, which are supported even if ICU's data lacks them)
+                for (auto const& d : sSimpleDigits)
+                    values.insert(d.name);
             }
             else if (key == "timeZone")
             {

@@ -1658,7 +1658,9 @@ namespace neos::javascript_runtime::temporal
         calendar_resolve_fields(aCalendar, aFields, 2);
         if (aCalendar != calendar_id::Iso8601)
             return non_iso_month_day_to_iso_reference_date(aCalendar, aFields, aOverflow);
-        auto const year = aFields.year ? clamp_int(*aFields.year) : 1972;
+        // (the year only decides February's length (it is not range checked): a year of the same leap status (the 400 year cycle's), as
+        // any integral year (beyond int64's range too) has one)
+        auto const year = aFields.year ? 2000 + static_cast<std::int64_t>(std::fmod(std::fmod(*aFields.year, 400.0) + 400.0, 400.0)) : 1972;
         auto const result = regulate_iso_date(year, clamp_int(*aFields.month), clamp_int(*aFields.day), aOverflow);
         return { 1972, result.month, result.day };
     }
