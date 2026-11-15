@@ -224,10 +224,12 @@ namespace neos::python_runtime
                 error("NameError", std::string{ "name '" } + aName + "' is not defined");
         }
 
-        // (the depth of calls of the program's functions (its module's frame is not counted: CPython's limit counts it))
-        void fn_depth_check(std::int32_t aDepth)
+        // (the depth of calls of the program's functions (its module's frame is not counted: CPython's limit counts it)); the depth beyond 
+        // which the program's calls check it next (at most 64: shallower calls do not call this; lower if the limit is lower)
+        std::int32_t fn_depth_check(std::int32_t aDepth)
         {
-            if (aDepth >= recursion_limit())
+            auto const limit = recursion_limit();
+            if (aDepth >= limit)
             {
                 // (raised as the function is entered: its frame is not one the exception passes through (as CPython's frame is 
                 // not made))
@@ -236,6 +238,7 @@ namespace neos::python_runtime
             }
             else
                 signals_check();
+            return static_cast<std::int32_t>(std::clamp(limit - 1, 0ll, 64ll));
         }
 
         // (the namespace of a class's body)
@@ -293,6 +296,8 @@ namespace neos::python_runtime
                 return h != nullptr && h->version >= NEOS_RUNTIME_PLUGIN_VERSION && h->frames != nullptr && h->frames(&aFrame, 1u) == 1u;
             }
         }
+
+        bool namespace_exists(char const* aName);   // (exec.cpp)
 
         namespace
         {
@@ -424,10 +429,16 @@ namespace neos::python_runtime
             // (f_globals: exec's globals of the program the frame belongs to, else its module's namespace)
             object* frame_globals(neos_rt_frame const& aFrame)
             {
-                if (auto const globals = exec_globals_of(aFrame.program))
-                    return (retain(globals), globals);
+                // (an imported module's: its names (its __dict__), also of a module imported at run time (whose program is the exec of its 
+                // import: not that exec's globals); else exec's code's: its globals)
                 auto const module = frame_module(aFrame);
-                // (an imported module's: its names (its __dict__))
+                if (module == "__main__")
+                    if (auto const globals = exec_globals_of(aFrame.program))
+                        return (retain(globals), globals);
+                // (a module whose namespace has been made (globals()'s), or whose names' getter the program registered (see 
+                // python::register_namespace): that namespace)
+                if (module != "__main__" && namespace_exists(module.c_str()))
+                    return fn_module_namespace(module.c_str(), nullptr);
                 if (module != "__main__")
                     if (ref const modules{ imported_modules() }; modules && kind_of(builtin_value(modules.get())) == NEOS_PY_DICT)
                     {

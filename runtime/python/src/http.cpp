@@ -160,13 +160,17 @@ namespace neos::python_runtime::detail::http_module
         void make_http()
         {
             static module_writer const& w = writer("http");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("http", "StrEnum", import_attribute("enum", "StrEnum"));
+            define("http", "IntEnum", import_attribute("enum", "IntEnum"));
+            define("http", "_simple_enum", import_attribute("enum", "_simple_enum"));
             define("http", "__all__", py_list({ S<"HTTPStatus">(), S<"HTTPMethod">() }));
                 // informational
                 // success
                 // redirection
                 // client error
                 // server errors
-            define("http", "HTTPStatus", (Mod<"enum">().attr("_simple_enum"))(Mod<"enum">().attr("IntEnum"))(w.make_class("HTTPStatus", {  }, {
+            define("http", "HTTPStatus", (G<"http._simple_enum">())(G<"http.IntEnum">())(w.make_class("HTTPStatus", {  }, {
                 { "__new__", w.method("HTTPStatus", "__new__", { py_positional("value"), py_positional("phrase"), py_positional("description", S<"">()) }, [](arguments a) -> py
                     {
                         py cls = a[0];
@@ -272,7 +276,7 @@ namespace neos::python_runtime::detail::http_module
                 { "NOT_EXTENDED", py_tuple({ I<510>(), S<"Not Extended">() }) },
                 { "NETWORK_AUTHENTICATION_REQUIRED", py_tuple({ I<511>(), S<"Network Authentication Required">(), S<"The client needs to authenticate to gain network access">() }) }, })));
 
-            define("http", "HTTPMethod", (Mod<"enum">().attr("_simple_enum"))(Mod<"enum">().attr("StrEnum"))(w.make_class("HTTPMethod", {  }, {
+            define("http", "HTTPMethod", (G<"http._simple_enum">())(G<"http.StrEnum">())(w.make_class("HTTPMethod", {  }, {
                 { "__new__", w.method("HTTPMethod", "__new__", { py_positional("value"), py_positional("description") }, [](arguments a) -> py
                     {
                         py cls = a[0];
@@ -312,9 +316,6 @@ namespace neos::python_runtime::detail::http_module
                 }
                 if (auto const doc = http_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("StrEnum", import_attribute("enum", "StrEnum").release());
-                aAttributes.emplace_back("IntEnum", import_attribute("enum", "IntEnum").release());
-                aAttributes.emplace_back("_simple_enum", import_attribute("enum", "_simple_enum").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -323,6 +324,14 @@ namespace neos::python_runtime::detail::http_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("http", http_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("http", http_module, assigned);
     }
 }

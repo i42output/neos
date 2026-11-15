@@ -160,6 +160,15 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
         void make_xmlrpc_server()
         {
             static module_writer const& w = writer("xmlrpc.server");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xmlrpc.server", "Fault", import_attribute("xmlrpc.client", "Fault"));
+            define("xmlrpc.server", "dumps", import_attribute("xmlrpc.client", "dumps"));
+            define("xmlrpc.server", "loads", import_attribute("xmlrpc.client", "loads"));
+            define("xmlrpc.server", "gzip_encode", import_attribute("xmlrpc.client", "gzip_encode"));
+            define("xmlrpc.server", "gzip_decode", import_attribute("xmlrpc.client", "gzip_decode"));
+            define("xmlrpc.server", "BaseHTTPRequestHandler", import_attribute("http.server", "BaseHTTPRequestHandler"));
+            define("xmlrpc.server", "partial", import_attribute("functools", "partial"));
+            define("xmlrpc.server", "signature", import_attribute("inspect", "signature"));
             // Written by Brian Quinlan (brian@sweetapp.com).
             // Based on code written by Fredrik Lundh.
             define("xmlrpc.server", "resolve_dotted_attribute", w.function("resolve_dotted_attribute", "resolve_dotted_attribute", { py_positional("obj"), py_positional("attr"), py_positional("allow_dotted_names", boolean(true)) }, [](arguments a) -> py
@@ -229,7 +238,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                         // decorator factory
                         if (function.is_none())
                         {
-                            return (Mod<"functools">().attr("partial")).call({ self.attr("register_function") }, { { "name", name } });
+                            return (G<"xmlrpc.server.partial">()).call({ self.attr("register_function") }, { { "name", name } });
                         }
                         if (name.is_none())
                         {
@@ -263,7 +272,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                         py response;
                         try
                         {
-                            auto const items4 = unpack((Mod<"xmlrpc.client">().attr("loads")).call({ data }, { { "use_builtin_types", self.attr("use_builtin_types") } }), 2);
+                            auto const items4 = unpack((G<"xmlrpc.server.loads">()).call({ data }, { { "use_builtin_types", self.attr("use_builtin_types") } }), 2);
                             params = items4[0];
                             method = items4[1];
                             // generate response
@@ -277,20 +286,20 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                             }
                             // wrap response in a singleton tuple
                             response = py_tuple({ response });
-                            response = (Mod<"xmlrpc.client">().attr("dumps")).call({ response }, { { "methodresponse", I<1>() }, { "allow_none", self.attr("allow_none") }, { "encoding", self.attr("encoding") } });
+                            response = (G<"xmlrpc.server.dumps">()).call({ response }, { { "methodresponse", I<1>() }, { "allow_none", self.attr("allow_none") }, { "encoding", self.attr("encoding") } });
                         }
                         catch (raised const&)
                         {
                             pyclass::handler_scope handler3;
-                            if (matches(handler3.exception, Mod<"xmlrpc.client">().attr("Fault")))
+                            if (matches(handler3.exception, G<"xmlrpc.server.Fault">()))
                             {
                                 fault = handler3.exception;
-                                response = (Mod<"xmlrpc.client">().attr("dumps")).call({ fault }, { { "allow_none", self.attr("allow_none") }, { "encoding", self.attr("encoding") } });
+                                response = (G<"xmlrpc.server.dumps">()).call({ fault }, { { "allow_none", self.attr("allow_none") }, { "encoding", self.attr("encoding") } });
                             }
                             else if (matches(handler3.exception, B<"BaseException">()))
                             {
                                 exc = handler3.exception;
-                                response = (Mod<"xmlrpc.client">().attr("dumps")).call({ (Mod<"xmlrpc.client">().attr("Fault"))(I<1>(), (S<"%s:%s">()) % py_tuple({ (B<"type">())(exc), exc })) }, { { "encoding", self.attr("encoding") }, { "allow_none", self.attr("allow_none") } });
+                                response = (G<"xmlrpc.server.dumps">()).call({ (G<"xmlrpc.server.Fault">())(I<1>(), (S<"%s:%s">()) % py_tuple({ (B<"type">())(exc), exc })) }, { { "encoding", self.attr("encoding") }, { "allow_none", self.attr("allow_none") } });
                             }
                             else
                                 py_reraise(handler3.exception);
@@ -402,7 +411,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                             catch (raised const&)
                             {
                                 pyclass::handler_scope handler7;
-                                if (matches(handler7.exception, Mod<"xmlrpc.client">().attr("Fault")))
+                                if (matches(handler7.exception, G<"xmlrpc.server.Fault">()))
                                 {
                                     fault = handler7.exception;
                                     results.method("append", { dict_of({ { S<"faultCode">(), fault.attr("faultCode") }, { S<"faultString">(), fault.attr("faultString") } }) });
@@ -492,7 +501,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                 // Override form StreamRequestHandler: full buffering of output
                 // and no Nagle.
                 // a re to match a gzip Accept-Encoding
-            define("xmlrpc.server", "SimpleXMLRPCRequestHandler", w.make_class("SimpleXMLRPCRequestHandler", { Mod<"http.server">().attr("BaseHTTPRequestHandler") }, {
+            define("xmlrpc.server", "SimpleXMLRPCRequestHandler", w.make_class("SimpleXMLRPCRequestHandler", { G<"xmlrpc.server.BaseHTTPRequestHandler">() }, {
                 { "rpc_paths", py_tuple({ S<"/">(), S<"/RPC2">(), S<"/pydoc.css">() }) },
                 { "encode_threshold", I<1400>() },
                 { "wbufsize", I<-1>() },
@@ -625,7 +634,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                                         {
                                             try
                                             {
-                                                response = (Mod<"xmlrpc.client">().attr("gzip_encode"))(response);
+                                                response = (G<"xmlrpc.server.gzip_encode">())(response);
                                                 self.method("send_header", { S<"Content-Encoding">(), S<"gzip">() });
                                             }
                                             catch (raised const&)
@@ -661,7 +670,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                         {
                             try
                             {
-                                return (Mod<"xmlrpc.client">().attr("gzip_decode"))(data);
+                                return (G<"xmlrpc.server.gzip_decode">())(data);
                             }
                             catch (raised const&)
                             {
@@ -705,7 +714,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                         py size = a[2];
                         if (self.attr("server").attr("logRequests").truthy())
                         {
-                            (Mod<"http.server">().attr("BaseHTTPRequestHandler")).method("log_request", { self, code, size });
+                            (G<"xmlrpc.server.BaseHTTPRequestHandler">()).method("log_request", { self, code, size });
                         }
                         return none();
                     }) }, }));
@@ -785,7 +794,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                                 // report low level exception back to server
                                 // (each dispatcher should have handled their own
                                 // exceptions)
-                                response = (Mod<"xmlrpc.client">().attr("dumps")).call({ (Mod<"xmlrpc.client">().attr("Fault"))(I<1>(), (S<"%s:%s">()) % py_tuple({ (B<"type">())(exc), exc })) }, { { "encoding", self.attr("encoding") }, { "allow_none", self.attr("allow_none") } });
+                                response = (G<"xmlrpc.server.dumps">()).call({ (G<"xmlrpc.server.Fault">())(I<1>(), (S<"%s:%s">()) % py_tuple({ (B<"type">())(exc), exc })) }, { { "encoding", self.attr("encoding") }, { "allow_none", self.attr("allow_none") } });
                                 response = response.method("encode", { self.attr("encoding"), S<"xmlcharrefreplace">() });
                             }
                             else
@@ -826,7 +835,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                         py message;
                         py response;
                         code = I<400>();
-                        auto const items16 = unpack((Mod<"http.server">().attr("BaseHTTPRequestHandler")).attr("responses")[code], 2);
+                        auto const items16 = unpack((G<"xmlrpc.server.BaseHTTPRequestHandler">()).attr("responses")[code], 2);
                         message = items16[0];
                         explain = items16[1];
                         response = (Mod<"http.server">().attr("DEFAULT_ERROR_MESSAGE")) % dict_of({ { S<"code">(), code }, { S<"message">(), message }, { S<"explain">(), explain } });
@@ -983,7 +992,7 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
             title = (S<"<a name=\"%s\"><strong>%s</strong></a>">()) % py_tuple({ self.method("escape", { anchor }), self.method("escape", { name }) });
             if (callable(object_))
             {
-                argspec = (B<"str">())((Mod<"inspect">().attr("signature"))(object_));
+                argspec = (B<"str">())((G<"xmlrpc.server.signature">())(object_));
             }
             else
             {
@@ -1287,14 +1296,6 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
                 }
                 if (auto const doc = xmlrpc_server_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("Fault", import_attribute("xmlrpc.client", "Fault").release());
-                aAttributes.emplace_back("dumps", import_attribute("xmlrpc.client", "dumps").release());
-                aAttributes.emplace_back("loads", import_attribute("xmlrpc.client", "loads").release());
-                aAttributes.emplace_back("gzip_encode", import_attribute("xmlrpc.client", "gzip_encode").release());
-                aAttributes.emplace_back("gzip_decode", import_attribute("xmlrpc.client", "gzip_decode").release());
-                aAttributes.emplace_back("BaseHTTPRequestHandler", import_attribute("http.server", "BaseHTTPRequestHandler").release());
-                aAttributes.emplace_back("partial", import_attribute("functools", "partial").release());
-                aAttributes.emplace_back("signature", import_attribute("inspect", "signature").release());
                 aAttributes.emplace_back("html", py{ fn_import("html") }.release());
                 aAttributes.emplace_back("http", py{ fn_import("http") }.release());
                 aAttributes.emplace_back("socketserver", py{ fn_import("socketserver") }.release());
@@ -1310,6 +1311,14 @@ namespace neos::python_runtime::detail::xmlrpc_server_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xmlrpc.server", xmlrpc_server_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xmlrpc.server", xmlrpc_server_module, assigned);
     }
 }

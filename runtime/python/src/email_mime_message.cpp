@@ -160,18 +160,20 @@ namespace neos::python_runtime::detail::email_mime_message_module
         void make_email_mime_message()
         {
             static module_writer const& w = writer("email.mime.message");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.mime.message", "MIMENonMultipart", import_attribute("email.mime.nonmultipart", "MIMENonMultipart"));
             // Copyright (C) 2001-2006 Python Software Foundation
             // Author: Barry Warsaw
             // Contact: email-sig@python.org
             define("email.mime.message", "__all__", py_list({ S<"MIMEMessage">() }));
-            define("email.mime.message", "MIMEMessage", w.make_class("MIMEMessage", { Mod<"email.mime.nonmultipart">().attr("MIMENonMultipart") }, {
+            define("email.mime.message", "MIMEMessage", w.make_class("MIMEMessage", { G<"email.mime.message.MIMENonMultipart">() }, {
                 { "__init__", w.method("MIMEMessage", "__init__", { py_positional("_msg"), py_positional("_subtype", S<"rfc822">()), py_keyword("policy", none()) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py _msg = a[1];
                         py _subtype = a[2];
                         py policy = a[3];
-                        (Mod<"email.mime.nonmultipart">().attr("MIMENonMultipart")).method("__init__", { self, S<"message">(), _subtype }, { { "policy", policy } });
+                        (G<"email.mime.message.MIMENonMultipart">()).method("__init__", { self, S<"message">(), _subtype }, { { "policy", policy } });
                         if (!isinstance(_msg, Mod<"email.message">().attr("Message")))
                         {
                             py_raise((B<"TypeError">())(S<"Argument is not an instance of Message">()));
@@ -198,7 +200,6 @@ namespace neos::python_runtime::detail::email_mime_message_module
                 if (auto const doc = email_mime_message_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("message", import_attribute("email", "message").release());
-                aAttributes.emplace_back("MIMENonMultipart", import_attribute("email.mime.nonmultipart", "MIMENonMultipart").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -207,6 +208,14 @@ namespace neos::python_runtime::detail::email_mime_message_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.mime.message", email_mime_message_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.mime.message", email_mime_message_module, assigned);
     }
 }

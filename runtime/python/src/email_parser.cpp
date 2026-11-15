@@ -160,12 +160,17 @@ namespace neos::python_runtime::detail::email_parser_module
         void make_email_parser()
         {
             static module_writer const& w = writer("email.parser");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.parser", "StringIO", import_attribute("io", "StringIO"));
+            define("email.parser", "TextIOWrapper", import_attribute("io", "TextIOWrapper"));
+            define("email.parser", "FeedParser", import_attribute("email.feedparser", "FeedParser"));
+            define("email.parser", "compat32", import_attribute("email._policybase", "compat32"));
             // Copyright (C) 2001-2007 Python Software Foundation
             // Author: Barry Warsaw, Thomas Wouters, Anthony Baxter
             // Contact: email-sig@python.org
             define("email.parser", "__all__", py_list({ S<"Parser">(), S<"HeaderParser">(), S<"BytesParser">(), S<"BytesHeaderParser">(), S<"FeedParser">(), S<"BytesFeedParser">() }));
             define("email.parser", "Parser", w.make_class("Parser", {  }, {
-                { "__init__", w.method("Parser", "__init__", { py_positional("_class", none()), py_keyword("policy", Mod<"email._policybase">().attr("compat32")) }, [](arguments a) -> py
+                { "__init__", w.method("Parser", "__init__", { py_positional("_class", none()), py_keyword("policy", G<"email.parser.compat32">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py _class = a[1];
@@ -181,7 +186,7 @@ namespace neos::python_runtime::detail::email_parser_module
                         py headersonly = a[2];
                         py data;
                         py feedparser;
-                        feedparser = (Mod<"email.feedparser">().attr("FeedParser")).call({ self.attr("_class") }, { { "policy", self.attr("policy") } });
+                        feedparser = (G<"email.parser.FeedParser">()).call({ self.attr("_class") }, { { "policy", self.attr("policy") } });
                         if (headersonly.truthy())
                         {
                             feedparser.method("_set_headersonly");
@@ -197,7 +202,7 @@ namespace neos::python_runtime::detail::email_parser_module
                         py self = a[0];
                         py text = a[1];
                         py headersonly = a[2];
-                        return self.method("parse", { (Mod<"io">().attr("StringIO"))(text) }, { { "headersonly", headersonly } });
+                        return self.method("parse", { (G<"email.parser.StringIO">())(text) }, { { "headersonly", headersonly } });
                     }) }, }));
 
             define("email.parser", "HeaderParser", w.make_class("HeaderParser", { G<"email.parser.Parser">() }, {
@@ -230,7 +235,7 @@ namespace neos::python_runtime::detail::email_parser_module
                         py self = a[0];
                         py fp = a[1];
                         py headersonly = a[2];
-                        fp = (Mod<"io">().attr("TextIOWrapper")).call({ fp }, { { "encoding", S<"ascii">() }, { "errors", S<"surrogateescape">() } });
+                        fp = (G<"email.parser.TextIOWrapper">()).call({ fp }, { { "encoding", S<"ascii">() }, { "errors", S<"surrogateescape">() } });
                         {
                             std::optional<py> pending2;
                             [[maybe_unused]] int flow2 = 0;
@@ -292,11 +297,7 @@ namespace neos::python_runtime::detail::email_parser_module
                 }
                 if (auto const doc = email_parser_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("StringIO", import_attribute("io", "StringIO").release());
-                aAttributes.emplace_back("TextIOWrapper", import_attribute("io", "TextIOWrapper").release());
-                aAttributes.emplace_back("FeedParser", import_attribute("email.feedparser", "FeedParser").release());
                 aAttributes.emplace_back("BytesFeedParser", import_attribute("email.feedparser", "BytesFeedParser").release());
-                aAttributes.emplace_back("compat32", import_attribute("email._policybase", "compat32").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -305,6 +306,14 @@ namespace neos::python_runtime::detail::email_parser_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.parser", email_parser_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.parser", email_parser_module, assigned);
     }
 }

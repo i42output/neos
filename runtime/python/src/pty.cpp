@@ -160,6 +160,13 @@ namespace neos::python_runtime::detail::pty_module
         void make_pty()
         {
             static module_writer const& w = writer("pty");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("pty", "select", import_attribute("select", "select"));
+            define("pty", "close", import_attribute("os", "close"));
+            define("pty", "waitpid", import_attribute("os", "waitpid"));
+            define("pty", "setraw", import_attribute("tty", "setraw"));
+            define("pty", "tcgetattr", import_attribute("tty", "tcgetattr"));
+            define("pty", "tcsetattr", import_attribute("tty", "tcsetattr"));
             // Bugs: No signal handling.  Doesn't set slave termios and window size.
             // Only tested on Linux, FreeBSD, and macOS.
             // See:  W. Richard Stevens. 1992.  Advanced Programming in the
@@ -444,7 +451,7 @@ namespace neos::python_runtime::detail::pty_module
                         {
                             wfds.method("append", { master_fd });
                         }
-                        auto const items16 = unpack((Mod<"select">().attr("select"))(rfds, wfds, py_list()), 3);
+                        auto const items16 = unpack((G<"pty.select">())(rfds, wfds, py_list()), 3);
                         rfds = items16[0];
                         wfds = items16[1];
                         _xfds = items16[2];
@@ -535,8 +542,8 @@ namespace neos::python_runtime::detail::pty_module
                     }
                     try
                     {
-                        mode = (Mod<"tty">().attr("tcgetattr"))(G<"pty.STDIN_FILENO">());
-                        (Mod<"tty">().attr("setraw"))(G<"pty.STDIN_FILENO">());
+                        mode = (G<"pty.tcgetattr">())(G<"pty.STDIN_FILENO">());
+                        (G<"pty.setraw">())(G<"pty.STDIN_FILENO">());
                         restore = boolean(true);
                     }
                     catch (raised const&)
@@ -564,15 +571,15 @@ namespace neos::python_runtime::detail::pty_module
                         finally21:
                         if (restore.truthy())
                         {
-                            (Mod<"tty">().attr("tcsetattr"))(G<"pty.STDIN_FILENO">(), Mod<"tty">().attr("TCSAFLUSH"), mode);
+                            (G<"pty.tcsetattr">())(G<"pty.STDIN_FILENO">(), Mod<"tty">().attr("TCSAFLUSH"), mode);
                         }
                         if (pending21)
                             py_reraise(*pending21);
                         if (flow21 == 1)
                             return result21;
                     }
-                    (Mod<"os">().attr("close"))(master_fd);
-                    return (Mod<"os">().attr("waitpid"))(pid, I<0>())[I<1>()];
+                    (G<"pty.close">())(master_fd);
+                    return (G<"pty.waitpid">())(pid, I<0>())[I<1>()];
                 }));
         }
 
@@ -588,15 +595,9 @@ namespace neos::python_runtime::detail::pty_module
                 }
                 if (auto const doc = pty_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("select", import_attribute("select", "select").release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("tty", py{ fn_import("tty") }.release());
-                aAttributes.emplace_back("close", import_attribute("os", "close").release());
-                aAttributes.emplace_back("waitpid", import_attribute("os", "waitpid").release());
-                aAttributes.emplace_back("setraw", import_attribute("tty", "setraw").release());
-                aAttributes.emplace_back("tcgetattr", import_attribute("tty", "tcgetattr").release());
-                aAttributes.emplace_back("tcsetattr", import_attribute("tty", "tcsetattr").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -605,6 +606,14 @@ namespace neos::python_runtime::detail::pty_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("pty", pty_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("pty", pty_module, assigned);
     }
 }

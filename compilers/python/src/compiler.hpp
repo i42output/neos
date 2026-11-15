@@ -354,6 +354,7 @@ namespace neos::compilers::python
         void py_error_checks(std::uint32_t aFunction);
         std::uint32_t py_error_global();
         std::uint32_t py_depth_global();
+        std::uint32_t py_depth_limit_global();
         std::optional<fragment> py_constant_str(fragment const& aValue);
         std::optional<fragment> py_constant_int(fragment const& aValue, bool aTagged = false);
         std::optional<fragment> py_constant_float(fragment const& aValue);
@@ -377,6 +378,13 @@ namespace neos::compilers::python
             std::vector<std::size_t> starts;
         } iPyLineCache;                                     ///< (source_line's: of the source it was last asked about)
         std::map<std::string, std::string> iPySourceTexts;  ///< (a source as rewritten -> the source as written)
+        struct py_position_cache
+        {
+            char const* source = nullptr;
+            std::size_t size = 0u;
+            std::string const* written = nullptr;           ///< (iPySourceTexts's: the source as written; null: none)
+            std::vector<std::size_t> starts;                ///< (the starts of its lines)
+        } iPyPositionCache;                                 ///< (py_position's: of the source it was last asked about)
         neolib::i_string_view const* iPyOperationSource = nullptr; ///< (the source of the operation being emitted (see py_operation))
         char const* iPyConstructSource = nullptr;   ///< (the source of the construct being emitted (emit_python): see py_record_binding)
         construct iPyConstruct = {};                ///< (the construct being emitted)
@@ -418,6 +426,7 @@ namespace neos::compilers::python
         std::set<std::string> iPyIntrospective;             ///< (the modules that use their namespaces (globals(), ...))               ///< (exec: the functions that its top level defines)
         bool py_exec_mode() const { return !iPyMode.empty(); }
         std::optional<std::string> iPyScriptDirectory;     ///< (the directory of the program's source file (sys.path[0]))
+        std::optional<std::vector<std::string>> iPySearchPath;     ///< (source compiled while the program runs: sys.path's directories)
         std::optional<std::size_t> py_module_of(std::string const& aName);    ///< (the module of a source file that a name is (found if not yet))
         std::optional<std::size_t> py_current_module() const;
         std::string py_module_name() const;                 ///< (the module being compiled: __main__ or its name)

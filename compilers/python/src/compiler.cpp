@@ -250,15 +250,15 @@ namespace neos::compilers::python
         // (the modules of Python's standard library that the Python runtime plugin implements (python::import))
         std::set<std::string> const& standard_modules()
         {
-            static std::set<std::string> const sStandard = { "math", "cmath", "sys", "os", "time", "errno", "threading", "_thread", "queue",
+            static std::set<std::string> const sStandard = { "math", "cmath", "sys", "os", "time", "errno", "threading", "_thread", "queue", "_queue",
                 "collections", "itertools", "functools", "operator", "heapq", "bisect", "copy", "re", "string", "struct", "json", "base64", 
                 "binascii", "hashlib", "random", "decimal", "fractions", "datetime", "_strptime", "io", "pathlib", "typing", "types", "abc", "contextlib", 
                 "dataclasses", "enum", "textwrap", "statistics", "numbers", "warnings", "keyword", "platform", "shutil", "tempfile", "glob", 
                 "fnmatch", "atexit", "gc", "weakref", "traceback", "inspect", "pprint", "reprlib", "array", "calendar", "zlib", "secrets", 
                 "uuid", "locale", "codecs", "unicodedata", "signal", "argparse", "csv", "logging", "timeit", "_collections_abc", "posixpath", 
                 "ntpath", "genericpath", "stat", "__future__", "builtins", "posix", "nt", "copyreg", "_string", "copy", "_codecs", "encodings", "_csv", 
-                "linecache", "_colorize", "_suggestions", "select", "selectors", "_socket", "socket", "configparser", "socketserver", "pickle", "_pickle", "_compat_pickle", "_operator", "_heapq", "_bisect", "_functools", "_struct", "_io", "contextvars", "_contextvars", "concurrent", "asyncio", "_asyncio", "subprocess", "_posixsubprocess", "_winapi", "msvcrt", "shlex", "getopt", "colorsys", "graphlib", 
-                "hmac", "difflib", "ipaddress", "fileinput", "html", "_markupbase", "urllib", "tomllib", "importlib", "pwd", "grp", "fcntl", "_compression", "gzip", "sched", "cmd", "quopri", 
+                "linecache", "_colorize", "_suggestions", "select", "selectors", "_socket", "socket", "configparser", "socketserver", "pickle", "_pickle", "_compat_pickle", "_operator", "_heapq", "_bisect", "_functools", "_collections", "_locale", "_warnings", "_struct", "_io", "contextvars", "_contextvars", "concurrent", "asyncio", "_asyncio", "subprocess", "_posixsubprocess", "_winapi", "msvcrt", "shlex", "getopt", "colorsys", "graphlib", 
+                "hmac", "difflib", "ipaddress", "fileinput", "html", "_markupbase", "urllib", "tomllib", "importlib", "pwd", "grp", "fcntl", "resource", "_compression", "gzip", "sched", "cmd", "quopri", 
                 "mimetypes", "netrc", "zipfile", "unittest", "pkgutil", "termios",
                 "optparse", "gettext", "filecmp", "getpass", "token", "tokenize", "tarfile", "stringprep", "tty", "pty", "shelve", "wave", "webbrowser", "_tokenize", "email", "http",
                 "smtplib", "poplib", "imaplib", "ftplib", "mailbox", "nturl2path", "code", "codeop", "rlcompleter", "wsgiref", "pyexpat", "xml", "plistlib", "xmlrpc" };
@@ -1051,7 +1051,7 @@ namespace neos::compilers::python
                     for (; j < aText.size(); ++j)
                     {
                         if (aText[j] == '\\')
-                            ++j;
+                            j = tokens::escape_last(aText, j);
                         else if (aText[j] == c && (!triple || (j + 2u < aText.size() && aText[j + 1u] == c && aText[j + 2u] == c)))
                             break;
                         else if (!triple && aText[j] == '\n')
@@ -1213,10 +1213,25 @@ namespace neos::compilers::python
                         result += std::string{ "\\" } + next;
                     else if (next == '\\')
                         result += "\\\\";
+                    else if (next == '\n' || next == '\r')
+                    {
+                        // (a line continued by a backslash: the backslash and the line break (CRLF read as LF, as CPython reads it) as
+                        // an escape (a line break cannot be in a single-quoted literal))
+                        if (next == '\r' && i + 1u < aText.size() && aText[i + 1u] == '\n')
+                            ++i;
+                        result += "\\n";
+                    }
                     else
                         result += next;
                 }
-                else if (std::string_view{ "\\'\"abfnrtvxuU01234567\n\r" }.find(next) != std::string_view::npos)
+                else if (next == '\r')
+                {
+                    // (a line continued by a backslash and a CR or CRLF: as by a backslash and an LF (CPython reads a CRLF or CR as LF))
+                    if (i + 1u < aText.size() && aText[i + 1u] == '\n')
+                        ++i;
+                    result += "\\\n";
+                }
+                else if (std::string_view{ "\\'\"abfnrtvxuU01234567\n" }.find(next) != std::string_view::npos)
                 {
                     result += '\\';
                     result += next;
@@ -1516,9 +1531,12 @@ namespace neos::compilers::python
                 char const e = content[i + 1u];
                 if (raw)
                 {
+                    // (a CRLF or CR after the backslash: an LF (CPython reads them as LF))
                     result += c;
-                    result += e;
+                    result += e == '\r' ? '\n' : e;
                     ++i;
+                    if (e == '\r' && i + 1u < content.size() && content[i + 1u] == '\n')
+                        ++i;
                     continue;
                 }
                 ++i;
@@ -1833,6 +1851,15 @@ namespace neos::compilers::python
                         base = p == 'x' ? 16u : p == 'o' ? 8u : 2u;
                         j = i + 2u;
                     }
+                    // (a keyword straight after the number ("1if x else 2", "0x1for x in y"): CPython reads the number and then the 
+                    // keyword (with a SyntaxWarning, not given here): a space between them)
+                    auto const keyword_after = [&](std::size_t aEnd)
+                    {
+                        for (std::string_view const keyword : { "and", "else", "for", "if", "in", "is", "not", "or" })
+                            if (aText.compare(aEnd, keyword.size(), keyword) == 0)
+                                return true;
+                        return false;
+                    };
                     auto const digit_value = [](char d) -> std::uint32_t
                     {
                         if (d >= '0' && d <= '9') return static_cast<std::uint32_t>(d - '0');
@@ -1863,6 +1890,8 @@ namespace neos::compilers::python
                         }
                         auto const first = decimal.find_first_not_of('0');
                         result += first == std::string::npos ? "0" : decimal.substr(first);
+                        if (keyword_after(j))
+                            result += ' ';
                         aChanged = true;
                         i = j;
                         continue;
@@ -1881,6 +1910,9 @@ namespace neos::compilers::python
                         }
                         break;
                     }
+                    // (an imaginary number's j)
+                    if (j < n && (aText[j] == 'j' || aText[j] == 'J'))
+                        ++j;
                     auto number = aText.substr(i, j - i);
                     if (number.find('_') != std::string::npos)
                     {
@@ -1888,6 +1920,11 @@ namespace neos::compilers::python
                         aChanged = true;
                     }
                     result += number;
+                    if (keyword_after(j))
+                    {
+                        result += ' ';
+                        aChanged = true;
+                    }
                     i = j;
                     continue;
                 }
@@ -1930,7 +1967,7 @@ namespace neos::compilers::python
                 for (; j < text.size(); ++j)
                 {
                     if (text[j] == '\\')
-                        ++j;
+                        j = tokens::escape_last(text, j);
                     else if (text[j] == c && (!triple || (j + 2u < text.size() && text[j + 1u] == c && text[j + 2u] == c)))
                         break;
                     else if (!triple && text[j] == '\n')
@@ -2222,8 +2259,9 @@ namespace neos::compilers::python
             auto const start = *position;
             std::size_t i = start + 6u;
             int level = 0;
-            // (the parameters: up to the colon)
+            // (the parameters: up to the colon (not that of a lambda in a parameter's default: "lambda x = lambda: 1: x()"))
             std::size_t colon = std::string::npos;
+            int lambdasInDefaults = 0;
             for (; i < text.size(); ++i)
             {
                 char const c = text[i];
@@ -2240,11 +2278,25 @@ namespace neos::compilers::python
                     --level;
                 else if (c == ':' && level == 0)
                 {
+                    if (lambdasInDefaults > 0)
+                    {
+                        --lambdasInDefaults;
+                        continue;
+                    }
                     colon = i;
                     break;
                 }
                 else if (c == '\n')
                     break;
+                else if (name_character(c) && !name_character(text[i - 1u]))
+                {
+                    auto j = i;
+                    while (j + 1u < text.size() && name_character(text[j + 1u]))
+                        ++j;
+                    if (level == 0 && text.compare(i, j + 1u - i, "lambda") == 0)
+                        ++lambdasInDefaults;
+                    i = j;
+                }
             }
             if (colon == std::string::npos)
                 break;
@@ -2494,6 +2546,15 @@ namespace neos::compilers::python
                             }
                             if (!triple && text[q] == '\n')
                                 break;
+                            if (text[q] == '\\' && raw && q + 1u < text.size())
+                            {
+                                // (a raw string: the backslash and the character it escapes (which can be its quote: it doesn't end it))
+                                value += '\\';
+                                if (text[q + 1u] != '\r')
+                                    value += text[q + 1u];
+                                ++q;
+                                continue;
+                            }
                             if (text[q] == '\\' && !raw && q + 1u < text.size())
                             {
                                 char const c = text[++q];
@@ -4591,9 +4652,11 @@ namespace neos::compilers::python
                 }
         bool const inFunction = in_function() && !implicit_entry();
         if (symbol == nullptr && inFunction && iInference.pyBound.contains(current_function_name()) && iInference.pyBound.at(current_function_name()).contains(aName) &&
-            !(iInference.pyGlobals.contains(current_function_name()) && iInference.pyGlobals.at(current_function_name()).contains(aName)))
+            !(iInference.pyGlobals.contains(current_function_name()) && iInference.pyGlobals.at(current_function_name()).contains(aName)) &&
+            !class_body(current_function_name()))
         {
-            // (a local variable read before it is bound: UnboundLocalError)
+            // (a local variable read before it is bound: UnboundLocalError (not a class body's: its name is then the module's, or a 
+            // builtin, as CPython's class bodies look it up: "sorted = sorted"))
             fragment kind;
             put_i32(kind, 1);
             kind.valueType = type::I32;
@@ -4620,8 +4683,8 @@ namespace neos::compilers::python
             dummy.valueType = type::Object;
             return dummy;
         }
-        // (exec: a name of its namespaces (its locals', its globals') or a builtin)
-        if (py_exec_mode())
+        // (exec: a name of its namespaces (its locals', its globals') or a builtin; a module that it imports: as the program's)
+        if (py_exec_mode() && !py_current_module())
             return py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(aName) }));
         // (a module whose namespace (globals()) can bind names: one of those, or a builtin)
         if (iPyIntrospective.contains(py_module_name()))
@@ -5651,9 +5714,17 @@ namespace neos::compilers::python
         case construct::In:
         case construct::NotIn:
             {
-                auto result = py_runtime_call("python::contains", { type::Object, type::Object }, type::Boolean, { py_object(rhs), py_object(*lhs) });
+                // (the item is evaluated before the container (Python's order; python::contains takes the container first): it is held by 
+                // a local)
+                fragment result;
+                auto const item = temporary(type::Object);
+                append(result, py_object(*lhs));
+                put_local(result, opcode::LocalSet, item);
+                append(result, py_runtime_call("python::contains", { type::Object, type::Object }, type::Boolean, { py_object(rhs), local_value(item, type::Object) }));
                 if (aConstruct == construct::NotIn)
                     put(result, opcode::I32Eqz);
+                result.valueType = type::Boolean;
+                result.fragmentKind = fragment_kind::Value;
                 value(result);
             }
             break;
@@ -5798,6 +5869,8 @@ namespace neos::compilers::python
             // python::call_super))
             if (symbol == nullptr && !declared && !anyKeyword && !py_exec_mode() && name == "super" && arguments.size() == 2u)
                 state().pySupers[aSource.to_std_string_view().data()] = { py_object(operand_type{ arguments[0] }), py_object(operand_type{ arguments[1] }) };
+            // (exec, and a module that is imported at run time (compiled as exec is): a builtin is found each time it is called (exec: in its 
+            // namespaces; a module: in its namespace, else the builtins module), as CPython finds it)
             if (py_exec_mode() && builtin_names().contains(name) && std::find(iPyExecDefs.begin(), iPyExecDefs.end(), name) == iPyExecDefs.end() &&
                 (symbol == nullptr || symbol->type() == type::Function))
                 execBuiltin = name;
@@ -6024,7 +6097,9 @@ namespace neos::compilers::python
                 return;
             }
         }
-        if (execBuiltin)
+        if (execBuiltin && py_current_module())
+            append(statement, py_owned(py_runtime_call("python::global_lookup", { type::String, type::String }, type::Object, { py_string(py_module_name()), py_string(*execBuiltin) })));
+        else if (execBuiltin)
             append(statement, py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(*execBuiltin) })));
         else if (method)
         {
@@ -6196,6 +6271,15 @@ namespace neos::compilers::python
                     }
             if (!op)
                 throw std::runtime_error("augmented assignment operator expected");
+            // (the target is one target: not several (a tuple), a group ((a, b) or [a, b]) or a starred one)
+            if (targets.size() > 1u || targets.back().kind == py_target::kind_t::Group || targets.back().starred)
+            {
+                auto opening = targets.back().position;
+                while (*opening == ' ' || *opening == '\t')
+                    ++opening;
+                throw std::runtime_error(std::string{ "'" } + (targets.size() > 1u ? "tuple" : targets.back().starred ? "starred" :
+                    *opening == '[' ? "list" : "tuple") + "' is an illegal expression for augmented assignment");
+            }
             auto target = targets.back();
             operand_type current;
             switch (target.kind)
@@ -6369,17 +6453,14 @@ namespace neos::compilers::python
             if (standard_modules().contains(top))
             {
                 auto result = py_owned(py_runtime_call("python::import", { type::String }, type::Object, { py_string(top) }));
-                // (a submodule of one: imported (see standard_submodules), or its attribute (e.g. os.path))
+                // (a submodule of one: imported (see standard_submodules; another: the runtime finds it, or its package's attribute that is
+                // a module (e.g. os.path), else ModuleNotFoundError (a module that is not a package's: CPython's message says so)))
                 std::size_t from = top.size();
                 while (from < aName.size())
                 {
                     auto const next = aName.find('.', from + 1u);
-                    auto const part = aName.substr(from + 1u, next == std::string::npos ? std::string::npos : next - from - 1u);
                     auto const prefix = aName.substr(0u, next);
-                    if (standard_submodules().contains(prefix))
-                        result = py_owned(py_runtime_call("python::import", { type::String }, type::Object, { py_string(prefix) }));
-                    else
-                        result = py_owned(py_runtime_call("python::getattr", { type::Object, type::String }, type::Object, { result, py_string(part) }));
+                    result = py_owned(py_runtime_call("python::import", { type::String }, type::Object, { py_string(prefix) }));
                     from = next == std::string::npos ? aName.size() : next;
                 }
                 return result;
@@ -7503,7 +7584,8 @@ namespace neos::compilers::python
         if (!implicit_entry())
         {
             py_depth_global();
-            runtime_function("python::depth_check", { type::I32 }, type::Void);
+            py_depth_limit_global();
+            runtime_function("python::depth_check", { type::I32 }, type::I32);
         }
         else
         {
@@ -7585,14 +7667,19 @@ namespace neos::compilers::python
                         append(result, py_runtime_call("python::ns_cell", { type::Object, type::String, type::Object }, type::Void,
                             { local_value(dict, type::Object), py_string(name.substr(3u)), value }));
                 }
-                else if (symbol->type() == type::Object)
-                    append(result, py_runtime_call("python::ns_set", { type::Object, type::String, type::Object }, type::Void,
-                        { local_value(dict, type::Object), py_string(name), value }));
                 else
                 {
-                    // (a value that is not an object: the object of it)
-                    append(result, py_runtime_call("python::ns_set", { type::Object, type::String, type::Object }, type::Void,
-                        { local_value(dict, type::Object), py_string(name), py_object(operand_type{ symbol_reference{ current_scope(), neolib::string{ name } } }) }));
+                    // (the body's own __class__ (statements.cpp's _cc___class__: not the class's cell))
+                    auto const key = name == "_cc___class__" ? std::string{ "__class__" } : name;
+                    if (symbol->type() == type::Object)
+                        append(result, py_runtime_call("python::ns_set", { type::Object, type::String, type::Object }, type::Void,
+                            { local_value(dict, type::Object), py_string(key), value }));
+                    else
+                    {
+                        // (a value that is not an object: the object of it)
+                        append(result, py_runtime_call("python::ns_set", { type::Object, type::String, type::Object }, type::Void,
+                            { local_value(dict, type::Object), py_string(key), py_object(operand_type{ symbol_reference{ current_scope(), neolib::string{ name } } }) }));
+                    }
                 }
             }
             append(result, py_release_variables(true));
@@ -7652,7 +7739,21 @@ namespace neos::compilers::python
 
     void compiler::set_options(neolib::i_string const& aOptions)
     {
-        iPyMode = aOptions.to_std_string();
+        // (the mode, then (source compiled while the program runs) sys.path's directories, each on a line of its own)
+        auto const options = aOptions.to_std_string();
+        auto const newline = options.find('\n');
+        iPyMode = options.substr(0u, newline);
+        iPySearchPath = std::nullopt;
+        if (newline != std::string::npos)
+        {
+            iPySearchPath.emplace();
+            for (auto start = newline + 1u; start < options.size();)
+            {
+                auto const end = std::min(options.find('\n', start), options.size());
+                iPySearchPath->push_back(options.substr(start, end - start));
+                start = end + 1u;
+            }
+        }
     }
 
     void compiler::begin_compilation()
@@ -8043,18 +8144,31 @@ namespace neos::compilers::python
                 expression = std::string_view{ text.data() + *start, expression.size() + (before - *start) };
             }
         }
-        auto const original = iPySourceTexts.find(std::string{ text });
-        if (original == iPySourceTexts.end())
+        // (the source as written, and its lines' starts: found once for each source (a source's expressions are many))
+        auto& cache = iPyPositionCache;
+        if (cache.source != text.data() || cache.size != text.size())
+        {
+            cache.source = text.data();
+            cache.size = text.size();
+            auto const original = iPySourceTexts.find(std::string{ text });
+            cache.written = original != iPySourceTexts.end() ? &original->second : nullptr;
+            cache.starts.assign(1u, 0u);
+            if (cache.written != nullptr)
+                for (std::size_t i = 0u; i < cache.written->size(); ++i)
+                    if ((*cache.written)[i] == '\n')
+                        cache.starts.push_back(i + 1u);
+        }
+        if (cache.written == nullptr)
             return 0u;
-        std::string_view const written = original->second;
+        std::string_view const written = *cache.written;
         auto const start = static_cast<std::size_t>(expression.data() - text.data());
         auto const end = start + expression.size();
         auto const line_and_column = [&](std::size_t aOffset)
         {
-            auto const lineStart = aOffset == 0u ? std::string_view::npos : written.rfind('\n', aOffset - 1u);
-            auto const column = aOffset - (lineStart == std::string_view::npos ? 0u : lineStart + 1u);
-            auto const line = static_cast<std::uint32_t>(std::count(written.begin(), written.begin() + static_cast<std::ptrdiff_t>(aOffset), '\n') + 1);
-            return std::make_pair(line, static_cast<std::uint32_t>(column));
+            // (the line: the last line start at or before it (a line break at aOffset - 1 starts the line at aOffset))
+            auto const after = std::upper_bound(cache.starts.begin(), cache.starts.end(), aOffset);
+            auto const index = static_cast<std::size_t>(after - cache.starts.begin()) - 1u;
+            return std::make_pair(static_cast<std::uint32_t>(index + 1u), static_cast<std::uint32_t>(aOffset - cache.starts[index]));
         };
         // (the text as written (aWritten) of the text as rewritten (aRewritten, of the same length): their characters, but for a 
         // lambda's (as rewritten: its name (_lN_), padded with spaces to the lambda's length) and line breaks within brackets (spaces 
@@ -8119,11 +8233,9 @@ namespace neos::compilers::python
         auto const line = source_line(fragment, start);
         if (line == 0u)
             return 0u;
-        std::size_t lineStart = 0u;
-        for (std::uint32_t l = 1u; l < line && lineStart != std::string_view::npos; ++l)
-            lineStart = written.find('\n', lineStart) == std::string_view::npos ? std::string_view::npos : written.find('\n', lineStart) + 1u;
-        if (lineStart == std::string_view::npos)
+        if (line > cache.starts.size())
             return 0u;
+        std::size_t const lineStart = cache.starts[line - 1u];
         auto const lineEnd = written.find('\n', lineStart);
         auto const lineText = written.substr(lineStart, lineEnd == std::string_view::npos ? std::string_view::npos : lineEnd - lineStart);
         auto at = lineText.find(expression);
@@ -8301,8 +8413,16 @@ namespace neos::compilers::python
             // (the standard library's modules that the runtime implements are built in)
             if (standard_modules().contains(aName))
                 return {};
-            directories.push_back(iPyScriptDirectory ? std::filesystem::path{ *iPyScriptDirectory } : std::filesystem::current_path());
-            if (auto const list = std::getenv("PYTHONPATH"))
+            // (source compiled while the program runs: sys.path's directories ('' the current directory), as CPython's import finds
+            // modules)
+            if (iPySearchPath)
+            {
+                for (auto const& entry : *iPySearchPath)
+                    directories.push_back(entry.empty() ? std::filesystem::current_path() : std::filesystem::path{ entry });
+            }
+            else
+                directories.push_back(iPyScriptDirectory ? std::filesystem::path{ *iPyScriptDirectory } : std::filesystem::current_path());
+            if (auto const list = std::getenv("PYTHONPATH"); list != nullptr && !iPySearchPath)
             {
 #if defined(_WIN32)
                 char const separator = ';';
@@ -8695,7 +8815,8 @@ namespace neos::compilers::python
     // (globals(): the namespace of the module being compiled (a dict: its names' values (its getter's)))
     fragment compiler::py_module_namespace()
     {
-        if (py_exec_mode())
+        // (source that the program compiles while it runs: its namespace, exec's globals; a module that it imports: the module's)
+        if (py_exec_mode() && !py_current_module())
             return py_owned(py_runtime_call("python::exec_globals", {}, type::Object, {}));
         auto const m = py_current_module();
         std::string const getter = m ? iPyModules[*m].getter() : std::string{ "_N0_getattr" };
@@ -8731,10 +8852,11 @@ namespace neos::compilers::python
                     { local_value(dict, type::Object), py_string(name.substr(3u)), local_value(symbol->index(), type::Object) }));
             else if (symbol->type() == type::Object)
                 append(result, py_runtime_call("python::ns_set", { type::Object, type::String, type::Object }, type::Void,
-                    { local_value(dict, type::Object), py_string(name), local_value(symbol->index(), type::Object) }));
+                    { local_value(dict, type::Object), py_string(name == "_cc___class__" ? std::string{ "__class__" } : name), local_value(symbol->index(), type::Object) }));
             else
                 append(result, py_runtime_call("python::ns_set", { type::Object, type::String, type::Object }, type::Void,
-                    { local_value(dict, type::Object), py_string(name), py_object(operand_type{ symbol_reference{ current_scope(), neolib::string{ name } } }) }));
+                    { local_value(dict, type::Object), py_string(name == "_cc___class__" ? std::string{ "__class__" } : name), 
+                    py_object(operand_type{ symbol_reference{ current_scope(), neolib::string{ name } } }) }));
         }
         put_local(result, opcode::LocalGet, dict);
         result.valueType = type::Object;
@@ -8761,6 +8883,26 @@ namespace neos::compilers::python
     {
         // a variable that may be unbound (it is deleted, or no statement compiled before it binds it in its arm or one that contains it
         // (see py_record_binding): e.g. "if c: x = 1" before it): checked (NameError, or UnboundLocalError)
+        // (a function's int or float variable that may be unbound where it is read: an object (declared as such by the next pass), whose
+        // reads are checked (an int or a float has no unbound value))
+        if (!declaration_pass() && aVariable.type() != type::Object && in_function() && !implicit_entry() && !is_global(aVariable))
+        {
+            auto const name = aName.to_std_string();
+            if (!synthetic_name(name) && !name.starts_with("_k_") && !py_bound_here(name))
+            {
+                bool parameter = false;
+                if (auto const& signature = generator().signature_of(current_function()); signature.parameters().has_value())
+                    for (auto const& p : signature.parameters().value())
+                        if (p.parameter_name().to_std_string_view() == name)
+                            parameter = true;
+                if (!parameter)
+                    if (auto& t = iInference.pyLocals[current_function_name()][name]; t != type::Object)
+                    {
+                        t = type::Object;
+                        { set_changed(); if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
+                    }
+            }
+        }
         if (declaration_pass() || aVariable.type() != type::Object || !in_function())
             return nullptr;
         auto const name = aName.to_std_string();
@@ -8773,6 +8915,11 @@ namespace neos::compilers::python
             if (function.size() > 10u && function.starts_with("_N") && function.ends_with("_getattr"))
                 return nullptr;
         }
+        // (a module that is imported at run time: a name of it that is not bound is its namespace's (e.g. __warningregistry__, which 
+        // warnings.warn sets in it), or a builtin)
+        if (py_exec_mode() && module && py_current_module())
+            return result(py_owned(py_runtime_call("python::global_read", { type::String, type::String, type::Object }, type::Object, 
+                { py_string(py_module_name()), py_string(std::string{ unprefixed(name) }), fragment{ aValue } })));
         // (exec: a name of the module that is not bound is its namespaces')
         if (py_exec_mode() && module)
             return result(py_owned(py_runtime_call("python::exec_read", { type::String, type::Object }, type::Object, { py_string(name), fragment{ aValue } })));
@@ -9729,54 +9876,63 @@ namespace neos::compilers::python
                     targets.insert(targets.begin(), pending.back());
                     pending.pop_back();
                 }
+                // (a group of targets ((a, b) or [a, b]): its targets, each deleted)
+                std::function<void(fragment_state::py_target const&)> del_target = [&](fragment_state::py_target const& target)
+                {
+                    switch (target.kind)
+                    {
+                    case fragment_state::py_target::kind_t::Group:
+                        for (auto const& child : target.children)
+                            del_target(child);
+                        break;
+                    case fragment_state::py_target::kind_t::Item:
+                        append(statement, py_runtime_call("python::delitem", { type::Object, type::Object }, type::Void, { *target.receiver, *target.key }));
+                        break;
+                    case fragment_state::py_target::kind_t::Attribute:
+                        append(statement, py_runtime_call("python::delattr", { type::Object, type::String }, type::Void, { *target.receiver, py_string(target.name) }));
+                        break;
+                    case fragment_state::py_target::kind_t::Name:
+                        {
+                            // (the variable is unbound: an object variable that holds no object (reading it raises NameError (or 
+                            // UnboundLocalError)))
+                            auto const* const symbol = find_symbol(current_scope(), neolib::string_view{ neolib::string{ target.name } });
+                            bool const global = symbol != nullptr && is_global(*symbol);
+                            bool const module = implicit_entry() || global;
+                            if (module ? iInference.pyDeletedGlobals.insert(target.name).second : iInference.pyDeleted[current_function_name()].insert(target.name).second)
+                                set_changed();
+                            if (symbol == nullptr)
+                            {
+                                append(statement, py_runtime_call("python::unbound", { type::String, type::I32 }, type::Void, { py_string(target.name), [&]() { fragment k; put_i32(k, module ? 0 : 1); k.valueType = type::I32; return k; }() }));
+                                break;
+                            }
+                            if (symbol->type() != type::Object)
+                            {
+                                py_kind_change(target.name);
+                                break;
+                            }
+                            // (del name of an unbound name: NameError)
+                            put_local(statement, global ? opcode::GlobalGet : opcode::LocalGet, symbol->index());
+                            put(statement, opcode::I32Eqz);
+                            put_block(statement, opcode::If, {});
+                            fragment kind;
+                            put_i32(kind, module ? 0 : 1);
+                            kind.valueType = type::I32;
+                            append(statement, py_runtime_call("python::unbound", { type::String, type::I32 }, type::Void, { py_string(target.name), kind }));
+                            put(statement, opcode::End);
+                            put_local(statement, global ? opcode::GlobalGet : opcode::LocalGet, symbol->index());
+                            emit_call_to(statement, runtime_function("neos::object_release", { type::Object }, type::Void));
+                            put_i32(statement, 0);
+                            put_local(statement, global ? opcode::GlobalSet : opcode::LocalSet, symbol->index());
+                        }
+                        break;
+                    default:
+                        py_bind(target, operand_type{ py_owned(py_runtime_call("python::none", {}, type::Object, {})) }, statement);
+                        break;
+                    }
+                };
                 if (!declaration_pass())
                     for (auto const& target : targets)
-                        switch (target.kind)
-                        {
-                        case fragment_state::py_target::kind_t::Item:
-                            append(statement, py_runtime_call("python::delitem", { type::Object, type::Object }, type::Void, { *target.receiver, *target.key }));
-                            break;
-                        case fragment_state::py_target::kind_t::Attribute:
-                            append(statement, py_runtime_call("python::delattr", { type::Object, type::String }, type::Void, { *target.receiver, py_string(target.name) }));
-                            break;
-                        case fragment_state::py_target::kind_t::Name:
-                            {
-                                // (the variable is unbound: an object variable that holds no object (reading it raises NameError (or 
-                                // UnboundLocalError)))
-                                auto const* const symbol = find_symbol(current_scope(), neolib::string_view{ neolib::string{ target.name } });
-                                bool const global = symbol != nullptr && is_global(*symbol);
-                                bool const module = implicit_entry() || global;
-                                if (module ? iInference.pyDeletedGlobals.insert(target.name).second : iInference.pyDeleted[current_function_name()].insert(target.name).second)
-                                    set_changed();
-                                if (symbol == nullptr)
-                                {
-                                    append(statement, py_runtime_call("python::unbound", { type::String, type::I32 }, type::Void, { py_string(target.name), [&]() { fragment k; put_i32(k, module ? 0 : 1); k.valueType = type::I32; return k; }() }));
-                                    break;
-                                }
-                                if (symbol->type() != type::Object)
-                                {
-                                    py_kind_change(target.name);
-                                    break;
-                                }
-                                // (del name of an unbound name: NameError)
-                                put_local(statement, global ? opcode::GlobalGet : opcode::LocalGet, symbol->index());
-                                put(statement, opcode::I32Eqz);
-                                put_block(statement, opcode::If, {});
-                                fragment kind;
-                                put_i32(kind, module ? 0 : 1);
-                                kind.valueType = type::I32;
-                                append(statement, py_runtime_call("python::unbound", { type::String, type::I32 }, type::Void, { py_string(target.name), kind }));
-                                put(statement, opcode::End);
-                                put_local(statement, global ? opcode::GlobalGet : opcode::LocalGet, symbol->index());
-                                emit_call_to(statement, runtime_function("neos::object_release", { type::Object }, type::Void));
-                                put_i32(statement, 0);
-                                put_local(statement, global ? opcode::GlobalSet : opcode::LocalSet, symbol->index());
-                            }
-                            break;
-                        default:
-                            py_bind(target, operand_type{ py_owned(py_runtime_call("python::none", {}, type::Object, {})) }, statement);
-                            break;
-                        }
+                        del_target(target);
                 push_operand(operand_type{ statement });
             }
             break;
@@ -10025,6 +10181,20 @@ namespace neos::compilers::python
             return existing->index();
         auto& global = define_global("__neos_py_depth", type::I32);
         generator().function_global(neolib::string{ "__neos_py_depth" });
+        return global.index();
+    }
+
+    std::uint32_t compiler::py_depth_limit_global()
+    {
+        // (the depth beyond which a call of the program's functions checks the recursion limit (python::depth_check, which gives it: 
+        // zero until the first check; at most 64, so that shallow calls do not call the runtime, but lower if sys.setrecursionlimit's 
+        // limit is lower))
+        neolib::string const name{ "__neos_py_depth_limit" };
+        generator().function_global(neolib::string{ "__neos_py_depth_limit" });
+        if (auto* const existing = find_symbol(generator().global_scope(), neolib::string_view{ name }, true); existing != nullptr && is_global(*existing))
+            return existing->index();
+        auto& global = define_global("__neos_py_depth_limit", type::I32);
+        generator().function_global(neolib::string{ "__neos_py_depth_limit" });
         return global.index();
     }
 
@@ -10350,6 +10520,14 @@ namespace neos::compilers::python
             }
             if (aConstruct.handlerNames[i])
                 py_bind_name(*aConstruct.handlerNames[i], operand_type{ local_value(exception, type::Object) }, aStatement);
+            // (except ... as name, where name is a cell's (a nested function uses it: its reads are of the cell, "_k_name.v": see 
+            // closures.cpp): the cell is set too)
+            auto const* const cell = aConstruct.handlerNames[i] ? 
+                find_symbol(current_scope(), neolib::string_view{ neolib::string{ "_k_" + *aConstruct.handlerNames[i] } }) : nullptr;
+            bool const cellTarget = cell != nullptr && cell->type() == type::Object && !is_global(*cell);
+            if (cellTarget)
+                append(aStatement, py_runtime_call("python::setattr_name", { type::Object, type::Object, type::Object }, type::Void,
+                    { local_value(cell->index(), type::Object), py_attribute_name("v"), local_value(exception, type::Object) }));
             append(aStatement, py_flush());
             // (an exception that leaves the handler: its handling of the exception has ended)
             put_block(aStatement, opcode::Block, std::nullopt);
@@ -10383,6 +10561,14 @@ namespace neos::compilers::python
                     put_i32(aStatement, 0);
                     put_local(aStatement, global ? opcode::GlobalSet : opcode::LocalSet, symbol->index());
                 }
+            // (and its cell's value is unbound too (as "name = None; del name"))
+            if (cellTarget)
+            {
+                append(aStatement, py_runtime_call("python::setattr_name", { type::Object, type::Object, type::Object }, type::Void,
+                    { local_value(cell->index(), type::Object), py_attribute_name("v"), py_runtime_call("python::none", {}, type::Object, {}) }));
+                append(aStatement, py_runtime_call("python::delattr", { type::Object, type::String }, type::Void, 
+                    { local_value(cell->index(), type::Object), py_string("v") }));
+            }
             append(aStatement, py_runtime_call("python::handled", {}, type::Void, {}));
             put(aStatement, opcode::Br);
             put_u32(aStatement.fragmentCode.as_std_vector(), levels - 1u - outer);
@@ -10652,13 +10838,18 @@ namespace neos::compilers::python
         // (the depth of calls: counted (on entry, and before it returns); beyond a few, the runtime checks it against the recursion 
         // limit (RecursionError); not a generator's body (which runs on a stack of its own))
         std::uint32_t depth = 0u;
+        std::uint32_t limit = 0u;
         bool counted = !aFunction.entry && !unprefixed(aFunction.name).starts_with("_g");
         if (counted)
         {
-            // (defined as the function's global (see py_function_start))
+            // (defined as the function's globals (see py_function_start))
             auto const* const global = find_symbol(generator().global_scope(), neolib::string_view{ neolib::string{ "__neos_py_depth" } }, true);
-            if (global != nullptr && is_global(*global))
+            auto const* const limitGlobal = find_symbol(generator().global_scope(), neolib::string_view{ neolib::string{ "__neos_py_depth_limit" } }, true);
+            if (global != nullptr && is_global(*global) && limitGlobal != nullptr && is_global(*limitGlobal))
+            {
                 depth = global->index();
+                limit = limitGlobal->index();
+            }
             else
                 counted = false;
         }
@@ -10681,18 +10872,22 @@ namespace neos::compilers::python
             put_op(result, opcode::I32Add);
             put_op(result, opcode::GlobalSet);
             put_u32(result, depth);
+            // (beyond the depth that the runtime last gave (see py_depth_limit_global): the recursion limit checked, and the depth to check 
+            // beyond next)
             put_op(result, opcode::GlobalGet);
             put_u32(result, depth);
-            put_op(result, opcode::I32Const);
-            put_s64(result, 64);
+            put_op(result, opcode::GlobalGet);
+            put_u32(result, limit);
             put_op(result, opcode::I32GtS);
             put_op(result, opcode::If);
             result.push_back(0x40u);
             put_op(result, opcode::GlobalGet);
             put_u32(result, depth);
             put_op(result, opcode::CallFunction);
-            relocations.emplace_back(static_cast<std::uint32_t>(result.size()), runtime_function("python::depth_check", { type::I32 }, type::Void));
+            relocations.emplace_back(static_cast<std::uint32_t>(result.size()), runtime_function("python::depth_check", { type::I32 }, type::I32));
             result.resize(result.size() + 5u);
+            put_op(result, opcode::GlobalSet);
+            put_u32(result, limit);
             // (RecursionError: the function returns at once; its prologue has not retained its parameters, so they are not released 
             // (as an exception's are))
             put_op(result, opcode::GlobalGet);

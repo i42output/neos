@@ -540,7 +540,7 @@ namespace neos
                             },
                             [](void* aHost, char const* aText) 
                             { 
-                                return static_cast<machine*>(aHost)->allocate_string(aText != nullptr ? std::string_view{ aText } : std::string_view{}); 
+                                return static_cast<machine*>(aHost)->allocate_string(runtime::string_result(aText)); 
                             },
                             [](void* aHost) { return static_cast<machine*>(aHost)->thread_globals(); } };
                         return jit::compile(module, [this](std::uint32_t aFunction, value* aBuffer)
@@ -2496,6 +2496,22 @@ namespace neos
                     }
                     // (a global's storage (its word): the interpreter and generated code use it (it does not move); one that each thread has
                     // its own of: the calling thread's)
+                    // (neos_rt_host::string_size) the size of a string argument (aString: as string_pointer gave it, else not in memory: its 
+                    // strlen)
+                    std::size_t string_size(char const* aString) const
+                    {
+                        auto const* const base = reinterpret_cast<char const*>(iMemory.data());
+                        if (!iMemory.empty() && aString >= base + StringHeaderSize && aString < base + iMemory.size())
+                        {
+                            auto const address = static_cast<std::size_t>(aString - base) - StringHeaderSize;
+                            string_header header;
+                            std::memcpy(&header, &iMemory[address], sizeof(header));
+                            auto const end = address + StringHeaderSize + header.bytes;
+                            if (end < iMemory.size() && iMemory[end] == 0u && header.codePoints <= header.bytes && header.utf16Units <= header.bytes)
+                                return header.bytes;
+                        }
+                        return std::strlen(aString);
+                    }
                     value* global_address(std::uint32_t aIndex)
                     {
                         if (aIndex < iThreadGlobals.size() && iThreadGlobals[aIndex] != 0u)
@@ -5564,11 +5580,23 @@ namespace neos
                     return jit::thread_stack_limit();
                 }
 
+                std::size_t host_string_size(char const* aString)
+                {
+                    if (aString == nullptr)
+                        return 0u;
+                    return tRunning.program != nullptr ? tRunning.program->string_size(aString) : std::strlen(aString);
+                }
+
+                void host_string_result(char const* aString, std::size_t aSize)
+                {
+                    runtime::set_string_result(aString, aSize);
+                }
+
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
                     host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global, host_link, host_watched_changed, 
-                    host_shared_memory, host_stack_limit };
+                    host_shared_memory, host_stack_limit, host_string_size, host_string_result };
             }
 
             void const* runtime::host()

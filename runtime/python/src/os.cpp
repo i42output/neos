@@ -31,7 +31,12 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py,
-  Modules/errnomodule.c and Lib/os.py (PathLike)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the
+  Modules/errnomodule.c, Lib/os.py (PathLike, _Environ, the exec and spawn functions, renames, _exists and _get_exports_list),
+  Modules/posixmodule.c (execv's and execve's arguments, the uid and gid converters, pathconf, fpathconf and confstr and their
+  names; the POSIX functions after sched_get_priority_max (abort ... pidfd_open, the xattr and timerfd functions) and the
+  constants), Modules/resource.c (the resource module), Lib/stat.py (UF_*, SF_*, FILE_ATTRIBUTE_* and _filemode_table) and Lib/pathlib (_local.py
+  and _abc.py: Path's lchmod, symlink_to, hardlink_to, readlink, is_block_device, is_char_device, is_fifo, is_socket, owner,
+  group and from_uri)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the
   Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python and C to C++
   for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
@@ -46,8 +51,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <random>
 #include <string>
 #include <string_view>
@@ -67,6 +74,10 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <spawn.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#endif
 #include <signal.h>
 #include <pwd.h>
 #include <grp.h>
@@ -76,6 +87,27 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <sys/statvfs.h>
+#include <sys/resource.h>
+#include <sys/uio.h>
+#include <sched.h>
+#include <climits>
+#include <cstdio>
+#include <dlfcn.h>
+#include <sysexits.h>
+#if defined(__linux__)
+#include <sys/sysmacros.h>
+#include <sys/syscall.h>
+#include <sys/eventfd.h>
+#include <sys/sendfile.h>
+#include <sys/xattr.h>
+#include <sys/mman.h>
+#include <sys/random.h>
+#include <sys/timerfd.h>
+#include <linux/limits.h>
+#if __has_include(<linux/memfd.h>)
+#include <linux/memfd.h>
+#endif
+#endif
 #endif
 #include <fcntl.h>
 #include "objects.hpp"
@@ -91,6 +123,13 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        // (structseq.cpp)
+        using structseq_constructor = object* (*)(structseq_descriptor const& aDescriptor, object* aArgs, object* aKwargs);
+        void set_structseq_constructor(structseq_descriptor const& aDescriptor, structseq_constructor aConstructor, bool aItemArguments);
+        object* structseq_construct(structseq_descriptor const& aDescriptor, object* aArgs, object* aKwargs);
+        object* structseq_field(object* aObject, std::size_t aField);
+        void structseq_set_field(object* aObject, std::size_t aField, object* aValue);
+
         namespace
         {
             // --- paths (aWindows: ntpath's rules, else posixpath's)
@@ -355,8 +394,14 @@ namespace neos::python_runtime
                         auto const equals = entry.find('=', entry.empty() || entry[0] != '=' ? 0u : 1u);
                         if (equals == std::string_view::npos)
                             continue;
+                        // (posix.environ's: bytes (os.environ decodes them); nt.environ's: str)
+#if defined(_WIN32)
                         ref const key{ make_str(std::string{ entry.substr(0u, equals) }) };
                         ref const value{ make_str(std::string{ entry.substr(equals + 1u) }) };
+#else
+                        ref const key{ make_bytes(std::string{ entry.substr(0u, equals) }) };
+                        ref const value{ make_bytes(std::string{ entry.substr(equals + 1u) }) };
+#endif
                         dict_set(sEnviron, key.get(), value.get());
                     }
                 }
@@ -367,12 +412,21 @@ namespace neos::python_runtime
             std::optional<std::string> environment_value(std::string const& aName)
             {
                 ref const env{ environment() };
+#if defined(_WIN32)
                 ref const key{ make_str(aName) };
+#else
+                ref const key{ make_bytes(aName) };
+#endif
                 auto const position = dict_find(env.get(), key.get());
                 if (position < 0)
                     return {};
+                auto const item = as<dict_object>(env.get())->items[static_cast<std::size_t>(position)].second;
                 std::string value;
-                str_of(as<dict_object>(env.get())->items[static_cast<std::size_t>(position)].second, value);
+                std::string_view bytes;
+                if (bytes_like(item, bytes))
+                    value = std::string{ bytes };
+                else
+                    str_of(item, value);
                 return value;
             }
 
@@ -551,12 +605,64 @@ namespace neos::python_runtime
                 long long mode = 0, ino = 0, dev = 0, nlink = 0, uid = 0, gid = 0, size = 0;
                 double atime = 0.0, mtime = 0.0, ctime = 0.0;
                 long long atime_ns = 0, mtime_ns = 0, ctime_ns = 0;
+                long long blksize = 0, blocks = 0, rdev = 0;    ///< (POSIX's: st_blksize, st_blocks and st_rdev)
             };
 
-            bool do_stat(std::string const& aPath, bool aFollow, stat_values& aResult, int& aErrno)
+            // (a dir_fd argument: AT_FDCWD if it is absent or None (the current directory); NotImplementedError where the platform has no
+            // *at functions (Windows: os.supports_dir_fd is empty))
+            bool dir_fd_of(object* aValue, int& aResult)
+            {
+#if defined(_WIN32)
+                aResult = -1;
+#else
+                aResult = AT_FDCWD;
+#endif
+                if (aValue == nullptr || kind_of(aValue) == NEOS_PY_NONE)
+                    return true;
+                if (!is_int_like(aValue) && (python_type(aValue) == nullptr || python_type(aValue)->index == nullptr))
+                {
+                    error("TypeError", std::string{ "argument should be integer or None, not " } + type_name(aValue));
+                    return false;
+                }
+#if defined(_WIN32)
+                error("NotImplementedError", "dir_fd unavailable on this platform");
+                return false;
+#else
+                long long fd = 0;
+                if (!to_index(aValue, fd))
+                    return false;
+                if (fd < std::numeric_limits<int>::min() || fd > std::numeric_limits<int>::max())
+                {
+                    error("OverflowError", "fd is greater than maximum");
+                    return false;
+                }
+                aResult = static_cast<int>(fd);
+                return true;
+#endif
+            }
+
+            // (a follow_symlinks argument: true if it is absent)
+            bool follow_of(object* aValue)
+            {
+                return aValue == nullptr || truth(aValue) == 1;
+            }
+
+            // (follow_symlinks=False where the platform cannot: NotImplementedError, as CPython's follow_symlinks_specified)
+            object* follow_symlinks_unavailable(char const* aFunction)
+            {
+                return error("NotImplementedError", std::string{ aFunction } + ": follow_symlinks unavailable on this platform");
+            }
+
+#if defined(_WIN32)
+            constexpr int kCurrentDirectoryFd = -1;
+#else
+            constexpr int kCurrentDirectoryFd = AT_FDCWD;
+#endif
+            bool do_stat(std::string const& aPath, bool aFollow, stat_values& aResult, int& aErrno, int aDirFd = kCurrentDirectoryFd)
             {
 #if defined(_WIN32)
                 (void)aFollow;
+                (void)aDirFd;
                 struct _stat64 st{};
                 if (::_stat64(aPath.c_str(), &st) != 0)
                 {
@@ -568,7 +674,7 @@ namespace neos::python_runtime
                 aResult.ctime_ns = static_cast<long long>(st.st_ctime) * 1000000000ll;
 #else
                 struct stat st{};
-                if ((aFollow ? ::stat(aPath.c_str(), &st) : ::lstat(aPath.c_str(), &st)) != 0)
+                if (::fstatat(aDirFd, aPath.c_str(), &st, aFollow ? 0 : AT_SYMLINK_NOFOLLOW) != 0)
                 {
                     aErrno = errno;
                     return false;
@@ -590,47 +696,108 @@ namespace neos::python_runtime
                 aResult.uid = static_cast<long long>(st.st_uid);
                 aResult.gid = static_cast<long long>(st.st_gid);
                 aResult.size = static_cast<long long>(st.st_size);
+#if !defined(_WIN32)
+                aResult.blksize = static_cast<long long>(st.st_blksize);
+                aResult.blocks = static_cast<long long>(st.st_blocks);
+                aResult.rdev = static_cast<long long>(st.st_rdev);
+#endif
                 aResult.atime = static_cast<double>(aResult.atime_ns) / 1e9;
                 aResult.mtime = static_cast<double>(aResult.mtime_ns) / 1e9;
                 aResult.ctime = static_cast<double>(aResult.ctime_ns) / 1e9;
                 return true;
             }
 
+            // (the struct sequences' types (made once: also the module's attributes, e.g. os.stat_result); os.stat_result: items 7 to 9 are the integer times (unnamed: repr shows them as st_atime etc.); the attributes are the floats (the 
+            // later fields))
+            structseq_descriptor const& stat_result_type()
+            {
+                // (POSIX's: also st_blksize, st_blocks and st_rdev (as CPython's on Linux))
+                return structseq_type("os.stat_result", { "st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", 
+                    "st_ctime", "st_atime", "st_mtime", "st_ctime", "st_atime_ns", "st_mtime_ns", "st_ctime_ns"
+#if !defined(_WIN32)
+                    , "st_blksize", "st_blocks", "st_rdev"
+#endif
+                    }, 10u);
+            }
+            structseq_descriptor const& terminal_size_type() { return structseq_type("os.terminal_size", { "columns", "lines" }, 2u); }
+            structseq_descriptor const& times_result_type()
+            {
+                return structseq_type("posix.times_result", { "user", "system", "children_user", "children_system", "elapsed" }, 5u);
+            }
+            structseq_descriptor const& uname_result_type()
+            {
+                return structseq_type("posix.uname_result", { "sysname", "nodename", "release", "version", "machine" }, 5u);
+            }
+            structseq_descriptor const& statvfs_result_type()
+            {
+                return structseq_type("os.statvfs_result", { "f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail", "f_files", "f_ffree", "f_favail",
+                    "f_flag", "f_namemax", "f_fsid" }, 10u);
+            }
+
             object* stat_result(stat_values const& s)
             {
                 // (items 7 to 9 are the integer times, which repr shows as st_atime etc.; the attributes are the floats (the later fields))
-                auto const& t = structseq_type("os.stat_result", { "st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", 
-                    "st_atime", "st_mtime", "st_ctime", "st_atime", "st_mtime", "st_ctime", "st_atime_ns", "st_mtime_ns", "st_ctime_ns" }, 10u);
+                auto const& t = stat_result_type();
                 return make_structseq(t, { make_int(s.mode), make_int(s.ino), make_int(s.dev), make_int(s.nlink), make_int(s.uid), make_int(s.gid),
                     make_int(s.size), make_int(s.atime_ns / 1000000000ll), make_int(s.mtime_ns / 1000000000ll), make_int(s.ctime_ns / 1000000000ll),
-                    make_float(s.atime), make_float(s.mtime), make_float(s.ctime), make_int(s.atime_ns), make_int(s.mtime_ns), make_int(s.ctime_ns) });
+                    make_float(s.atime), make_float(s.mtime), make_float(s.ctime), make_int(s.atime_ns), make_int(s.mtime_ns), make_int(s.ctime_ns)
+#if !defined(_WIN32)
+                    , make_int(s.blksize), make_int(s.blocks), make_int(s.rdev)
+#endif
+                    });
             }
 
             constexpr long long kIFMT = 0170000, kIFDIR = 0040000, kIFREG = 0100000, kIFLNK = 0120000;
 
             // (a path argument: str, bytes or os.PathLike)
-            bool path_argument(object* aValue, std::string& aResult, char const* aFunction, char const* aName = "path")
+            // (a path argument (CPython's path_converter): a str or bytes (or a subclass's instance), or an os.PathLike's __fspath__() (a str or 
+            // bytes); aInteger: the function also takes a file descriptor (its message says so))
+            // aNul: no NUL (os.path's functions are of the text (a NUL is checked by the os functions that they call))
+            bool path_argument(object* aValue, std::string& aResult, char const* aFunction, char const* aName = "path", bool aInteger = false, bool aNul = true)
             {
-                if (kind_of(aValue) == NEOS_PY_STR)
+                // (no NUL: CPython's path_converter ("stat: embedded null character in path"), or its FSConverter's for an argument that is not 
+                // a path (exec's argv and env, putenv's: "embedded null byte"))
+                auto const nul_free = [&]() -> bool
                 {
-                    aResult = as<str_object>(aValue)->value;
-                    return true;
+                    if (!aNul || aResult.find('\0') == std::string::npos)
+                        return true;
+                    std::string_view const name{ aName };
+                    if (name == "argv" || name == "env" || name == "username")
+                        error("ValueError", "embedded null byte");
+                    else
+                        error("ValueError", std::string{ aFunction } + ": embedded null character in " + aName);
+                    return false;
+                };
+                auto const value = builtin_value(aValue);
+                if (kind_of(value) == NEOS_PY_STR)
+                {
+                    aResult = as<str_object>(value)->value;
+                    return nul_free();
                 }
                 std::string_view bytes;
-                if (bytes_like(aValue, bytes))
+                if (bytes_like(value, bytes))
                 {
                     aResult = std::string{ bytes };
-                    return true;
+                    return nul_free();
                 }
                 ref const fspath{ getattr(aValue, "__fspath__") };
                 if (fspath)
                 {
                     ref const empty{ make_tuple() };
                     ref const p{ call(fspath.get(), empty.get(), nullptr) };
-                    return p && path_argument(p.get(), aResult, aFunction, aName);
+                    if (!p)
+                        return false;
+                    auto const result = builtin_value(p.get());
+                    if (kind_of(result) != NEOS_PY_STR && std::string_view{ type_name(result) } != "bytes")
+                    {
+                        error("TypeError", std::string{ "expected " } + type_name(aValue) + ".__fspath__() to return str or bytes, not " + type_name(p.get()));
+                        return false;
+                    }
+                    return path_argument(result, aResult, aFunction, aName, false, aNul);
                 }
                 clear_error();
-                error("TypeError", std::string{ aFunction } + ": " + aName + " should be string, bytes or os.PathLike, not " + type_name(aValue));
+                error("TypeError", std::string{ aFunction } + ": " + aName + " should be string, bytes" + (aInteger ? ", os.PathLike or integer" : " or os.PathLike") + 
+                    ", not " + type_name(aValue));
                 return false;
             }
 
@@ -641,11 +808,11 @@ namespace neos::python_runtime
                 return do_stat(aPath, aFollow, s, e);
             }
 
-            bool is_type(std::string const& aPath, long long aType, bool aFollow = true)
+            bool is_type(std::string const& aPath, long long aType, bool aFollow = true, int aDirFd = kCurrentDirectoryFd)
             {
                 stat_values s;
                 int e = 0;
-                return do_stat(aPath, aFollow, s, e) && (s.mode & kIFMT) == aType;
+                return do_stat(aPath, aFollow, s, e, aDirFd) && (s.mode & kIFMT) == aType;
             }
 
             // --- os.path functions
@@ -661,7 +828,7 @@ namespace neos::python_runtime
                 std::vector<object*> a;
                 if (!parse_arguments(aName, aArgs, aKwargs, { "p" }, 1u, 1u, a))
                     return nullptr;
-                if (!path_argument(a[0], aPath, aName, "p"))
+                if (!path_argument(a[0], aPath, aName, "p", false, false))
                     return nullptr;
                 return none();
             }
@@ -684,7 +851,7 @@ namespace neos::python_runtime
                         if (aArgs.empty())
                             return error("TypeError", "join() missing 1 required positional argument: 'a'");
                         std::string first;
-                        if (!path_argument(aArgs[0], first, "join", "a"))
+                        if (!path_argument(aArgs[0], first, "join", "a", false, false))
                         {
                             clear_error();
                             return error("TypeError", std::string{ "expected str, bytes or os.PathLike object, not " } + type_name(aArgs[0]));
@@ -693,7 +860,7 @@ namespace neos::python_runtime
                         for (std::size_t i = 1u; i < aArgs.size(); ++i)
                         {
                             std::string p;
-                            if (!path_argument(aArgs[i], p, "join"))
+                            if (!path_argument(aArgs[i], p, "join", "path", false, false))
                             {
                                 clear_error();
                                 return error("TypeError", std::string{ "join() argument must be str, bytes, or os.PathLike object, not '" } + type_name(aArgs[i]) + "'");
@@ -795,8 +962,16 @@ namespace neos::python_runtime
                         if (!parse_arguments("realpath", aArgs, aKwargs, { "filename", "strict" }, 1u, 1u, a))
                             return nullptr;
                         std::string p;
-                        if (!path_argument(a[0], p, "realpath", "filename"))
+                        if (!path_argument(a[0], p, "realpath", "filename", false, false))
                             return nullptr;
+#if !defined(_WIN32)
+                        // (ntpath's (not on Windows): abspath's)
+                        if (r.windows)
+                            return path_result(aArgs, abspath(r, p));
+#endif
+                        // (a NUL: lstat's error (posixpath's realpath calls it for each part))
+                        if (p.find('\0') != std::string::npos)
+                            return error("ValueError", "lstat: embedded null character in path");
                         // (strict: the path must exist (OSError); os.path.ALLOW_MISSING: its missing parts are kept, but other errors raise)
                         bool allowMissing = false;
                         bool strict = false;
@@ -835,7 +1010,8 @@ namespace neos::python_runtime
                         if (!parse_arguments("relpath", aArgs, aKwargs, { "path", "start" }, 1u, 0u, a))
                             return nullptr;
                         std::string path, start = ".";
-                        if (!path_argument(a[0], path, "relpath") || (a[1] != nullptr && kind_of(a[1]) != NEOS_PY_NONE && !path_argument(a[1], start, "relpath", "start")))
+                        if (!path_argument(a[0], path, "relpath", "path", false, false) || (a[1] != nullptr && kind_of(a[1]) != NEOS_PY_NONE && 
+                            !path_argument(a[1], start, "relpath", "start", false, false)))
                             return nullptr;
                         if (path.empty())
                             return error("ValueError", "no path specified");
@@ -929,7 +1105,7 @@ namespace neos::python_runtime
                         for (auto i : items)
                         {
                             std::string p;
-                            if (!path_argument(i, p, "commonpath"))
+                            if (!path_argument(i, p, "commonpath", "path", false, false))
                                 return nullptr;
                             paths.push_back(p);
                         }
@@ -1003,7 +1179,8 @@ namespace neos::python_runtime
                             clear_error();
                             return make_bool(false);
                         }
-                        return make_bool(exists(p));
+                        // (a NUL: os.stat's ValueError: False)
+                        return make_bool(p.find('\0') == std::string::npos && exists(p));
                     } },
                 { "lexists", [](path_rules const&, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1013,7 +1190,8 @@ namespace neos::python_runtime
                             clear_error();
                             return make_bool(false);
                         }
-                        return make_bool(exists(p, false));
+                        // (a NUL: os.stat's ValueError: False)
+                        return make_bool(p.find('\0') == std::string::npos && exists(p, false));
                     } },
                 { "isfile", [](path_rules const&, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1023,7 +1201,8 @@ namespace neos::python_runtime
                             clear_error();
                             return make_bool(false);
                         }
-                        return make_bool(is_type(p, kIFREG));
+                        // (a NUL: os.stat's ValueError: False)
+                        return make_bool(p.find('\0') == std::string::npos && is_type(p, kIFREG));
                     } },
                 { "isdir", [](path_rules const&, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1033,7 +1212,8 @@ namespace neos::python_runtime
                             clear_error();
                             return make_bool(false);
                         }
-                        return make_bool(is_type(p, kIFDIR));
+                        // (a NUL: os.stat's ValueError: False)
+                        return make_bool(p.find('\0') == std::string::npos && is_type(p, kIFDIR));
                     } },
                 { "islink", [](path_rules const&, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1043,13 +1223,32 @@ namespace neos::python_runtime
                             clear_error();
                             return make_bool(false);
                         }
-                        return make_bool(is_type(p, kIFLNK, false));
+                        // (a NUL: os.stat's ValueError: False)
+                        return make_bool(p.find('\0') == std::string::npos && is_type(p, kIFLNK, false));
                     } },
                 { "ismount", [](path_rules const& r, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::string p;
                         if (!one_path(aArgs, aKwargs, "ismount", p))
                             return nullptr;
+                        if (!r.windows)
+                        {
+                            // (posixpath.ismount: path/.. on a different device from path, or the same i-node (a NUL, or a path that does not 
+                            // exist, or a symbolic link: not a mount point))
+                            stat_values s1, s2;
+                            int e = 0;
+                            if (p.find('\0') != std::string::npos || !do_stat(p, false, s1, e) || (s1.mode & kIFMT) == kIFLNK)
+                                return make_bool(false);
+                            auto parent = join(r, p, std::vector<std::string>{ ".." });
+                            if (!do_stat(parent, false, s2, e))
+                            {
+                                std::error_code ec;
+                                auto const resolved = std::filesystem::weakly_canonical(std::filesystem::path{ abspath(r, parent) }, ec);
+                                if (ec || !do_stat(normpath(r, resolved.string()), false, s2, e))
+                                    return make_bool(false);
+                            }
+                            return make_bool(s1.dev != s2.dev || s1.ino == s2.ino);
+                        }
                         auto const a = abspath(r, p);
                         auto const s = splitroot(r, a);
                         return make_bool(!s.root.empty() && s.tail.empty());
@@ -1059,6 +1258,8 @@ namespace neos::python_runtime
                         std::string p;
                         if (!one_path(aArgs, aKwargs, "getsize", p))
                             return nullptr;
+                        if (p.find('\0') != std::string::npos)
+                            return error("ValueError", "stat: embedded null character in path");
                         stat_values s;
                         int e = 0;
                         if (!do_stat(p, true, s, e))
@@ -1070,6 +1271,8 @@ namespace neos::python_runtime
                         std::string p;
                         if (!one_path(aArgs, aKwargs, "getmtime", p))
                             return nullptr;
+                        if (p.find('\0') != std::string::npos)
+                            return error("ValueError", "stat: embedded null character in path");
                         stat_values s;
                         int e = 0;
                         if (!do_stat(p, true, s, e))
@@ -1081,6 +1284,8 @@ namespace neos::python_runtime
                         std::string p;
                         if (!one_path(aArgs, aKwargs, "getatime", p))
                             return nullptr;
+                        if (p.find('\0') != std::string::npos)
+                            return error("ValueError", "stat: embedded null character in path");
                         stat_values s;
                         int e = 0;
                         if (!do_stat(p, true, s, e))
@@ -1092,6 +1297,8 @@ namespace neos::python_runtime
                         std::string p;
                         if (!one_path(aArgs, aKwargs, "getctime", p))
                             return nullptr;
+                        if (p.find('\0') != std::string::npos)
+                            return error("ValueError", "stat: embedded null character in path");
                         stat_values s;
                         int e = 0;
                         if (!do_stat(p, true, s, e))
@@ -1104,12 +1311,17 @@ namespace neos::python_runtime
                         if (!parse_arguments("samefile", aArgs, aKwargs, { "f1", "f2" }, 2u, 2u, a))
                             return nullptr;
                         std::string p1, p2;
-                        if (!path_argument(a[0], p1, "samefile") || !path_argument(a[1], p2, "samefile"))
+                        if (!path_argument(a[0], p1, "samefile", "path", false, false) || !path_argument(a[1], p2, "samefile", "path", false, false))
                             return nullptr;
+                        // (os.stat of each: a NUL is its error)
                         stat_values s1, s2;
                         int e = 0;
+                        if (p1.find('\0') != std::string::npos)
+                            return error("ValueError", "stat: embedded null character in path");
                         if (!do_stat(p1, true, s1, e))
                             return raise_os_error(e, a[0]);
+                        if (p2.find('\0') != std::string::npos)
+                            return error("ValueError", "stat: embedded null character in path");
                         if (!do_stat(p2, true, s2, e))
                             return raise_os_error(e, a[1]);
                         return make_bool(s1.ino == s2.ino && s1.dev == s2.dev);
@@ -1155,7 +1367,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("isjunction", aArgs, aKwargs, { "path" }, 1u, 1u, a) || !path_argument(a[0], p, "isjunction"))
+                        if (!parse_arguments("isjunction", aArgs, aKwargs, { "path" }, 1u, 1u, a) || !path_argument(a[0], p, "isjunction", "path", false, false))
                             return nullptr;
                         return make_bool(false);
                     } },
@@ -1163,7 +1375,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("isdevdrive", aArgs, aKwargs, { "path" }, 1u, 1u, a) || !path_argument(a[0], p, "isdevdrive"))
+                        if (!parse_arguments("isdevdrive", aArgs, aKwargs, { "path" }, 1u, 1u, a) || !path_argument(a[0], p, "isdevdrive", "path", false, false))
                             return nullptr;
                         return make_bool(false);
                     } }
@@ -1255,6 +1467,7 @@ namespace neos::python_runtime
                 std::string name;
                 std::string path;
                 bool bytes = false;
+                int dirFd = kCurrentDirectoryFd;    ///< (scandir(fd)'s: its directory's descriptor (its path is its name, as CPython's))
             };
 
             neos_py_type make_dir_entry_type();
@@ -1278,14 +1491,14 @@ namespace neos::python_runtime
                             follow = truth(item.second) == 1;
                 switch (which)
                 {
-                case 0: return make_bool(is_type(e.path, kIFDIR, follow));
-                case 1: return make_bool(is_type(e.path, kIFREG, follow));
-                case 2: return make_bool(is_type(e.path, kIFLNK, false));
+                case 0: return make_bool(is_type(e.path, kIFDIR, follow, e.dirFd));
+                case 1: return make_bool(is_type(e.path, kIFREG, follow, e.dirFd));
+                case 2: return make_bool(is_type(e.path, kIFLNK, false, e.dirFd));
                 case 3:
                     {
                         stat_values s;
                         int err = 0;
-                        if (!do_stat(e.path, follow, s, err))
+                        if (!do_stat(e.path, follow, s, err, e.dirFd))
                         {
                             ref const p{ entry_text(e, e.path) };
                             return raise_os_error(err, p.get());
@@ -1296,7 +1509,7 @@ namespace neos::python_runtime
                     {
                         stat_values s;
                         int err = 0;
-                        do_stat(e.path, false, s, err);
+                        do_stat(e.path, false, s, err, e.dirFd);
                         return make_int(s.ino);
                     }
                 case 5: return entry_text(e, e.path);
@@ -1383,6 +1596,41 @@ namespace neos::python_runtime
             }
 
             // (the entries of a directory (aPath: as given); null if it cannot be read)
+            bool directory_entries(std::string const& aPath, std::vector<std::string>& aNames, int& aErrno);
+
+#if !defined(_WIN32)
+            // (a directory's names from a descriptor of it (as CPython's listdir(fd): a duplicate of it, fdopendir and rewinddir; the 
+            // descriptor stays open))
+            bool directory_entries(int aFd, std::vector<std::string>& aNames, int& aErrno)
+            {
+                auto const fd = ::dup(aFd);
+                if (fd < 0)
+                {
+                    aErrno = errno;
+                    return false;
+                }
+                DIR* const d = ::fdopendir(fd);
+                if (d == nullptr)
+                {
+                    aErrno = errno;
+                    ::close(fd);
+                    return false;
+                }
+                ::rewinddir(d);
+                errno = 0;
+                while (auto const* entry = ::readdir(d))
+                {
+                    std::string const name = entry->d_name;
+                    if (name != "." && name != "..")
+                        aNames.push_back(name);
+                }
+                aErrno = errno;
+                ::rewinddir(d);
+                ::closedir(d);
+                return aErrno == 0;
+            }
+#endif
+
             bool directory_entries(std::string const& aPath, std::vector<std::string>& aNames, int& aErrno)
             {
 #if defined(_WIN32)
@@ -1577,6 +1825,70 @@ namespace neos::python_runtime
                 return path_argument(a[aIndex], aPath, aFunction, aName);
             }
 
+            object* fd_stat(int aFd, object* aName);
+
+            // (a path argument of a function that also takes a file descriptor (CPython's path_t with allow_fd: POSIX's, as CPython's supports_fd):
+            // an integer (an object with __index__; a bool warns that it is used as a file descriptor, as _PyLong_FileDescriptor_Converter's): 
+            // aFd; otherwise aFd is empty and aPath the path)
+            bool path_or_fd_of(std::vector<object*> const& a, std::size_t aIndex, std::string& aPath, std::optional<int>& aFd, char const* aFunction)
+            {
+                aFd.reset();
+#if !defined(_WIN32)
+                auto const value = a[aIndex];
+                bool integer = is_int_like(value);
+                if (!integer && kind_of(builtin_value(value)) != NEOS_PY_STR && std::string_view{ type_name(builtin_value(value)) } != "bytes")
+                {
+                    ref const index{ getattr(value, "__index__") };
+                    integer = static_cast<bool>(index);
+                    clear_error();
+                }
+                if (integer)
+                {
+                    if (kind_of(value) == NEOS_PY_BOOL)
+                    {
+                        ref const warn{ module_attribute("warnings", "warn") };
+                        ref category{ fn_builtin("RuntimeWarning") };
+                        if (!warn || !category || !ref{ invoke(warn.get(), { make_str("bool is used as a file descriptor"), category.release_ownership() }) })
+                            return false;
+                    }
+                    long long fd = 0;
+                    if (!to_index(value, fd))
+                        return false;
+                    if (fd > std::numeric_limits<int>::max() || fd < std::numeric_limits<int>::min())
+                    {
+                        error("OverflowError", fd > 0 ? "fd is greater than maximum" : "fd is less than minimum");
+                        return false;
+                    }
+                    aFd = static_cast<int>(fd);
+                    return true;
+                }
+#endif
+                return path_argument(a[aIndex], aPath, aFunction, "path", 
+#if defined(_WIN32)
+                    false);
+#else
+                    true);
+#endif
+            }
+
+            // (a file descriptor with dir_fd or follow_symlinks=False: CPython's dir_fd_and_fd_invalid and fd_and_follow_symlinks_invalid)
+            bool fd_alone(char const* aFunction, std::optional<int> const& aFd, int aDirFd, bool aFollow)
+            {
+                if (!aFd)
+                    return true;
+                if (aDirFd != kCurrentDirectoryFd)
+                {
+                    error("ValueError", std::string{ aFunction } + ": can't specify dir_fd without matching path");
+                    return false;
+                }
+                if (!aFollow)
+                {
+                    error("ValueError", std::string{ aFunction } + ": cannot use fd and follow_symlinks together");
+                    return false;
+                }
+                return true;
+            }
+
             int make_directory(std::string const& aPath, long long aMode)
             {
 #if defined(_WIN32)
@@ -1587,18 +1899,94 @@ namespace neos::python_runtime
 #endif
             }
 
+#if !defined(_WIN32)
+            // (exec's argv: each item a path (str, bytes or os.PathLike, as CPython's fsconverter))
+            bool exec_arguments(object* aArgv, std::vector<std::string>& aResult, char const* aFunction)
+            {
+                std::vector<object*> items;
+                if (!collect(aArgv, items))
+                    return false;
+                bool ok = true;
+                for (auto i : items)
+                {
+                    std::string text;
+                    if (ok)
+                        ok = path_argument(i, text, aFunction, "argv");
+                    release(i);
+                    if (ok)
+                        aResult.push_back(std::move(text));
+                }
+                return ok;
+            }
+#endif
+
+            // (a function of no arguments (CPython's METH_NOARGS): TypeError if it is given any, its name the platform module's 
+            // ("posix.getpid() takes no arguments (1 given)"))
+            bool no_arguments(char const* aName, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+#if defined(_WIN32)
+                std::string const name = std::string{ "nt." } + aName;
+#else
+                std::string const name = std::string{ "posix." } + aName;
+#endif
+                if (aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty())
+                {
+                    error("TypeError", name + "() takes no keyword arguments");
+                    return false;
+                }
+                if (!aArgs.empty())
+                {
+                    error("TypeError", name + "() takes no arguments (" + std::to_string(aArgs.size()) + " given)");
+                    return false;
+                }
+                return true;
+            }
+
+            // (remove and unlink (the same function, by its name))
+            object* remove_path(char const* aName, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                if (!host_unrestricted("os.remove"))
+                    return nullptr;
+                std::vector<object*> a;
+                std::string p;
+                int dirFd = 0;
+                if (!parse_arguments(aName, aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, aName) || !dir_fd_of(a[1], dirFd))
+                    return nullptr;
+#if !defined(_WIN32)
+                if (::unlinkat(dirFd, p.c_str(), 0) != 0)
+                    return raise_os_error(errno, a[0]);
+                return none();
+#endif
+                if (is_type(p, kIFDIR))
+                    return raise_os_error(
+#if defined(_WIN32)
+                        EACCES,
+#else
+                        EISDIR,
+#endif
+                        a[0]);
+                if (std::remove(p.c_str()) != 0)
+                    return raise_os_error(errno, a[0]);
+                return none();
+            }
+
             builtin_entry const sOsFunctions[] =
             {
-                { "getcwd", [](std::vector<object*> const&, object*) -> object* { return make_str(current_directory()); } },
-                { "getcwdb", [](std::vector<object*> const&, object*) -> object* { return make_bytes(current_directory()); } },
+                { "getcwd", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getcwd", aArgs, aKwargs)) return nullptr; return make_str(current_directory()); } },
+                { "getcwdb", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getcwdb", aArgs, aKwargs)) return nullptr; return make_bytes(current_directory()); } },
                 { "chdir", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         if (!host_unrestricted("os.chdir"))
                             return nullptr;
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("chdir", aArgs, aKwargs, { "path" }, 1u, 0u, a) || !path_of(a, 0u, p, "chdir"))
+                        std::optional<int> fd;
+                        if (!parse_arguments("chdir", aArgs, aKwargs, { "path" }, 1u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "chdir"))
                             return nullptr;
+#if !defined(_WIN32)
+                        if (fd)
+                            return ::fchdir(*fd) != 0 ? raise_os_error(errno, a[0]) : none();
+#endif
                         std::error_code ec;
                         std::filesystem::current_path(std::filesystem::path{ p }, ec);
                         if (ec)
@@ -1613,14 +2001,27 @@ namespace neos::python_runtime
                         std::string p = ".";
                         bool bytes = false;
                         std::string_view b;
+                        std::optional<int> fd;
                         if (a[0] != nullptr && kind_of(a[0]) != NEOS_PY_NONE)
                         {
-                            if (!path_of(a, 0u, p, "listdir"))
+                            if (!path_or_fd_of(a, 0u, p, fd, "listdir"))
                                 return nullptr;
-                            bytes = bytes_like(a[0], b);
+                            bytes = !fd && bytes_like(builtin_value(a[0]), b);
                         }
                         std::vector<std::string> names;
                         int e = 0;
+#if !defined(_WIN32)
+                        // (a descriptor's: str names; its error has no file name, as CPython's)
+                        if (fd)
+                        {
+                            if (!directory_entries(*fd, names, e))
+                                return raise_os_error(e);
+                            std::vector<object*> items;
+                            for (auto const& n : names)
+                                items.push_back(make_str(n));
+                            return make_list(std::move(items));
+                        }
+#endif
                         if (!directory_entries(p, names, e))
                         {
                             ref const name{ a[0] != nullptr && kind_of(a[0]) != NEOS_PY_NONE ? (retain(a[0]), a[0]) : make_str(".") };
@@ -1639,14 +2040,30 @@ namespace neos::python_runtime
                         std::string p = ".";
                         bool bytes = false;
                         std::string_view b;
+                        std::optional<int> fd;
                         if (a[0] != nullptr && kind_of(a[0]) != NEOS_PY_NONE)
                         {
-                            if (!path_of(a, 0u, p, "scandir"))
+                            if (!path_or_fd_of(a, 0u, p, fd, "scandir"))
                                 return nullptr;
-                            bytes = bytes_like(a[0], b);
+                            bytes = !fd && bytes_like(builtin_value(a[0]), b);
                         }
                         std::vector<std::string> names;
                         int e = 0;
+#if !defined(_WIN32)
+                        // (a descriptor's: entries whose paths are their names, of the directory's descriptor)
+                        if (fd)
+                        {
+                            if (!directory_entries(*fd, names, e))
+                                return raise_os_error(e, a[0]);
+                            std::vector<object*> entries;
+                            for (auto const& n : names)
+                            {
+                                auto const entry = new dir_entry_object{ { { &sDirEntryType.base } }, n, n, false, *fd };
+                                entries.push_back(&entry->h.base);
+                            }
+                            return &(new scandir_object{ { { &sScandirType.base } }, make_list(std::move(entries)) })->h.base;
+                        }
+#endif
                         if (!directory_entries(p, names, e))
                         {
                             ref const name{ a[0] != nullptr ? (retain(a[0]), a[0]) : make_str(".") };
@@ -1666,12 +2083,17 @@ namespace neos::python_runtime
                             return nullptr;
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("mkdir", aArgs, aKwargs, { "path", "mode", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "mkdir"))
+                        int dirFd = 0;
+                        if (!parse_arguments("mkdir", aArgs, aKwargs, { "path", "mode", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "mkdir") || !dir_fd_of(a[2], dirFd))
                             return nullptr;
                         long long mode = 0777;
                         if (a[1] != nullptr && !to_index(a[1], mode))
                             return nullptr;
+#if defined(_WIN32)
                         if (make_directory(p, mode) != 0)
+#else
+                        if (::mkdirat(dirFd, p.c_str(), static_cast<mode_t>(mode)) != 0)
+#endif
                             return raise_os_error(errno, a[0]);
                         return none();
                     } },
@@ -1718,12 +2140,13 @@ namespace neos::python_runtime
                             return nullptr;
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("rmdir", aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "rmdir"))
+                        int dirFd = 0;
+                        if (!parse_arguments("rmdir", aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "rmdir") || !dir_fd_of(a[1], dirFd))
                             return nullptr;
 #if defined(_WIN32)
                         if (::_rmdir(p.c_str()) != 0)
 #else
-                        if (::rmdir(p.c_str()) != 0)
+                        if (::unlinkat(dirFd, p.c_str(), AT_REMOVEDIR) != 0)
 #endif
                             return raise_os_error(errno, a[0]);
                         return none();
@@ -1750,39 +2173,24 @@ namespace neos::python_runtime
                         }
                         return none();
                     } },
-                { "remove", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
-                    {
-                        if (!host_unrestricted("os.remove"))
-                            return nullptr;
-                        std::vector<object*> a;
-                        std::string p;
-                        if (!parse_arguments("remove", aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "remove"))
-                            return nullptr;
-                        if (is_type(p, kIFDIR))
-                            return raise_os_error(
-#if defined(_WIN32)
-                                EACCES,
-#else
-                                EISDIR,
-#endif
-                                a[0]);
-                        if (std::remove(p.c_str()) != 0)
-                            return raise_os_error(errno, a[0]);
-                        return none();
-                    } },
+                { "remove", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return remove_path("remove", aArgs, aKwargs); } },
                 { "rename", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         if (!host_unrestricted("os.rename"))
                             return nullptr;
                         std::vector<object*> a;
                         std::string from, to;
-                        if (!parse_arguments("rename", aArgs, aKwargs, { "src", "dst" }, 2u, 0u, a) || !path_of(a, 0u, from, "rename", "src") || !path_of(a, 1u, to, "rename", "dst"))
+                        int fromFd = 0, toFd = 0;
+                        if (!parse_arguments("rename", aArgs, aKwargs, { "src", "dst", "src_dir_fd", "dst_dir_fd" }, 2u, 0u, a) || !path_of(a, 0u, from, "rename", "src") ||
+                            !path_of(a, 1u, to, "rename", "dst") || !dir_fd_of(a[2], fromFd) || !dir_fd_of(a[3], toFd))
                             return nullptr;
 #if defined(_WIN32)
                         if (exists(to))
                             return raise_os_error(EEXIST, a[0], a[1]);
-#endif
                         if (std::rename(from.c_str(), to.c_str()) != 0)
+#else
+                        if (::renameat(fromFd, from.c_str(), toFd, to.c_str()) != 0)
+#endif
                             return raise_os_error(errno, a[0], a[1]);
                         return none();
                     } },
@@ -1792,8 +2200,16 @@ namespace neos::python_runtime
                             return nullptr;
                         std::vector<object*> a;
                         std::string from, to;
-                        if (!parse_arguments("replace", aArgs, aKwargs, { "src", "dst" }, 2u, 0u, a) || !path_of(a, 0u, from, "replace", "src") || !path_of(a, 1u, to, "replace", "dst"))
+                        int fromFd = 0, toFd = 0;
+                        if (!parse_arguments("replace", aArgs, aKwargs, { "src", "dst", "src_dir_fd", "dst_dir_fd" }, 2u, 0u, a) || !path_of(a, 0u, from, "replace", "src") ||
+                            !path_of(a, 1u, to, "replace", "dst") || !dir_fd_of(a[2], fromFd) || !dir_fd_of(a[3], toFd))
                             return nullptr;
+#if !defined(_WIN32)
+                        // (POSIX rename replaces dst (as CPython's os.replace))
+                        if (::renameat(fromFd, from.c_str(), toFd, to.c_str()) != 0)
+                            return raise_os_error(errno, a[0], a[1]);
+                        return none();
+#endif
                         std::error_code ec;
                         std::filesystem::rename(std::filesystem::path{ from }, std::filesystem::path{ to }, ec);
                         if (ec)
@@ -1804,11 +2220,16 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("stat", aArgs, aKwargs, { "path", "dir_fd", "follow_symlinks" }, 1u, 0u, a) || !path_of(a, 0u, p, "stat"))
+                        int dirFd = 0;
+                        std::optional<int> fd;
+                        if (!parse_arguments("stat", aArgs, aKwargs, { "path", "dir_fd", "follow_symlinks" }, 1u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "stat") || 
+                            !dir_fd_of(a[1], dirFd) || !fd_alone("stat", fd, dirFd, follow_of(a[2])))
                             return nullptr;
+                        if (fd)
+                            return fd_stat(*fd, a[0]);
                         stat_values s;
                         int e = 0;
-                        if (!do_stat(p, a[2] == nullptr || truth(a[2]) == 1, s, e))
+                        if (!do_stat(p, follow_of(a[2]), s, e, dirFd))
                             return raise_os_error(e, a[0]);
                         return stat_result(s);
                     } },
@@ -1816,11 +2237,12 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("lstat", aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "lstat"))
+                        int dirFd = 0;
+                        if (!parse_arguments("lstat", aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "lstat") || !dir_fd_of(a[1], dirFd))
                             return nullptr;
                         stat_values s;
                         int e = 0;
-                        if (!do_stat(p, false, s, e))
+                        if (!do_stat(p, false, s, e, dirFd))
                             return raise_os_error(e, a[0]);
                         return stat_result(s);
                     } },
@@ -1828,15 +2250,22 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("access", aArgs, aKwargs, { "path", "mode", "dir_fd", "effective_ids", "follow_symlinks" }, 2u, 0u, a) || !path_of(a, 0u, p, "access"))
+                        int dirFd = 0;
+                        if (!parse_arguments("access", aArgs, aKwargs, { "path", "mode", "dir_fd", "effective_ids", "follow_symlinks" }, 2u, 0u, a) || !path_of(a, 0u, p, "access") ||
+                            !dir_fd_of(a[2], dirFd))
                             return nullptr;
                         long long mode = 0;
                         if (!to_index(a[1], mode))
                             return nullptr;
+                        bool const effective = a[3] != nullptr && truth(a[3]) == 1;
 #if defined(_WIN32)
+                        if (effective)
+                            return error("NotImplementedError", "access: effective_ids unavailable on this platform");
+                        if (!follow_of(a[4]))
+                            return follow_symlinks_unavailable("access");
                         return make_bool(::_access(p.c_str(), static_cast<int>(mode & 6)) == 0);
 #else
-                        return make_bool(::access(p.c_str(), static_cast<int>(mode)) == 0);
+                        return make_bool(::faccessat(dirFd, p.c_str(), static_cast<int>(mode), (effective ? AT_EACCESS : 0) | (follow_of(a[4]) ? 0 : AT_SYMLINK_NOFOLLOW)) == 0);
 #endif
                     } },
                 { "chmod", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -1845,17 +2274,33 @@ namespace neos::python_runtime
                             return nullptr;
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("chmod", aArgs, aKwargs, { "path", "mode", "dir_fd", "follow_symlinks" }, 2u, 0u, a) || !path_of(a, 0u, p, "chmod"))
+                        int dirFd = 0;
+                        std::optional<int> fd;
+                        if (!parse_arguments("chmod", aArgs, aKwargs, { "path", "mode", "dir_fd", "follow_symlinks" }, 2u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "chmod") ||
+                            !dir_fd_of(a[2], dirFd) || !fd_alone("chmod", fd, dirFd, follow_of(a[3])))
                             return nullptr;
                         long long mode = 0;
                         if (!to_index(a[1], mode))
                             return nullptr;
-#if defined(_WIN32)
-                        if (::_chmod(p.c_str(), static_cast<int>(mode) & (_S_IREAD | _S_IWRITE)) != 0)
-#else
-                        if (::chmod(p.c_str(), static_cast<mode_t>(mode)) != 0)
+#if !defined(_WIN32)
+                        if (fd)
+                            return ::fchmod(*fd, static_cast<mode_t>(mode)) != 0 ? raise_os_error(errno, a[0]) : none();
 #endif
+#if defined(_WIN32)
+                        if (!follow_of(a[3]))
+                            return follow_symlinks_unavailable("chmod");
+                        if (::_chmod(p.c_str(), static_cast<int>(mode) & (_S_IREAD | _S_IWRITE)) != 0)
                             return raise_os_error(errno, a[0]);
+#else
+                        // (not following a symbolic link: fchmodat's AT_SYMLINK_NOFOLLOW, which Linux does not support for links (as CPython's: 
+                        // NotImplementedError))
+                        if (::fchmodat(dirFd, p.c_str(), static_cast<mode_t>(mode), follow_of(a[3]) ? 0 : AT_SYMLINK_NOFOLLOW) != 0)
+                        {
+                            if (!follow_of(a[3]) && (errno == ENOTSUP || errno == EOPNOTSUPP))
+                                return follow_symlinks_unavailable("chmod");
+                            return raise_os_error(errno, a[0]);
+                        }
+#endif
                         return none();
                     } },
                 { "utime", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -1864,7 +2309,10 @@ namespace neos::python_runtime
                             return nullptr;
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("utime", aArgs, aKwargs, { "path", "times", "ns", "dir_fd", "follow_symlinks" }, 1u, 0u, a) || !path_of(a, 0u, p, "utime"))
+                        int dirFd = 0;
+                        std::optional<int> fd;
+                        if (!parse_arguments("utime", aArgs, aKwargs, { "path", "times", "ns", "dir_fd", "follow_symlinks" }, 1u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "utime") ||
+                            !dir_fd_of(a[3], dirFd) || !fd_alone("utime", fd, dirFd, follow_of(a[4])))
                             return nullptr;
                         bool const times = a[1] != nullptr && a[1] != none();
                         if (times && a[2] != nullptr)
@@ -1916,7 +2364,7 @@ namespace neos::python_runtime
                                 when[i].tv_nsec = UTIME_NOW;
                             }
                         }
-                        if (::utimensat(AT_FDCWD, p.c_str(), when, a[4] == nullptr || truth(a[4]) == 1 ? 0 : AT_SYMLINK_NOFOLLOW) != 0)
+                        if ((fd ? ::futimens(*fd, when) : ::utimensat(dirFd, p.c_str(), when, follow_of(a[4]) ? 0 : AT_SYMLINK_NOFOLLOW)) != 0)
                             return raise_os_error(errno, a[0]);
                         return none();
 #else
@@ -1976,13 +2424,21 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         if (!parse_arguments("putenv", aArgs, aKwargs, { "name", "value" }, 2u, 2u, a))
                             return nullptr;
+                        // (as CPython's os_putenv_impl: str or bytes (POSIX; Windows: str), a name without '=')
                         std::string name, value;
+#if defined(_WIN32)
                         if (!str_of(a[0], name) || !str_of(a[1], value))
                             return nullptr;
-#if defined(_WIN32)
+                        if (name.empty() || name.find('=') != std::string::npos)
+                            return error("ValueError", "illegal environment variable name");
                         ::_putenv_s(name.c_str(), value.c_str());
 #else
-                        ::setenv(name.c_str(), value.c_str(), 1);
+                        if (!path_argument(a[0], name, "putenv", "env") || !path_argument(a[1], value, "putenv", "env"))
+                            return nullptr;
+                        if (name.find('=') != std::string::npos)
+                            return error("ValueError", "illegal environment variable name");
+                        if (::setenv(name.c_str(), value.c_str(), 1) != 0)
+                            return raise_os_error(errno);
 #endif
                         return none();
                     } },
@@ -1994,38 +2450,39 @@ namespace neos::python_runtime
                         if (!parse_arguments("unsetenv", aArgs, aKwargs, { "name" }, 1u, 1u, a))
                             return nullptr;
                         std::string name;
+#if defined(_WIN32)
                         if (!str_of(a[0], name))
                             return nullptr;
-#if defined(_WIN32)
+                        if (name.empty() || name.find('=') != std::string::npos)
+                            return error("ValueError", "illegal environment variable name");
                         ::_putenv_s(name.c_str(), "");
 #else
-                        ::unsetenv(name.c_str());
+                        if (!path_argument(a[0], name, "unsetenv", "env"))
+                            return nullptr;
+                        if (::unsetenv(name.c_str()) != 0)
+                            return raise_os_error(errno);
 #endif
                         return none();
                     } },
-                { "getpid", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "getpid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getpid", aArgs, aKwargs)) return nullptr;
 #if defined(_WIN32)
                         return make_int(::_getpid());
 #else
                         return make_int(::getpid());
 #endif
                     } },
-                { "getppid", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "getppid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getppid", aArgs, aKwargs)) return nullptr;
 #if defined(_WIN32)
                         return make_int(0);
 #else
                         return make_int(::getppid());
 #endif
                     } },
-                { "cpu_count", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "cpu_count", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("cpu_count", aArgs, aKwargs)) return nullptr;
                         auto const n = std::thread::hardware_concurrency();
                         return n == 0u ? (retain(none()), none()) : make_int(n);
                     } },
-                { "process_cpu_count", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "process_cpu_count", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("process_cpu_count", aArgs, aKwargs)) return nullptr;
                         auto const n = std::thread::hardware_concurrency();
                         return n == 0u ? (retain(none()), none()) : make_int(n);
                     } },
@@ -2072,20 +2529,27 @@ namespace neos::python_runtime
                         ref const empty{ make_tuple() };
                         return call(fspath.get(), empty.get(), nullptr);
                     } },
-                { "get_terminal_size", [](std::vector<object*> const&, object*) -> object*
+                // (get_terminal_size(fd=STDOUT_FILENO, /): as CPython's (POSIX: the terminal's size by ioctl, or its error))
+                { "get_terminal_size", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
+                        std::vector<object*> a;
+                        if (!parse_arguments("get_terminal_size", aArgs, aKwargs, { "fd" }, 0u, 1u, a))
+                            return nullptr;
+                        long long fd = 1;
+                        if (a[0] != nullptr && !to_index(a[0], fd))
+                            return nullptr;
                         long long columns = 80, lines = 24;
 #if !defined(_WIN32)
                         struct winsize w{};
-                        if (::ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_col != 0)
-                        {
-                            columns = w.ws_col;
-                            lines = w.ws_row;
-                        }
-                        else
-                            return raise_os_error(ENOTTY);
+                        if (::ioctl(static_cast<int>(fd), TIOCGWINSZ, &w) != 0)
+                            return raise_os_error(errno);
+                        columns = w.ws_col;
+                        lines = w.ws_row;
+#else
+                        if (fd < 0 || fd > 2)
+                            return error("ValueError", "bad file descriptor");
 #endif
-                        auto const& t = structseq_type("os.terminal_size", { "columns", "lines" }, 2u);
+                        auto const& t = terminal_size_type();
                         return make_structseq(t, { make_int(columns), make_int(lines) });
                     } },
                 { "umask", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -2120,8 +2584,7 @@ namespace neos::python_runtime
                         gil_acquire();
                         return make_int(status);
                     } },
-                { "getlogin", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "getlogin", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getlogin", aArgs, aKwargs)) return nullptr;
                         if (auto const user = environment_value("USER"))
                             return make_str(*user);
                         if (auto const user = environment_value("USERNAME"))
@@ -2151,20 +2614,21 @@ namespace neos::python_runtime
                 return false;
             }
 
-            object* fd_stat(int aFd)
+            // (aName: the error's file name (os.stat(fd)'s: the descriptor), if any)
+            object* fd_stat(int aFd, object* aName)
             {
                 stat_values r;
 #if defined(_WIN32)
                 struct _stat64 st{};
                 if (::_fstat64(aFd, &st) != 0)
-                    return raise_os_error(errno);
+                    return aName != nullptr ? raise_os_error(errno, aName) : raise_os_error(errno);
                 r.atime_ns = static_cast<long long>(st.st_atime) * 1000000000ll;
                 r.mtime_ns = static_cast<long long>(st.st_mtime) * 1000000000ll;
                 r.ctime_ns = static_cast<long long>(st.st_ctime) * 1000000000ll;
 #else
                 struct stat st{};
                 if (::fstat(aFd, &st) != 0)
-                    return raise_os_error(errno);
+                    return aName != nullptr ? raise_os_error(errno, aName) : raise_os_error(errno);
 #if defined(__APPLE__)
                 r.atime_ns = static_cast<long long>(st.st_atimespec.tv_sec) * 1000000000ll + st.st_atimespec.tv_nsec;
                 r.mtime_ns = static_cast<long long>(st.st_mtimespec.tv_sec) * 1000000000ll + st.st_mtimespec.tv_nsec;
@@ -2182,6 +2646,11 @@ namespace neos::python_runtime
                 r.uid = static_cast<long long>(st.st_uid);
                 r.gid = static_cast<long long>(st.st_gid);
                 r.size = static_cast<long long>(st.st_size);
+#if !defined(_WIN32)
+                r.blksize = static_cast<long long>(st.st_blksize);
+                r.blocks = static_cast<long long>(st.st_blocks);
+                r.rdev = static_cast<long long>(st.st_rdev);
+#endif
                 r.atime = static_cast<double>(r.atime_ns) / 1e9;
                 r.mtime = static_cast<double>(r.mtime_ns) / 1e9;
                 r.ctime = static_cast<double>(r.ctime_ns) / 1e9;
@@ -2203,6 +2672,38 @@ namespace neos::python_runtime
             }
 
 #if !defined(_WIN32)
+            // (a uid or gid argument (CPython's _Py_Uid_Converter and _Py_Gid_Converter): an integer (an object with __index__) that a uid_t
+            // (gid_t) holds, or -1; OverflowError otherwise: "less than minimum" for a negative value or one that a long holds but a uid_t 
+            // does not, "greater than maximum" for one that a long does not hold (as CPython's on a 64-bit POSIX system))
+            bool id_argument(object* aValue, long long& aResult, bool aGroup)
+            {
+                std::string const kind = aGroup ? "gid" : "uid";
+                long long value = 0;
+                if (!to_index(aValue, value))
+                {
+                    if (!std::string_view{ error_text() }.starts_with("OverflowError"))
+                    {
+                        clear_error();
+                        error("TypeError", kind + " should be integer, not " + type_name(aValue));
+                        return false;
+                    }
+                    clear_error();
+                    ref const zero{ make_int(0) };
+                    ref const negative{ compare(NEOS_PY_LT, aValue, zero.get()) };
+                    if (!negative)
+                        return false;
+                    error("OverflowError", kind + (truth(negative.get()) == 1 ? " is less than minimum" : " is greater than maximum"));
+                    return false;
+                }
+                if (value != -1 && (value < 0 || static_cast<long long>(static_cast<uid_t>(value)) != value))
+                {
+                    error("OverflowError", kind + " is less than minimum");
+                    return false;
+                }
+                aResult = value;
+                return true;
+            }
+
             // (a function of ids (aCount: their number): aSet(ids), or OSError)
             template <typename F>
             object* set_ids(char const* aName, std::vector<object*> const& aArgs, object* aKwargs, std::size_t aCount, F aSet)
@@ -2216,13 +2717,1393 @@ namespace neos::python_runtime
                         " (" + std::to_string(aArgs.size()) + " given)");
                 (void)sNames;
                 long long values[3] = {};
+                bool const group = std::string_view{ aName }.find("gid") != std::string_view::npos;
                 for (std::size_t i = 0u; i < aCount; ++i)
-                    if (!int_argument(aArgs[i], values[i], aName))
+                    if (!id_argument(aArgs[i], values[i], group))
                         return nullptr;
                 if (aSet(values) != 0)
                     return raise_os_error(errno);
                 return none();
             }
+
+            // (a mapping (CPython's PyMapping_Check: an object with __getitem__, not a sequence of builtin kind))
+            bool is_mapping(object* aValue)
+            {
+                if (kind_of(builtin_value(aValue)) == NEOS_PY_DICT)
+                    return true;
+                if (kind_of(aValue) == NEOS_PY_LIST || kind_of(aValue) == NEOS_PY_TUPLE || kind_of(aValue) == NEOS_PY_STR)
+                    return false;
+                ref const keys{ getattr(aValue, "keys") };
+                ref const getitemMethod{ keys ? getattr(aValue, "__getitem__") : nullptr };
+                if (!keys || !getitemMethod)
+                {
+                    clear_error();
+                    return false;
+                }
+                return true;
+            }
+
+            // (exec's and posix_spawn's environment (CPython's parse_envlist): "name=value" of each item; a name must not be empty nor
+            // have '=' after its first character)
+            bool environment_list(object* aEnv, std::vector<std::string>& aResult, char const* aFunction)
+            {
+                ref const keysMethod{ getattr(aEnv, "keys") };
+                if (!keysMethod)
+                    return false;
+                ref const keys{ invoke(keysMethod.get(), {}) };
+                std::vector<object*> names;
+                if (!keys || !collect(keys.get(), names))
+                    return false;
+                bool ok = true;
+                for (auto name : names)
+                {
+                    if (ok)
+                    {
+                        std::string key, value;
+                        ref const v{ getitem(aEnv, name) };
+                        ok = v && path_argument(name, key, aFunction, "env") && path_argument(v.get(), value, aFunction, "env");
+                        if (ok && (key.empty() || key.find('=', 1u) != std::string::npos))
+                        {
+                            error("ValueError", "illegal environment variable name");
+                            ok = false;
+                        }
+                        if (ok)
+                            aResult.push_back(key + "=" + value);
+                    }
+                    release(name);
+                }
+                return ok;
+            }
+
+            // (a sigset argument (CPython's _Py_Sigset_Converter): an iterable of signal numbers in [1, NSIG); an invalid one that sigaddset
+            // refuses warns (RuntimeWarning: valid_signals())
+            bool sigset_of(object* aValue, sigset_t& aResult)
+            {
+                ::sigemptyset(&aResult);
+                std::vector<object*> items;
+                if (!collect(aValue, items))
+                    return false;
+                bool ok = true;
+                for (auto item : items)
+                {
+                    if (ok)
+                    {
+                        long long number = 0;
+                        if (!to_index(item, number))
+                            ok = false;
+                        else if (number <= 0 || number >= NSIG)
+                        {
+                            error("ValueError", "signal number " + std::to_string(number) + " out of range [1; " + std::to_string(NSIG - 1) + "]");
+                            ok = false;
+                        }
+                        else if (::sigaddset(&aResult, static_cast<int>(number)) != 0)
+                        {
+                            ref const warn{ module_attribute("warnings", "warn") };
+                            ref category{ fn_builtin("RuntimeWarning") };
+                            ok = warn && category && ref{ invoke(warn.get(), { make_str("invalid signal number " + std::to_string(number) + 
+                                ", please use valid_signals()"), category.release_ownership() }) };
+                        }
+                    }
+                    release(item);
+                }
+                return ok;
+            }
+
+            // (os.POSIX_SPAWN_OPEN, POSIX_SPAWN_CLOSE and POSIX_SPAWN_DUP2: the tags of posix_spawn's file actions (CPython's values))
+            constexpr long long POSIX_SPAWN_OPEN_TAG = 0, POSIX_SPAWN_CLOSE_TAG = 1, POSIX_SPAWN_DUP2_TAG = 2;
+#if defined(__linux__)
+            bool sched_param_of(object* aParam, struct sched_param& aResult);
+#endif
+
+            // (posix_spawn and posix_spawnp (CPython's py_posix_spawn, parse_file_actions and parse_posix_spawn_flags): path, argv and env
+            // (positional), file_actions, setpgroup, resetids, setsid, setsigmask, setsigdef and scheduler (keywords): the child's pid)
+            object* posix_spawn_call(bool aSearch, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                char const* const name = aSearch ? "posix_spawnp" : "posix_spawn";
+                if (!host_unrestricted(aSearch ? "os.posix_spawnp" : "os.posix_spawn"))
+                    return nullptr;
+                if (aArgs.size() > 3u)
+                    return error("TypeError", std::string{ name } + "() takes exactly 3 positional arguments (" + std::to_string(aArgs.size()) + " given)");
+                std::vector<object*> a;
+                if (!parse_arguments(name, aArgs, aKwargs, { "path", "argv", "env", "file_actions", "setpgroup", "resetids", "setsid", "setsigmask",
+                    "setsigdef", "scheduler" }, 3u, 3u, a))
+                    return nullptr;
+                std::string path;
+                if (!path_argument(a[0], path, name))
+                    return nullptr;
+                if (kind_of(a[1]) != NEOS_PY_TUPLE && kind_of(a[1]) != NEOS_PY_LIST)
+                    return error("TypeError", std::string{ name } + ": argv must be a tuple or list");
+                if ((kind_of(a[1]) == NEOS_PY_TUPLE ? as<tuple_object>(a[1])->items.size() : as<list_object>(a[1])->items.size()) < 1u)
+                    return error("ValueError", std::string{ name } + ": argv must not be empty");
+                if (a[2] != none() && !is_mapping(a[2]))
+                    return error("TypeError", std::string{ name } + ": environment must be a mapping object or None");
+                object* const scheduler = a[9] != nullptr && a[9] != none() ? a[9] : nullptr;
+                if (scheduler != nullptr && kind_of(scheduler) != NEOS_PY_TUPLE)
+                    return error("TypeError", std::string{ name } + ": scheduler must be a tuple or None");
+                std::vector<std::string> args;
+                if (!exec_arguments(a[1], args, name))
+                    return nullptr;
+                if (args[0].empty())
+                    return error("ValueError", std::string{ name } + ": argv first element cannot be empty");
+                std::vector<std::string> environment;
+                bool const inherit = a[2] == none();
+                if (!inherit && !environment_list(a[2], environment, name))
+                    return nullptr;
+                // (the file actions: open (POSIX_SPAWN_OPEN, fd, path, flags, mode), close (POSIX_SPAWN_CLOSE, fd) and dup2 (POSIX_SPAWN_DUP2, fd, fd2))
+                posix_spawn_file_actions_t fileActions;
+                bool haveFileActions = false;
+                std::vector<std::string> openPaths;
+                struct guard
+                {
+                    posix_spawn_file_actions_t* actions = nullptr;
+                    posix_spawnattr_t* attributes = nullptr;
+                    ~guard() { if (actions != nullptr) ::posix_spawn_file_actions_destroy(actions); if (attributes != nullptr) ::posix_spawnattr_destroy(attributes); }
+                } resources;
+                if (a[3] != nullptr && a[3] != none())
+                {
+                    std::vector<object*> actions;
+                    if (!collect(a[3], actions))
+                    {
+                        clear_error();
+                        return error("TypeError", "file_actions must be a sequence or None");
+                    }
+                    if (int const e = ::posix_spawn_file_actions_init(&fileActions); e != 0)
+                    {
+                        for (auto x : actions)
+                            release(x);
+                        return raise_os_error(e);
+                    }
+                    resources.actions = &fileActions;
+                    haveFileActions = true;
+                    openPaths.reserve(actions.size());
+                    bool ok = true;
+                    for (auto action : actions)
+                    {
+                        if (ok)
+                        {
+                            auto const* items = kind_of(action) == NEOS_PY_TUPLE ? &as<tuple_object>(action)->items : nullptr;
+                            if (items == nullptr || items->empty())
+                            {
+                                error("TypeError", "Each file_actions element must be a non-empty tuple");
+                                ok = false;
+                            }
+                            long long tag = 0;
+                            if (ok && !to_index((*items)[0], tag))
+                                ok = false;
+                            auto const integer = [&](std::size_t aIndex, int& aResult) -> bool
+                            {
+                                long long v = 0;
+                                if (!to_index((*items)[aIndex], v))
+                                    return false;
+                                if (v > std::numeric_limits<int>::max() || v < std::numeric_limits<int>::min())
+                                {
+                                    error("OverflowError", v > 0 ? "signed integer is greater than maximum" : "signed integer is less than minimum");
+                                    return false;
+                                }
+                                aResult = static_cast<int>(v);
+                                return true;
+                            };
+                            int e = 0;
+                            if (ok)
+                                switch (tag)
+                                {
+                                case POSIX_SPAWN_OPEN_TAG:
+                                    {
+                                        int fd = 0, flags = 0;
+                                        long long mode = 0;
+                                        std::string file;
+                                        if (items->size() != 5u)
+                                        {
+                                            error("TypeError", "A open file_action tuple must have 5 elements");
+                                            ok = false;
+                                        }
+                                        else if (!integer(1u, fd) || !path_argument((*items)[2], file, name) || !integer(3u, flags) || !to_index((*items)[4], mode))
+                                            ok = false;
+                                        else
+                                        {
+                                            openPaths.push_back(file);
+                                            e = ::posix_spawn_file_actions_addopen(&fileActions, fd, openPaths.back().c_str(), flags, static_cast<mode_t>(mode));
+                                        }
+                                        break;
+                                    }
+                                case POSIX_SPAWN_CLOSE_TAG:
+                                    {
+                                        int fd = 0;
+                                        if (items->size() != 2u)
+                                        {
+                                            error("TypeError", "A close file_action tuple must have 2 elements");
+                                            ok = false;
+                                        }
+                                        else if (!integer(1u, fd))
+                                            ok = false;
+                                        else
+                                            e = ::posix_spawn_file_actions_addclose(&fileActions, fd);
+                                        break;
+                                    }
+                                case POSIX_SPAWN_DUP2_TAG:
+                                    {
+                                        int fd = 0, fd2 = 0;
+                                        if (items->size() != 3u)
+                                        {
+                                            error("TypeError", "A dup2 file_action tuple must have 3 elements");
+                                            ok = false;
+                                        }
+                                        else if (!integer(1u, fd) || !integer(2u, fd2))
+                                            ok = false;
+                                        else
+                                            e = ::posix_spawn_file_actions_adddup2(&fileActions, fd, fd2);
+                                        break;
+                                    }
+                                default:
+                                    error("TypeError", "Unknown file_actions identifier");
+                                    ok = false;
+                                    break;
+                                }
+                            if (ok && e != 0)
+                            {
+                                raise_os_error(e);
+                                ok = false;
+                            }
+                        }
+                        release(action);
+                    }
+                    if (!ok)
+                        return nullptr;
+                }
+                // (the attributes: the flags of setpgroup, resetids, setsid, setsigmask, setsigdef and scheduler)
+                posix_spawnattr_t attributes;
+                if (int const e = ::posix_spawnattr_init(&attributes); e != 0)
+                    return raise_os_error(e);
+                resources.attributes = &attributes;
+                short flags = 0;
+                if (a[4] != nullptr && a[4] != none())
+                {
+                    long long group = 0;
+                    if (!to_index(a[4], group))
+                        return nullptr;
+                    if (int const e = ::posix_spawnattr_setpgroup(&attributes, static_cast<pid_t>(group)); e != 0)
+                        return raise_os_error(e);
+                    flags |= POSIX_SPAWN_SETPGROUP;
+                }
+                if (a[5] != nullptr && truth(a[5]) == 1)
+                    flags |= POSIX_SPAWN_RESETIDS;
+                if (a[6] != nullptr && truth(a[6]) == 1)
+                {
+#if defined(POSIX_SPAWN_SETSID)
+                    flags |= POSIX_SPAWN_SETSID;
+#elif defined(POSIX_SPAWN_SETSID_NP)
+                    flags |= POSIX_SPAWN_SETSID_NP;
+#else
+                    return error("NotImplementedError", std::string{ name } + ": setsid is unavailable on this platform");
+#endif
+                }
+                for (auto const& [argument, which] : { std::pair{ a[7], 0 }, std::pair{ a[8], 1 } })
+                    if (argument != nullptr)
+                    {
+                        sigset_t set;
+                        if (!sigset_of(argument, set))
+                            return nullptr;
+                        if (int const e = which == 0 ? ::posix_spawnattr_setsigmask(&attributes, &set) : ::posix_spawnattr_setsigdefault(&attributes, &set); e != 0)
+                            return raise_os_error(e);
+                        flags |= which == 0 ? POSIX_SPAWN_SETSIGMASK : POSIX_SPAWN_SETSIGDEF;
+                    }
+                if (scheduler != nullptr)
+                {
+#if defined(POSIX_SPAWN_SETSCHEDULER) && defined(__linux__)
+                    auto const& items = as<tuple_object>(scheduler)->items;
+                    if (items.size() != 2u)
+                        return error("TypeError", "A scheduler tuple must have two elements");
+                    struct sched_param parameters{};
+                    if (!sched_param_of(items[1], parameters))
+                        return nullptr;
+                    if (items[0] != none())
+                    {
+                        long long policy = 0;
+                        if (!to_index(items[0], policy))
+                            return nullptr;
+                        if (int const e = ::posix_spawnattr_setschedpolicy(&attributes, static_cast<int>(policy)); e != 0)
+                            return raise_os_error(e);
+                        flags |= POSIX_SPAWN_SETSCHEDULER;
+                    }
+                    if (int const e = ::posix_spawnattr_setschedparam(&attributes, &parameters); e != 0)
+                        return raise_os_error(e);
+                    flags |= POSIX_SPAWN_SETSCHEDPARAM;
+#else
+                    return error("NotImplementedError", "The scheduler option is not supported in this system.");
+#endif
+                }
+                if (int const e = ::posix_spawnattr_setflags(&attributes, flags); e != 0)
+                    return raise_os_error(e);
+                std::vector<char*> argv;
+                for (auto& x : args)
+                    argv.push_back(x.data());
+                argv.push_back(nullptr);
+                std::vector<char*> envp;
+                char** env = nullptr;
+                if (inherit)
+                {
+#if defined(__APPLE__)
+                    env = *::_NSGetEnviron();
+#else
+                    env = environ;
+#endif
+                }
+                else
+                {
+                    for (auto& x : environment)
+                        envp.push_back(x.data());
+                    envp.push_back(nullptr);
+                    env = envp.data();
+                }
+                pid_t pid = 0;
+                std::fflush(nullptr);
+                int const e = aSearch ? ::posix_spawnp(&pid, path.c_str(), haveFileActions ? &fileActions : nullptr, &attributes, argv.data(), env) :
+                    ::posix_spawn(&pid, path.c_str(), haveFileActions ? &fileActions : nullptr, &attributes, argv.data(), env);
+                if (e != 0)
+                    return raise_os_error(e, a[0]);
+                return make_int(static_cast<long long>(pid));
+            }
+#endif
+
+#if defined(__linux__)
+            // (os.sched_param: a struct sequence (sched_priority) made by sched_param(sched_priority))
+            structseq_descriptor const& sched_param_type()
+            {
+                static auto const& sType = []() -> structseq_descriptor const&
+                {
+                    auto const& t = structseq_type("posix.sched_param", { "sched_priority" }, 1u);
+                    set_structseq_constructor(t, [](structseq_descriptor const& aDescriptor, object* aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("sched_param", tuple_items(aArgs), aKwargs, { "sched_priority" }, 1u, 0u, a))
+                            return nullptr;
+                        return make_structseq(aDescriptor, { new_reference(a[0]) });
+                    }, true);
+                    return t;
+                }();
+                return sType;
+            }
+            // (a sched_param argument's priority)
+            bool sched_param_of(object* aParam, struct sched_param& aResult)
+            {
+                std::vector<object*> items;
+                if (aParam == nullptr || aParam->type != &sched_param_type().type.base || !structseq_items(aParam, items) || items.empty())
+                {
+                    error("TypeError", "must have a sched_param object");
+                    return false;
+                }
+                long long priority = 0;
+                auto const k = kind_of(items[0]);
+                if (k != NEOS_PY_INT && k != NEOS_PY_BOOL && !has_special_method(items[0], "__index__"))
+                    return int_argument(items[0], priority, "sched_param");
+                if (!to_index(items[0], priority))
+                {
+                    // (an int that a C long cannot hold)
+                    clear_error();
+                    error("OverflowError", "Python int too large to convert to C long");
+                    return false;
+                }
+                if (priority < std::numeric_limits<int>::min() || priority > std::numeric_limits<int>::max())
+                {
+                    error("OverflowError", "sched_priority out of range");
+                    return false;
+                }
+                aResult.sched_priority = static_cast<int>(priority);
+                return true;
+            }
+#endif
+
+            // (os.sysconf's names (CPython's posixmodule.c posix_constants_sysconf: those this system has))
+            // (os.pathconf_names: as CPython 3.13's posix_constants_pathconf)
+            std::vector<std::pair<char const*, int>> const sPathconfNames =
+            {
+#ifdef _PC_ABI_AIO_XFER_MAX
+                { "PC_ABI_AIO_XFER_MAX", _PC_ABI_AIO_XFER_MAX },
+#endif
+#ifdef _PC_ABI_ASYNC_IO
+                { "PC_ABI_ASYNC_IO", _PC_ABI_ASYNC_IO },
+#endif
+#ifdef _PC_ASYNC_IO
+                { "PC_ASYNC_IO", _PC_ASYNC_IO },
+#endif
+#ifdef _PC_CHOWN_RESTRICTED
+                { "PC_CHOWN_RESTRICTED", _PC_CHOWN_RESTRICTED },
+#endif
+#ifdef _PC_FILESIZEBITS
+                { "PC_FILESIZEBITS", _PC_FILESIZEBITS },
+#endif
+#ifdef _PC_LAST
+                { "PC_LAST", _PC_LAST },
+#endif
+#ifdef _PC_LINK_MAX
+                { "PC_LINK_MAX", _PC_LINK_MAX },
+#endif
+#ifdef _PC_MAX_CANON
+                { "PC_MAX_CANON", _PC_MAX_CANON },
+#endif
+#ifdef _PC_MAX_INPUT
+                { "PC_MAX_INPUT", _PC_MAX_INPUT },
+#endif
+#ifdef _PC_NAME_MAX
+                { "PC_NAME_MAX", _PC_NAME_MAX },
+#endif
+#ifdef _PC_NO_TRUNC
+                { "PC_NO_TRUNC", _PC_NO_TRUNC },
+#endif
+#ifdef _PC_PATH_MAX
+                { "PC_PATH_MAX", _PC_PATH_MAX },
+#endif
+#ifdef _PC_PIPE_BUF
+                { "PC_PIPE_BUF", _PC_PIPE_BUF },
+#endif
+#ifdef _PC_PRIO_IO
+                { "PC_PRIO_IO", _PC_PRIO_IO },
+#endif
+#ifdef _PC_SOCK_MAXBUF
+                { "PC_SOCK_MAXBUF", _PC_SOCK_MAXBUF },
+#endif
+#ifdef _PC_SYNC_IO
+                { "PC_SYNC_IO", _PC_SYNC_IO },
+#endif
+#ifdef _PC_VDISABLE
+                { "PC_VDISABLE", _PC_VDISABLE },
+#endif
+#ifdef _PC_ACL_ENABLED
+                { "PC_ACL_ENABLED", _PC_ACL_ENABLED },
+#endif
+#ifdef _PC_MIN_HOLE_SIZE
+                { "PC_MIN_HOLE_SIZE", _PC_MIN_HOLE_SIZE },
+#endif
+#ifdef _PC_ALLOC_SIZE_MIN
+                { "PC_ALLOC_SIZE_MIN", _PC_ALLOC_SIZE_MIN },
+#endif
+#ifdef _PC_REC_INCR_XFER_SIZE
+                { "PC_REC_INCR_XFER_SIZE", _PC_REC_INCR_XFER_SIZE },
+#endif
+#ifdef _PC_REC_MAX_XFER_SIZE
+                { "PC_REC_MAX_XFER_SIZE", _PC_REC_MAX_XFER_SIZE },
+#endif
+#ifdef _PC_REC_MIN_XFER_SIZE
+                { "PC_REC_MIN_XFER_SIZE", _PC_REC_MIN_XFER_SIZE },
+#endif
+#ifdef _PC_REC_XFER_ALIGN
+                { "PC_REC_XFER_ALIGN", _PC_REC_XFER_ALIGN },
+#endif
+#ifdef _PC_SYMLINK_MAX
+                { "PC_SYMLINK_MAX", _PC_SYMLINK_MAX },
+#endif
+#ifdef _PC_XATTR_ENABLED
+                { "PC_XATTR_ENABLED", _PC_XATTR_ENABLED },
+#endif
+#ifdef _PC_XATTR_EXISTS
+                { "PC_XATTR_EXISTS", _PC_XATTR_EXISTS },
+#endif
+            };
+
+            // (os.confstr_names: as CPython 3.13's posix_constants_confstr)
+            std::vector<std::pair<char const*, int>> const sConfstrNames =
+            {
+#ifdef _CS_ARCHITECTURE
+                { "CS_ARCHITECTURE", _CS_ARCHITECTURE },
+#endif
+#ifdef _CS_GNU_LIBC_VERSION
+                { "CS_GNU_LIBC_VERSION", _CS_GNU_LIBC_VERSION },
+#endif
+#ifdef _CS_GNU_LIBPTHREAD_VERSION
+                { "CS_GNU_LIBPTHREAD_VERSION", _CS_GNU_LIBPTHREAD_VERSION },
+#endif
+#ifdef _CS_HOSTNAME
+                { "CS_HOSTNAME", _CS_HOSTNAME },
+#endif
+#ifdef _CS_HW_PROVIDER
+                { "CS_HW_PROVIDER", _CS_HW_PROVIDER },
+#endif
+#ifdef _CS_HW_SERIAL
+                { "CS_HW_SERIAL", _CS_HW_SERIAL },
+#endif
+#ifdef _CS_INITTAB_NAME
+                { "CS_INITTAB_NAME", _CS_INITTAB_NAME },
+#endif
+#ifdef _CS_LFS64_CFLAGS
+                { "CS_LFS64_CFLAGS", _CS_LFS64_CFLAGS },
+#endif
+#ifdef _CS_LFS64_LDFLAGS
+                { "CS_LFS64_LDFLAGS", _CS_LFS64_LDFLAGS },
+#endif
+#ifdef _CS_LFS64_LIBS
+                { "CS_LFS64_LIBS", _CS_LFS64_LIBS },
+#endif
+#ifdef _CS_LFS64_LINTFLAGS
+                { "CS_LFS64_LINTFLAGS", _CS_LFS64_LINTFLAGS },
+#endif
+#ifdef _CS_LFS_CFLAGS
+                { "CS_LFS_CFLAGS", _CS_LFS_CFLAGS },
+#endif
+#ifdef _CS_LFS_LDFLAGS
+                { "CS_LFS_LDFLAGS", _CS_LFS_LDFLAGS },
+#endif
+#ifdef _CS_LFS_LIBS
+                { "CS_LFS_LIBS", _CS_LFS_LIBS },
+#endif
+#ifdef _CS_LFS_LINTFLAGS
+                { "CS_LFS_LINTFLAGS", _CS_LFS_LINTFLAGS },
+#endif
+#ifdef _CS_MACHINE
+                { "CS_MACHINE", _CS_MACHINE },
+#endif
+#ifdef _CS_PATH
+                { "CS_PATH", _CS_PATH },
+#endif
+#ifdef _CS_RELEASE
+                { "CS_RELEASE", _CS_RELEASE },
+#endif
+#ifdef _CS_SRPC_DOMAIN
+                { "CS_SRPC_DOMAIN", _CS_SRPC_DOMAIN },
+#endif
+#ifdef _CS_SYSNAME
+                { "CS_SYSNAME", _CS_SYSNAME },
+#endif
+#ifdef _CS_VERSION
+                { "CS_VERSION", _CS_VERSION },
+#endif
+#ifdef _CS_XBS5_ILP32_OFF32_CFLAGS
+                { "CS_XBS5_ILP32_OFF32_CFLAGS", _CS_XBS5_ILP32_OFF32_CFLAGS },
+#endif
+#ifdef _CS_XBS5_ILP32_OFF32_LDFLAGS
+                { "CS_XBS5_ILP32_OFF32_LDFLAGS", _CS_XBS5_ILP32_OFF32_LDFLAGS },
+#endif
+#ifdef _CS_XBS5_ILP32_OFF32_LIBS
+                { "CS_XBS5_ILP32_OFF32_LIBS", _CS_XBS5_ILP32_OFF32_LIBS },
+#endif
+#ifdef _CS_XBS5_ILP32_OFF32_LINTFLAGS
+                { "CS_XBS5_ILP32_OFF32_LINTFLAGS", _CS_XBS5_ILP32_OFF32_LINTFLAGS },
+#endif
+#ifdef _CS_XBS5_ILP32_OFFBIG_CFLAGS
+                { "CS_XBS5_ILP32_OFFBIG_CFLAGS", _CS_XBS5_ILP32_OFFBIG_CFLAGS },
+#endif
+#ifdef _CS_XBS5_ILP32_OFFBIG_LDFLAGS
+                { "CS_XBS5_ILP32_OFFBIG_LDFLAGS", _CS_XBS5_ILP32_OFFBIG_LDFLAGS },
+#endif
+#ifdef _CS_XBS5_ILP32_OFFBIG_LIBS
+                { "CS_XBS5_ILP32_OFFBIG_LIBS", _CS_XBS5_ILP32_OFFBIG_LIBS },
+#endif
+#ifdef _CS_XBS5_ILP32_OFFBIG_LINTFLAGS
+                { "CS_XBS5_ILP32_OFFBIG_LINTFLAGS", _CS_XBS5_ILP32_OFFBIG_LINTFLAGS },
+#endif
+#ifdef _CS_XBS5_LP64_OFF64_CFLAGS
+                { "CS_XBS5_LP64_OFF64_CFLAGS", _CS_XBS5_LP64_OFF64_CFLAGS },
+#endif
+#ifdef _CS_XBS5_LP64_OFF64_LDFLAGS
+                { "CS_XBS5_LP64_OFF64_LDFLAGS", _CS_XBS5_LP64_OFF64_LDFLAGS },
+#endif
+#ifdef _CS_XBS5_LP64_OFF64_LIBS
+                { "CS_XBS5_LP64_OFF64_LIBS", _CS_XBS5_LP64_OFF64_LIBS },
+#endif
+#ifdef _CS_XBS5_LP64_OFF64_LINTFLAGS
+                { "CS_XBS5_LP64_OFF64_LINTFLAGS", _CS_XBS5_LP64_OFF64_LINTFLAGS },
+#endif
+#ifdef _CS_XBS5_LPBIG_OFFBIG_CFLAGS
+                { "CS_XBS5_LPBIG_OFFBIG_CFLAGS", _CS_XBS5_LPBIG_OFFBIG_CFLAGS },
+#endif
+#ifdef _CS_XBS5_LPBIG_OFFBIG_LDFLAGS
+                { "CS_XBS5_LPBIG_OFFBIG_LDFLAGS", _CS_XBS5_LPBIG_OFFBIG_LDFLAGS },
+#endif
+#ifdef _CS_XBS5_LPBIG_OFFBIG_LIBS
+                { "CS_XBS5_LPBIG_OFFBIG_LIBS", _CS_XBS5_LPBIG_OFFBIG_LIBS },
+#endif
+#ifdef _CS_XBS5_LPBIG_OFFBIG_LINTFLAGS
+                { "CS_XBS5_LPBIG_OFFBIG_LINTFLAGS", _CS_XBS5_LPBIG_OFFBIG_LINTFLAGS },
+#endif
+            };
+
+            std::vector<std::pair<char const*, int>> const sSysconfNames =
+            {
+#ifdef _SC_2_CHAR_TERM
+                { "SC_2_CHAR_TERM", _SC_2_CHAR_TERM },
+#endif
+#ifdef _SC_2_C_BIND
+                { "SC_2_C_BIND", _SC_2_C_BIND },
+#endif
+#ifdef _SC_2_C_DEV
+                { "SC_2_C_DEV", _SC_2_C_DEV },
+#endif
+#ifdef _SC_2_C_VERSION
+                { "SC_2_C_VERSION", _SC_2_C_VERSION },
+#endif
+#ifdef _SC_2_FORT_DEV
+                { "SC_2_FORT_DEV", _SC_2_FORT_DEV },
+#endif
+#ifdef _SC_2_FORT_RUN
+                { "SC_2_FORT_RUN", _SC_2_FORT_RUN },
+#endif
+#ifdef _SC_2_LOCALEDEF
+                { "SC_2_LOCALEDEF", _SC_2_LOCALEDEF },
+#endif
+#ifdef _SC_2_SW_DEV
+                { "SC_2_SW_DEV", _SC_2_SW_DEV },
+#endif
+#ifdef _SC_2_UPE
+                { "SC_2_UPE", _SC_2_UPE },
+#endif
+#ifdef _SC_2_VERSION
+                { "SC_2_VERSION", _SC_2_VERSION },
+#endif
+#ifdef _SC_AIO_LISTIO_MAX
+                { "SC_AIO_LISTIO_MAX", _SC_AIO_LISTIO_MAX },
+#endif
+#ifdef _SC_AIO_MAX
+                { "SC_AIO_MAX", _SC_AIO_MAX },
+#endif
+#ifdef _SC_AIO_PRIO_DELTA_MAX
+                { "SC_AIO_PRIO_DELTA_MAX", _SC_AIO_PRIO_DELTA_MAX },
+#endif
+#ifdef _SC_ARG_MAX
+                { "SC_ARG_MAX", _SC_ARG_MAX },
+#endif
+#ifdef _SC_ASYNCHRONOUS_IO
+                { "SC_ASYNCHRONOUS_IO", _SC_ASYNCHRONOUS_IO },
+#endif
+#ifdef _SC_ATEXIT_MAX
+                { "SC_ATEXIT_MAX", _SC_ATEXIT_MAX },
+#endif
+#ifdef _SC_AVPHYS_PAGES
+                { "SC_AVPHYS_PAGES", _SC_AVPHYS_PAGES },
+#endif
+#ifdef _SC_BC_BASE_MAX
+                { "SC_BC_BASE_MAX", _SC_BC_BASE_MAX },
+#endif
+#ifdef _SC_BC_DIM_MAX
+                { "SC_BC_DIM_MAX", _SC_BC_DIM_MAX },
+#endif
+#ifdef _SC_BC_SCALE_MAX
+                { "SC_BC_SCALE_MAX", _SC_BC_SCALE_MAX },
+#endif
+#ifdef _SC_BC_STRING_MAX
+                { "SC_BC_STRING_MAX", _SC_BC_STRING_MAX },
+#endif
+#ifdef _SC_CHARCLASS_NAME_MAX
+                { "SC_CHARCLASS_NAME_MAX", _SC_CHARCLASS_NAME_MAX },
+#endif
+#ifdef _SC_CHAR_BIT
+                { "SC_CHAR_BIT", _SC_CHAR_BIT },
+#endif
+#ifdef _SC_CHAR_MAX
+                { "SC_CHAR_MAX", _SC_CHAR_MAX },
+#endif
+#ifdef _SC_CHAR_MIN
+                { "SC_CHAR_MIN", _SC_CHAR_MIN },
+#endif
+#ifdef _SC_CHILD_MAX
+                { "SC_CHILD_MAX", _SC_CHILD_MAX },
+#endif
+#ifdef _SC_CLK_TCK
+                { "SC_CLK_TCK", _SC_CLK_TCK },
+#endif
+#ifdef _SC_COLL_WEIGHTS_MAX
+                { "SC_COLL_WEIGHTS_MAX", _SC_COLL_WEIGHTS_MAX },
+#endif
+#ifdef _SC_DELAYTIMER_MAX
+                { "SC_DELAYTIMER_MAX", _SC_DELAYTIMER_MAX },
+#endif
+#ifdef _SC_EQUIV_CLASS_MAX
+                { "SC_EQUIV_CLASS_MAX", _SC_EQUIV_CLASS_MAX },
+#endif
+#ifdef _SC_EXPR_NEST_MAX
+                { "SC_EXPR_NEST_MAX", _SC_EXPR_NEST_MAX },
+#endif
+#ifdef _SC_FSYNC
+                { "SC_FSYNC", _SC_FSYNC },
+#endif
+#ifdef _SC_GETGR_R_SIZE_MAX
+                { "SC_GETGR_R_SIZE_MAX", _SC_GETGR_R_SIZE_MAX },
+#endif
+#ifdef _SC_GETPW_R_SIZE_MAX
+                { "SC_GETPW_R_SIZE_MAX", _SC_GETPW_R_SIZE_MAX },
+#endif
+#ifdef _SC_INT_MAX
+                { "SC_INT_MAX", _SC_INT_MAX },
+#endif
+#ifdef _SC_INT_MIN
+                { "SC_INT_MIN", _SC_INT_MIN },
+#endif
+#ifdef _SC_IOV_MAX
+                { "SC_IOV_MAX", _SC_IOV_MAX },
+#endif
+#ifdef _SC_JOB_CONTROL
+                { "SC_JOB_CONTROL", _SC_JOB_CONTROL },
+#endif
+#ifdef _SC_LINE_MAX
+                { "SC_LINE_MAX", _SC_LINE_MAX },
+#endif
+#ifdef _SC_LOGIN_NAME_MAX
+                { "SC_LOGIN_NAME_MAX", _SC_LOGIN_NAME_MAX },
+#endif
+#ifdef _SC_LONG_BIT
+                { "SC_LONG_BIT", _SC_LONG_BIT },
+#endif
+#ifdef _SC_MAPPED_FILES
+                { "SC_MAPPED_FILES", _SC_MAPPED_FILES },
+#endif
+#ifdef _SC_MB_LEN_MAX
+                { "SC_MB_LEN_MAX", _SC_MB_LEN_MAX },
+#endif
+#ifdef _SC_MEMLOCK
+                { "SC_MEMLOCK", _SC_MEMLOCK },
+#endif
+#ifdef _SC_MEMLOCK_RANGE
+                { "SC_MEMLOCK_RANGE", _SC_MEMLOCK_RANGE },
+#endif
+#ifdef _SC_MEMORY_PROTECTION
+                { "SC_MEMORY_PROTECTION", _SC_MEMORY_PROTECTION },
+#endif
+#ifdef _SC_MESSAGE_PASSING
+                { "SC_MESSAGE_PASSING", _SC_MESSAGE_PASSING },
+#endif
+#ifdef _SC_MQ_OPEN_MAX
+                { "SC_MQ_OPEN_MAX", _SC_MQ_OPEN_MAX },
+#endif
+#ifdef _SC_MQ_PRIO_MAX
+                { "SC_MQ_PRIO_MAX", _SC_MQ_PRIO_MAX },
+#endif
+#ifdef _SC_NGROUPS_MAX
+                { "SC_NGROUPS_MAX", _SC_NGROUPS_MAX },
+#endif
+#ifdef _SC_NL_ARGMAX
+                { "SC_NL_ARGMAX", _SC_NL_ARGMAX },
+#endif
+#ifdef _SC_NL_LANGMAX
+                { "SC_NL_LANGMAX", _SC_NL_LANGMAX },
+#endif
+#ifdef _SC_NL_MSGMAX
+                { "SC_NL_MSGMAX", _SC_NL_MSGMAX },
+#endif
+#ifdef _SC_NL_NMAX
+                { "SC_NL_NMAX", _SC_NL_NMAX },
+#endif
+#ifdef _SC_NL_SETMAX
+                { "SC_NL_SETMAX", _SC_NL_SETMAX },
+#endif
+#ifdef _SC_NL_TEXTMAX
+                { "SC_NL_TEXTMAX", _SC_NL_TEXTMAX },
+#endif
+#ifdef _SC_NPROCESSORS_CONF
+                { "SC_NPROCESSORS_CONF", _SC_NPROCESSORS_CONF },
+#endif
+#ifdef _SC_NPROCESSORS_ONLN
+                { "SC_NPROCESSORS_ONLN", _SC_NPROCESSORS_ONLN },
+#endif
+#ifdef _SC_NZERO
+                { "SC_NZERO", _SC_NZERO },
+#endif
+#ifdef _SC_OPEN_MAX
+                { "SC_OPEN_MAX", _SC_OPEN_MAX },
+#endif
+#ifdef _SC_PAGESIZE
+                { "SC_PAGESIZE", _SC_PAGESIZE },
+#endif
+#ifdef _SC_PAGE_SIZE
+                { "SC_PAGE_SIZE", _SC_PAGE_SIZE },
+#endif
+#ifdef _SC_PASS_MAX
+                { "SC_PASS_MAX", _SC_PASS_MAX },
+#endif
+#ifdef _SC_PHYS_PAGES
+                { "SC_PHYS_PAGES", _SC_PHYS_PAGES },
+#endif
+#ifdef _SC_PII
+                { "SC_PII", _SC_PII },
+#endif
+#ifdef _SC_PII_INTERNET
+                { "SC_PII_INTERNET", _SC_PII_INTERNET },
+#endif
+#ifdef _SC_PII_INTERNET_DGRAM
+                { "SC_PII_INTERNET_DGRAM", _SC_PII_INTERNET_DGRAM },
+#endif
+#ifdef _SC_PII_INTERNET_STREAM
+                { "SC_PII_INTERNET_STREAM", _SC_PII_INTERNET_STREAM },
+#endif
+#ifdef _SC_PII_OSI
+                { "SC_PII_OSI", _SC_PII_OSI },
+#endif
+#ifdef _SC_PII_OSI_CLTS
+                { "SC_PII_OSI_CLTS", _SC_PII_OSI_CLTS },
+#endif
+#ifdef _SC_PII_OSI_COTS
+                { "SC_PII_OSI_COTS", _SC_PII_OSI_COTS },
+#endif
+#ifdef _SC_PII_OSI_M
+                { "SC_PII_OSI_M", _SC_PII_OSI_M },
+#endif
+#ifdef _SC_PII_SOCKET
+                { "SC_PII_SOCKET", _SC_PII_SOCKET },
+#endif
+#ifdef _SC_PII_XTI
+                { "SC_PII_XTI", _SC_PII_XTI },
+#endif
+#ifdef _SC_POLL
+                { "SC_POLL", _SC_POLL },
+#endif
+#ifdef _SC_PRIORITIZED_IO
+                { "SC_PRIORITIZED_IO", _SC_PRIORITIZED_IO },
+#endif
+#ifdef _SC_PRIORITY_SCHEDULING
+                { "SC_PRIORITY_SCHEDULING", _SC_PRIORITY_SCHEDULING },
+#endif
+#ifdef _SC_REALTIME_SIGNALS
+                { "SC_REALTIME_SIGNALS", _SC_REALTIME_SIGNALS },
+#endif
+#ifdef _SC_RE_DUP_MAX
+                { "SC_RE_DUP_MAX", _SC_RE_DUP_MAX },
+#endif
+#ifdef _SC_RTSIG_MAX
+                { "SC_RTSIG_MAX", _SC_RTSIG_MAX },
+#endif
+#ifdef _SC_SAVED_IDS
+                { "SC_SAVED_IDS", _SC_SAVED_IDS },
+#endif
+#ifdef _SC_SCHAR_MAX
+                { "SC_SCHAR_MAX", _SC_SCHAR_MAX },
+#endif
+#ifdef _SC_SCHAR_MIN
+                { "SC_SCHAR_MIN", _SC_SCHAR_MIN },
+#endif
+#ifdef _SC_SELECT
+                { "SC_SELECT", _SC_SELECT },
+#endif
+#ifdef _SC_SEMAPHORES
+                { "SC_SEMAPHORES", _SC_SEMAPHORES },
+#endif
+#ifdef _SC_SEM_NSEMS_MAX
+                { "SC_SEM_NSEMS_MAX", _SC_SEM_NSEMS_MAX },
+#endif
+#ifdef _SC_SEM_VALUE_MAX
+                { "SC_SEM_VALUE_MAX", _SC_SEM_VALUE_MAX },
+#endif
+#ifdef _SC_SHARED_MEMORY_OBJECTS
+                { "SC_SHARED_MEMORY_OBJECTS", _SC_SHARED_MEMORY_OBJECTS },
+#endif
+#ifdef _SC_SHRT_MAX
+                { "SC_SHRT_MAX", _SC_SHRT_MAX },
+#endif
+#ifdef _SC_SHRT_MIN
+                { "SC_SHRT_MIN", _SC_SHRT_MIN },
+#endif
+#ifdef _SC_SIGQUEUE_MAX
+                { "SC_SIGQUEUE_MAX", _SC_SIGQUEUE_MAX },
+#endif
+#ifdef _SC_SSIZE_MAX
+                { "SC_SSIZE_MAX", _SC_SSIZE_MAX },
+#endif
+#ifdef _SC_STREAM_MAX
+                { "SC_STREAM_MAX", _SC_STREAM_MAX },
+#endif
+#ifdef _SC_SYNCHRONIZED_IO
+                { "SC_SYNCHRONIZED_IO", _SC_SYNCHRONIZED_IO },
+#endif
+#ifdef _SC_THREADS
+                { "SC_THREADS", _SC_THREADS },
+#endif
+#ifdef _SC_THREAD_ATTR_STACKADDR
+                { "SC_THREAD_ATTR_STACKADDR", _SC_THREAD_ATTR_STACKADDR },
+#endif
+#ifdef _SC_THREAD_ATTR_STACKSIZE
+                { "SC_THREAD_ATTR_STACKSIZE", _SC_THREAD_ATTR_STACKSIZE },
+#endif
+#ifdef _SC_THREAD_DESTRUCTOR_ITERATIONS
+                { "SC_THREAD_DESTRUCTOR_ITERATIONS", _SC_THREAD_DESTRUCTOR_ITERATIONS },
+#endif
+#ifdef _SC_THREAD_KEYS_MAX
+                { "SC_THREAD_KEYS_MAX", _SC_THREAD_KEYS_MAX },
+#endif
+#ifdef _SC_THREAD_PRIORITY_SCHEDULING
+                { "SC_THREAD_PRIORITY_SCHEDULING", _SC_THREAD_PRIORITY_SCHEDULING },
+#endif
+#ifdef _SC_THREAD_PRIO_INHERIT
+                { "SC_THREAD_PRIO_INHERIT", _SC_THREAD_PRIO_INHERIT },
+#endif
+#ifdef _SC_THREAD_PRIO_PROTECT
+                { "SC_THREAD_PRIO_PROTECT", _SC_THREAD_PRIO_PROTECT },
+#endif
+#ifdef _SC_THREAD_PROCESS_SHARED
+                { "SC_THREAD_PROCESS_SHARED", _SC_THREAD_PROCESS_SHARED },
+#endif
+#ifdef _SC_THREAD_SAFE_FUNCTIONS
+                { "SC_THREAD_SAFE_FUNCTIONS", _SC_THREAD_SAFE_FUNCTIONS },
+#endif
+#ifdef _SC_THREAD_STACK_MIN
+                { "SC_THREAD_STACK_MIN", _SC_THREAD_STACK_MIN },
+#endif
+#ifdef _SC_THREAD_THREADS_MAX
+                { "SC_THREAD_THREADS_MAX", _SC_THREAD_THREADS_MAX },
+#endif
+#ifdef _SC_TIMERS
+                { "SC_TIMERS", _SC_TIMERS },
+#endif
+#ifdef _SC_TIMER_MAX
+                { "SC_TIMER_MAX", _SC_TIMER_MAX },
+#endif
+#ifdef _SC_TTY_NAME_MAX
+                { "SC_TTY_NAME_MAX", _SC_TTY_NAME_MAX },
+#endif
+#ifdef _SC_TZNAME_MAX
+                { "SC_TZNAME_MAX", _SC_TZNAME_MAX },
+#endif
+#ifdef _SC_T_IOV_MAX
+                { "SC_T_IOV_MAX", _SC_T_IOV_MAX },
+#endif
+#ifdef _SC_UCHAR_MAX
+                { "SC_UCHAR_MAX", _SC_UCHAR_MAX },
+#endif
+#ifdef _SC_UINT_MAX
+                { "SC_UINT_MAX", _SC_UINT_MAX },
+#endif
+#ifdef _SC_UIO_MAXIOV
+                { "SC_UIO_MAXIOV", _SC_UIO_MAXIOV },
+#endif
+#ifdef _SC_ULONG_MAX
+                { "SC_ULONG_MAX", _SC_ULONG_MAX },
+#endif
+#ifdef _SC_USHRT_MAX
+                { "SC_USHRT_MAX", _SC_USHRT_MAX },
+#endif
+#ifdef _SC_VERSION
+                { "SC_VERSION", _SC_VERSION },
+#endif
+#ifdef _SC_WORD_BIT
+                { "SC_WORD_BIT", _SC_WORD_BIT },
+#endif
+#ifdef _SC_XBS5_ILP32_OFF32
+                { "SC_XBS5_ILP32_OFF32", _SC_XBS5_ILP32_OFF32 },
+#endif
+#ifdef _SC_XBS5_ILP32_OFFBIG
+                { "SC_XBS5_ILP32_OFFBIG", _SC_XBS5_ILP32_OFFBIG },
+#endif
+#ifdef _SC_XBS5_LP64_OFF64
+                { "SC_XBS5_LP64_OFF64", _SC_XBS5_LP64_OFF64 },
+#endif
+#ifdef _SC_XBS5_LPBIG_OFFBIG
+                { "SC_XBS5_LPBIG_OFFBIG", _SC_XBS5_LPBIG_OFFBIG },
+#endif
+#ifdef _SC_XOPEN_CRYPT
+                { "SC_XOPEN_CRYPT", _SC_XOPEN_CRYPT },
+#endif
+#ifdef _SC_XOPEN_ENH_I18N
+                { "SC_XOPEN_ENH_I18N", _SC_XOPEN_ENH_I18N },
+#endif
+#ifdef _SC_XOPEN_LEGACY
+                { "SC_XOPEN_LEGACY", _SC_XOPEN_LEGACY },
+#endif
+#ifdef _SC_XOPEN_REALTIME
+                { "SC_XOPEN_REALTIME", _SC_XOPEN_REALTIME },
+#endif
+#ifdef _SC_XOPEN_REALTIME_THREADS
+                { "SC_XOPEN_REALTIME_THREADS", _SC_XOPEN_REALTIME_THREADS },
+#endif
+#ifdef _SC_XOPEN_SHM
+                { "SC_XOPEN_SHM", _SC_XOPEN_SHM },
+#endif
+#ifdef _SC_XOPEN_UNIX
+                { "SC_XOPEN_UNIX", _SC_XOPEN_UNIX },
+#endif
+#ifdef _SC_XOPEN_VERSION
+                { "SC_XOPEN_VERSION", _SC_XOPEN_VERSION },
+#endif
+#ifdef _SC_XOPEN_XCU_VERSION
+                { "SC_XOPEN_XCU_VERSION", _SC_XOPEN_XCU_VERSION },
+#endif
+#ifdef _SC_XOPEN_XPG2
+                { "SC_XOPEN_XPG2", _SC_XOPEN_XPG2 },
+#endif
+#ifdef _SC_XOPEN_XPG3
+                { "SC_XOPEN_XPG3", _SC_XOPEN_XPG3 },
+#endif
+#ifdef _SC_XOPEN_XPG4
+                { "SC_XOPEN_XPG4", _SC_XOPEN_XPG4 },
+#endif
+            };
+
+            // (a configuration name (sysconf's, pathconf's or confstr's): a str of aNames or an integer (CPython's conv_confname))
+            bool conf_name(object* aValue, std::vector<std::pair<char const*, int>> const& aNames, int& aResult)
+            {
+                if (kind_of(aValue) == NEOS_PY_STR)
+                {
+                    auto const& n = as<str_object>(aValue)->value;
+                    auto const found = std::find_if(aNames.begin(), aNames.end(), [&](auto const& e) { return n == e.first; });
+                    if (found == aNames.end())
+                    {
+                        error("ValueError", "unrecognized configuration name");
+                        return false;
+                    }
+                    aResult = found->second;
+                    return true;
+                }
+                long long value = 0;
+                if (!is_int_like(aValue) || !to_index(aValue, value))
+                {
+                    clear_error();
+                    error("TypeError", "configuration names must be strings or integers");
+                    return false;
+                }
+                aResult = static_cast<int>(value);
+                return true;
+            }
+
+#if !defined(_WIN32)
+            object* statvfs_result(struct statvfs const& v)
+            {
+                auto const& t = statvfs_result_type();
+                return make_structseq(t, { make_int(static_cast<long long>(v.f_bsize)), make_int(static_cast<long long>(v.f_frsize)), make_int(static_cast<long long>(v.f_blocks)),
+                    make_int(static_cast<long long>(v.f_bfree)), make_int(static_cast<long long>(v.f_bavail)), make_int(static_cast<long long>(v.f_files)),
+                    make_int(static_cast<long long>(v.f_ffree)), make_int(static_cast<long long>(v.f_favail)), make_int(static_cast<long long>(v.f_flag)),
+                    make_int(static_cast<long long>(v.f_namemax)), make_int(static_cast<long long>(v.f_fsid)) });
+            }
+
+            // (a file descriptor argument (PyObject_AsFileDescriptor): an int, or the result of an object's fileno())
+            bool fd_or_fileno(object* aValue, long long& aResult, char const* aFunction)
+            {
+                (void)aFunction;
+                if (is_int_like(aValue))
+                {
+                    if (!to_index(aValue, aResult))
+                        return false;
+                }
+                else
+                {
+                    ref const fileno{ getattr(aValue, "fileno") };
+                    if (!fileno)
+                    {
+                        clear_error();
+                        error("TypeError", "argument must be an int, or have a fileno() method.");
+                        return false;
+                    }
+                    ref const r{ invoke(fileno.get(), {}) };
+                    if (!r)
+                        return false;
+                    if (!is_int_like(r.get()))
+                    {
+                        error("TypeError", "fileno() returned a non-integer");
+                        return false;
+                    }
+                    if (!to_index(r.get(), aResult))
+                        return false;
+                }
+                if (aResult < 0)
+                {
+                    error("ValueError", "file descriptor cannot be a negative integer (" + std::to_string(aResult) + ")");
+                    return false;
+                }
+                return true;
+            }
+
+            // (a function's keyword-only parameters: at most aCount positional arguments (aExactly: all of them required))
+            bool positional_at_most(char const* aFunction, std::vector<object*> const& aArgs, std::size_t aCount, bool aExactly)
+            {
+                if (aArgs.size() <= aCount)
+                    return true;
+                error("TypeError", std::string{ aFunction } + "() takes " + (aExactly ? "exactly " : "at most ") + std::to_string(aCount) + " positional argument" + 
+                    (aCount == 1u ? "" : "s") + " (" + std::to_string(aArgs.size()) + " given)");
+                return false;
+            }
+
+            // (a signal's handlers, after a call that EINTR interrupted (PEP 475: the call is made again unless one raised))
+            bool check_signals() { return signals_check(); }
+
+            // (os.register_at_fork's functions: before, after_in_child and after_in_parent)
+            std::vector<object*>* fork_hooks()
+            {
+                static std::vector<object*> sHooks[3];
+                return sHooks;
+            }
+
+            // (fork's hooks of a kind (0: before (the last registered first), 1: after_in_child, 2: after_in_parent): an exception is 
+            // unraisable)
+            void run_fork_hooks(int aKind)
+            {
+                std::vector<ref> hooks;
+                for (auto h : fork_hooks()[aKind])
+                    hooks.emplace_back(new_reference(h));
+                if (aKind == 0)
+                    std::reverse(hooks.begin(), hooks.end());
+                for (auto const& h : hooks)
+                    if (!ref{ invoke(h.get(), {}) })
+                        write_unraisable(h.get());
+            }
+
+            // (fork() with os.register_at_fork's hooks (PyOS_BeforeFork, PyOS_AfterFork_Child and PyOS_AfterFork_Parent))
+            pid_t fork_process()
+            {
+                run_fork_hooks(0);
+                std::fflush(nullptr);
+                auto const pid = ::fork();
+                auto const e = errno;
+                if (pid == 0)
+                    run_fork_hooks(1);
+                else if (pid > 0)
+                    run_fork_hooks(2);
+                errno = e;
+                return pid;
+            }
+
+            // (login_tty: a new session whose controlling terminal is the terminal, and the standard streams; false: errno)
+            bool login_terminal(int aFd)
+            {
+                if (::setsid() < 0)
+                    return false;
+#if defined(TIOCSCTTY)
+                if (::ioctl(aFd, TIOCSCTTY, 0) < 0)
+                    return false;
+#endif
+                for (int i = 0; i < 3; ++i)
+                    if (::dup2(aFd, i) < 0)
+                        return false;
+                if (aFd > 2 && ::close(aFd) < 0)
+                    return false;
+                return true;
+            }
+
+            // (resource.struct_rusage)
+            structseq_descriptor const& rusage_type()
+            {
+                return structseq_type("resource.struct_rusage", { "ru_utime", "ru_stime", "ru_maxrss", "ru_ixrss", "ru_idrss", "ru_isrss", "ru_minflt", "ru_majflt",
+                    "ru_nswap", "ru_inblock", "ru_oublock", "ru_msgsnd", "ru_msgrcv", "ru_nsignals", "ru_nvcsw", "ru_nivcsw" }, 16u);
+            }
+            object* rusage_result(struct rusage const& r)
+            {
+                auto const seconds = [](timeval const& t) { return static_cast<double>(t.tv_sec) + static_cast<double>(t.tv_usec) * 1e-6; };
+                return make_structseq(rusage_type(), { make_float(seconds(r.ru_utime)), make_float(seconds(r.ru_stime)), make_int(r.ru_maxrss), make_int(r.ru_ixrss),
+                    make_int(r.ru_idrss), make_int(r.ru_isrss), make_int(r.ru_minflt), make_int(r.ru_majflt), make_int(r.ru_nswap), make_int(r.ru_inblock),
+                    make_int(r.ru_oublock), make_int(r.ru_msgsnd), make_int(r.ru_msgrcv), make_int(r.ru_nsignals), make_int(r.ru_nvcsw), make_int(r.ru_nivcsw) });
+            }
+
+            // (wait3 and wait4: (pid, status, resource usage))
+            object* wait_with_usage(pid_t aPid, int aOptions, bool aFour)
+            {
+                (void)aFour;
+                int status = 0;
+                struct rusage usage{};
+                pid_t r = 0;
+                int e = 0;
+                do
+                {
+                    gil_release();
+                    r = ::wait4(aPid, &status, aOptions, &usage);
+                    e = errno;
+                    gil_acquire();
+                } while (r < 0 && e == EINTR && check_signals());
+                if (r < 0)
+                    return failed() ? nullptr : raise_os_error(e);
+                return make_tuple({ make_int(r), make_int(status), rusage_result(usage) });
+            }
+
+            // (an unsigned 64-bit argument)
+            bool unsigned_argument(object* aValue, std::uint64_t& aResult)
+            {
+                long long value = 0;
+                if (!to_index(aValue, value))
+                    return false;
+                if (value < 0)
+                {
+                    error("OverflowError", "can't convert negative int to unsigned");
+                    return false;
+                }
+                aResult = static_cast<std::uint64_t>(value);
+                return true;
+            }
+
+            bool has_attribute(object* aObject, char const* aName)
+            {
+                ref const a{ getattr(aObject, aName) };
+                if (!a)
+                    clear_error();
+                return static_cast<bool>(a);
+            }
+
+            object* decode_filename(std::string const& aName) { return make_str(aName); }
+
+#if defined(__linux__)
+            // (the file of an extended attribute: a path (follow_symlinks: its link's, else the link's own), or a file descriptor)
+            struct xattr_target
+            {
+                int fd = -1;
+                std::string path;
+                bool follow = true;
+                ssize_t get(std::string const& aName, char* aBuffer, std::size_t aSize) const
+                {
+                    return fd >= 0 ? ::fgetxattr(fd, aName.c_str(), aBuffer, aSize) : follow ? ::getxattr(path.c_str(), aName.c_str(), aBuffer, aSize) :
+                        ::lgetxattr(path.c_str(), aName.c_str(), aBuffer, aSize);
+                }
+                int set(std::string const& aName, std::string_view aValue, int aFlags) const
+                {
+                    return fd >= 0 ? ::fsetxattr(fd, aName.c_str(), aValue.data(), aValue.size(), aFlags) : follow ? 
+                        ::setxattr(path.c_str(), aName.c_str(), aValue.data(), aValue.size(), aFlags) : ::lsetxattr(path.c_str(), aName.c_str(), aValue.data(), aValue.size(), aFlags);
+                }
+                int remove(std::string const& aName) const
+                {
+                    return fd >= 0 ? ::fremovexattr(fd, aName.c_str()) : follow ? ::removexattr(path.c_str(), aName.c_str()) : ::lremovexattr(path.c_str(), aName.c_str());
+                }
+                ssize_t list(char* aBuffer, std::size_t aSize) const
+                {
+                    return fd >= 0 ? ::flistxattr(fd, aBuffer, aSize) : follow ? ::listxattr(path.c_str(), aBuffer, aSize) : ::llistxattr(path.c_str(), aBuffer, aSize);
+                }
+            };
+
+            bool xattr_target_of(object* aPath, object* aFollow, char const* aFunction, xattr_target& aResult)
+            {
+                aResult.follow = aFollow == nullptr || truth(aFollow) == 1;
+                if (is_int_like(aPath))
+                {
+                    long long fd = 0;
+                    if (!to_index(aPath, fd))
+                        return false;
+                    if (!aResult.follow)
+                    {
+                        error("ValueError", std::string{ aFunction } + ": cannot use fd and follow_symlinks together");
+                        return false;
+                    }
+                    aResult.fd = static_cast<int>(fd);
+                    return true;
+                }
+                return path_argument(aPath, aResult.path, aFunction, "path", true);
+            }
+#endif
+#if defined(__linux__)
+            // (readv's and writev's buffers: a sequence of bytes-like objects (writable ones to read into))
+            bool io_vectors(object* aBuffers, bool aWritable, char const* aFunction, std::vector<ref>& aHeld, std::vector<iovec>& aVectors)
+            {
+                if (!has_attribute(aBuffers, "__getitem__") || !has_attribute(aBuffers, "__len__"))
+                {
+                    error("TypeError", std::string{ aFunction } + "() arg 2 must be a sequence");
+                    return false;
+                }
+                std::vector<object*> items;
+                if (!collect(aBuffers, items))
+                    return false;
+                for (auto i : items)
+                    aHeld.emplace_back(i);
+                for (auto const& i : aHeld)
+                {
+                    // (PyObject_GetBuffer's errors: PyBUF_WRITABLE's of a read-only buffer, or not a bytes-like object)
+                    buffer_info b;
+                    if (!buffer_of(i.get(), b))
+                    {
+                        clear_error();
+                        error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(i.get()) + "'");
+                        return false;
+                    }
+                    if (aWritable && b.readonly)
+                    {
+                        error("BufferError", "Object is not writable.");
+                        return false;
+                    }
+                    aVectors.push_back(iovec{ b.data, b.size });
+                }
+                return true;
+            }
+
+            // (readv, preadv (aOffset >= 0) and pwritev (aWrite): the bytes read or written)
+            object* vector_io(int aFd, std::vector<iovec> const& aVectors, long long aOffset, int aFlags, bool aWrite)
+            {
+                ssize_t n = 0;
+                int e = 0;
+                do
+                {
+                    gil_release();
+                    if (aOffset < 0)
+                        n = aWrite ? ::writev(aFd, aVectors.data(), static_cast<int>(aVectors.size())) : ::readv(aFd, aVectors.data(), static_cast<int>(aVectors.size()));
+                    else
+                        n = aWrite ? ::pwritev2(aFd, aVectors.data(), static_cast<int>(aVectors.size()), static_cast<off_t>(aOffset), aFlags) :
+                            ::preadv2(aFd, aVectors.data(), static_cast<int>(aVectors.size()), static_cast<off_t>(aOffset), aFlags);
+                    e = errno;
+                    gil_acquire();
+                } while (n < 0 && e == EINTR && check_signals());
+                if (n < 0)
+                    return failed() ? nullptr : raise_os_error(e);
+                return make_int(static_cast<long long>(n));
+            }
+
+            object* timer_values(itimerspec const& aValue, bool aNanoseconds);
+
+            // (timerfd_settime(fd, *, flags=0, initial=0.0, interval=0.0) and timerfd_settime_ns: the previous (initial, interval))
+            object* timerfd_set(std::vector<object*> const& aArgs, object* aKwargs, bool aNanoseconds)
+            {
+                char const* const name = aNanoseconds ? "timerfd_settime_ns" : "timerfd_settime";
+                std::vector<object*> a;
+                long long fd = 0, flags = 0;
+                if (!parse_arguments(name, aArgs, aKwargs, { "fd", "flags", "initial", "interval" }, 1u, 1u, a) || !fd_or_fileno(a[0], fd, name) ||
+                    (a[1] != nullptr && !int_argument(a[1], flags, name)))
+                    return nullptr;
+                if (aArgs.size() > 1u)
+                    return error("TypeError", std::string{ name } + "() takes exactly 1 positional argument (" + std::to_string(aArgs.size()) + " given)");
+                // (seconds (a float or int: not negative), or nanoseconds (an int))
+                auto const spec = [&](object* aValue, timespec& aResult) -> bool
+                {
+                    aResult = {};
+                    if (aValue == nullptr)
+                        return true;
+                    if (aNanoseconds)
+                    {
+                        long long ns = 0;
+                        if (!to_index(aValue, ns))
+                            return false;
+                        if (ns < 0)
+                        {
+                            error("ValueError", aValue == a[2] ? "initial must be non-negative" : "interval must be non-negative");
+                            return false;
+                        }
+                        aResult.tv_sec = static_cast<time_t>(ns / 1000000000ll);
+                        aResult.tv_nsec = static_cast<long>(ns % 1000000000ll);
+                        return true;
+                    }
+                    double seconds = 0.0;
+                    if (!to_double(aValue, seconds))
+                        return false;
+                    if (seconds < 0.0)
+                    {
+                        error("ValueError", aValue == a[2] ? "initial must be non-negative" : "interval must be non-negative");
+                        return false;
+                    }
+                    auto const whole = std::floor(seconds);
+                    aResult.tv_sec = static_cast<time_t>(whole);
+                    aResult.tv_nsec = static_cast<long>(std::llround((seconds - whole) * 1e9));
+                    if (aResult.tv_nsec >= 1000000000l)
+                    {
+                        ++aResult.tv_sec;
+                        aResult.tv_nsec -= 1000000000l;
+                    }
+                    return true;
+                };
+                itimerspec value{}, old{};
+                if (!spec(a[2], value.it_value) || !spec(a[3], value.it_interval))
+                    return nullptr;
+                if (::timerfd_settime(static_cast<int>(fd), static_cast<int>(flags), &value, &old) != 0)
+                    return raise_os_error(errno);
+                return timer_values(old, aNanoseconds);
+            }
+
+            object* timer_values(itimerspec const& aValue, bool aNanoseconds)
+            {
+                auto const of = [&](timespec const& t) -> object*
+                {
+                    if (aNanoseconds)
+                        return make_int(static_cast<long long>(t.tv_sec) * 1000000000ll + t.tv_nsec);
+                    return make_float(static_cast<double>(t.tv_sec) + static_cast<double>(t.tv_nsec) * 1e-9);
+                };
+                return make_tuple({ of(aValue.it_value), of(aValue.it_interval) });
+            }
+
+            object* timerfd_get(std::vector<object*> const& aArgs, object* aKwargs, bool aNanoseconds)
+            {
+                char const* const name = aNanoseconds ? "timerfd_gettime_ns" : "timerfd_gettime";
+                std::vector<object*> a;
+                long long fd = 0;
+                if (!parse_arguments(name, aArgs, aKwargs, { "fd" }, 1u, 1u, a) || !fd_or_fileno(a[0], fd, name))
+                    return nullptr;
+                itimerspec value{};
+                if (::timerfd_gettime(static_cast<int>(fd), &value) != 0)
+                    return raise_os_error(errno);
+                return timer_values(value, aNanoseconds);
+            }
+#endif
 #endif
 
             builtin_entry const sPosixFunctions[] =
@@ -2232,8 +4113,9 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         std::string p;
                         long long flags = 0, mode = 0777;
+                        int dirFd = 0;
                         if (!parse_arguments("open", aArgs, aKwargs, { "path", "flags", "mode", "dir_fd" }, 2u, 0u, a) || !path_of(a, 0u, p, "open") ||
-                            !int_argument(a[1], flags, "open") || (a[2] != nullptr && !int_argument(a[2], mode, "open")))
+                            !int_argument(a[1], flags, "open") || (a[2] != nullptr && !int_argument(a[2], mode, "open")) || !dir_fd_of(a[3], dirFd))
                             return nullptr;
                         // (a file opened to write (or created): restricted)
                         if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0 && !host_unrestricted("os.open"))
@@ -2241,7 +4123,7 @@ namespace neos::python_runtime
 #if defined(_WIN32)
                         auto const fd = ::_open(p.c_str(), static_cast<int>(flags) | _O_BINARY, static_cast<int>(mode & 0600));
 #else
-                        auto const fd = ::open(p.c_str(), static_cast<int>(flags) | O_CLOEXEC, static_cast<mode_t>(mode));
+                        auto const fd = ::openat(dirFd, p.c_str(), static_cast<int>(flags) | O_CLOEXEC, static_cast<mode_t>(mode));
 #endif
                         if (fd < 0)
                             return raise_os_error(errno, a[0]);
@@ -2341,7 +4223,7 @@ namespace neos::python_runtime
                         long long fd = 0;
                         if (!parse_arguments("fstat", aArgs, aKwargs, { "fd" }, 1u, 0u, a) || !int_argument(a[0], fd, "fstat"))
                             return nullptr;
-                        return fd_stat(static_cast<int>(fd));
+                        return fd_stat(static_cast<int>(fd), nullptr);
                     } },
                 { "isatty", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -2466,8 +4348,15 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         std::string p;
                         long long length = 0;
-                        if (!parse_arguments("truncate", aArgs, aKwargs, { "path", "length" }, 2u, 0u, a) || !path_of(a, 0u, p, "truncate") || !int_argument(a[1], length, "truncate"))
+                        std::optional<int> fd;
+                        if (!parse_arguments("truncate", aArgs, aKwargs, { "path", "length" }, 2u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "truncate") || 
+                            !int_argument(a[1], length, "truncate"))
                             return nullptr;
+#if !defined(_WIN32)
+                        // (a file descriptor: ftruncate (its error has no file name, as CPython's))
+                        if (fd)
+                            return ::ftruncate(*fd, static_cast<off_t>(length)) != 0 ? raise_os_error(errno) : none();
+#endif
                         std::error_code ec;
                         std::filesystem::resize_file(std::filesystem::path{ p }, static_cast<std::uintmax_t>(length), ec);
                         if (ec)
@@ -2573,16 +4462,18 @@ namespace neos::python_runtime
                         if (::kill(static_cast<pid_t>(pid), static_cast<int>(signal)) != 0)
                             return raise_os_error(errno);
                         // (a signal to itself: its handler called before kill returns (as CPython's, which checks at once))
+                        if (pid == static_cast<long long>(::getpid()) || pid == 0 || pid == -static_cast<long long>(::getpgrp()))
+                            signal_wait(static_cast<int>(signal));
                         if (!signals_check())
                             return nullptr;
 #endif
                         return none();
                     } },
-                { "times", [](std::vector<object*> const& aArgs, object*) -> object*
+                { "times", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
-                        if (!aArgs.empty())
-                            return error("TypeError", "times() takes no arguments");
-                        auto const& t = structseq_type("posix.times_result", { "user", "system", "children_user", "children_system", "elapsed" }, 5u);
+                        if (!no_arguments("times", aArgs, aKwargs))
+                            return nullptr;
+                        auto const& t = times_result_type();
 #if defined(_WIN32)
                         FILETIME created, exited, kernel, user;
                         ::GetProcessTimes(::GetCurrentProcess(), &created, &exited, &kernel, &user);
@@ -2598,13 +4489,12 @@ namespace neos::python_runtime
 #endif
                     } },
 #if !defined(_WIN32)
-                { "getuid", [](std::vector<object*> const&, object*) -> object* { return make_int(static_cast<long long>(::getuid())); } },
-                { "geteuid", [](std::vector<object*> const&, object*) -> object* { return make_int(static_cast<long long>(::geteuid())); } },
-                { "getgid", [](std::vector<object*> const&, object*) -> object* { return make_int(static_cast<long long>(::getgid())); } },
-                { "getegid", [](std::vector<object*> const&, object*) -> object* { return make_int(static_cast<long long>(::getegid())); } },
-                { "getpgrp", [](std::vector<object*> const&, object*) -> object* { return make_int(static_cast<long long>(::getpgrp())); } },
-                { "getgroups", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "getuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getuid", aArgs, aKwargs)) return nullptr; return make_int(static_cast<long long>(::getuid())); } },
+                { "geteuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("geteuid", aArgs, aKwargs)) return nullptr; return make_int(static_cast<long long>(::geteuid())); } },
+                { "getgid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getgid", aArgs, aKwargs)) return nullptr; return make_int(static_cast<long long>(::getgid())); } },
+                { "getegid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getegid", aArgs, aKwargs)) return nullptr; return make_int(static_cast<long long>(::getegid())); } },
+                { "getpgrp", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getpgrp", aArgs, aKwargs)) return nullptr; return make_int(static_cast<long long>(::getpgrp())); } },
+                { "getgroups", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getgroups", aArgs, aKwargs)) return nullptr;
                         std::vector<gid_t> groups(static_cast<std::size_t>(std::max(0, ::getgroups(0, nullptr))));
                         auto const n = ::getgroups(static_cast<int>(groups.size()), groups.data());
                         if (n < 0)
@@ -2632,7 +4522,7 @@ namespace neos::python_runtime
                         auto const r = ::getsid(static_cast<pid_t>(pid));
                         return r < 0 ? raise_os_error(errno) : make_int(r);
                     } },
-                { "setsid", [](std::vector<object*> const&, object*) -> object* { return ::setsid() < 0 ? raise_os_error(errno) : none(); } },
+                { "setsid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("setsid", aArgs, aKwargs)) return nullptr; return ::setsid() < 0 ? raise_os_error(errno) : none(); } },
                 // (the process's ids (setuid, setgid, seteuid, setegid; setreuid, setregid; setresuid, setresgid (-1: unchanged)), its 
                 // groups, and its process group)
                 { "setuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setuid", aArgs, aKwargs, 1u, [](long long const* v) { return ::setuid(static_cast<uid_t>(v[0])); }); } },
@@ -2644,15 +4534,13 @@ namespace neos::python_runtime
 #if defined(__linux__)
                 { "setresuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setresuid", aArgs, aKwargs, 3u, [](long long const* v) { return ::setresuid(static_cast<uid_t>(v[0]), static_cast<uid_t>(v[1]), static_cast<uid_t>(v[2])); }); } },
                 { "setresgid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setresgid", aArgs, aKwargs, 3u, [](long long const* v) { return ::setresgid(static_cast<gid_t>(v[0]), static_cast<gid_t>(v[1]), static_cast<gid_t>(v[2])); }); } },
-                { "getresuid", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "getresuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getresuid", aArgs, aKwargs)) return nullptr;
                         uid_t r = 0, e = 0, s = 0;
                         if (::getresuid(&r, &e, &s) != 0)
                             return raise_os_error(errno);
                         return make_tuple({ make_int(static_cast<long long>(r)), make_int(static_cast<long long>(e)), make_int(static_cast<long long>(s)) });
                     } },
-                { "getresgid", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "getresgid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getresgid", aArgs, aKwargs)) return nullptr;
                         gid_t r = 0, e = 0, s = 0;
                         if (::getresgid(&r, &e, &s) != 0)
                             return raise_os_error(errno);
@@ -2674,7 +4562,7 @@ namespace neos::python_runtime
                         for (auto i : items)
                         {
                             long long g = 0;
-                            if (ok && (kind_of(i) != NEOS_PY_INT || !to_index(i, g)))
+                            if (ok && (kind_of(i) != NEOS_PY_INT || !id_argument(i, g, true)))
                                 ok = false;
                             groups.push_back(static_cast<gid_t>(g));
                             release(i);
@@ -2693,14 +4581,14 @@ namespace neos::python_runtime
                         std::string user;
                         long long group = 0;
                         if (!parse_arguments("initgroups", aArgs, aKwargs, { "username", "gid" }, 2u, 2u, a) || !path_argument(a[0], user, "initgroups", "username") ||
-                            !int_argument(a[1], group, "initgroups"))
+                            !id_argument(a[1], group, true))
                             return nullptr;
                         if (::initgroups(user.c_str(), static_cast<gid_t>(group)) != 0)
                             return raise_os_error(errno);
                         return none();
                     } },
                 { "setpgid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setpgid", aArgs, aKwargs, 2u, [](long long const* v) { return ::setpgid(static_cast<pid_t>(v[0]), static_cast<pid_t>(v[1])); }); } },
-                { "setpgrp", [](std::vector<object*> const&, object*) -> object* { return ::setpgid(0, 0) < 0 ? raise_os_error(errno) : none(); } },
+                { "setpgrp", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("setpgrp", aArgs, aKwargs)) return nullptr; return ::setpgid(0, 0) < 0 ? raise_os_error(errno) : none(); } },
                 { "killpg", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         if (!host_unrestricted("os.killpg"))
@@ -2713,13 +4601,11 @@ namespace neos::python_runtime
                             return raise_os_error(errno);
                         return none();
                     } },
-                { "fork", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "fork", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("fork", aArgs, aKwargs)) return nullptr;
                         if (!host_unrestricted("os.fork"))
                             return nullptr;
-                        std::fflush(nullptr);
-                        auto const pid = ::fork();
-                        return pid < 0 ? raise_os_error(errno) : make_int(pid);
+                        auto const pid = fork_process();
+                        return pid < 0 ? (failed() ? nullptr : raise_os_error(errno)) : make_int(pid);
                     } },
                 { "waitpid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -2736,8 +4622,7 @@ namespace neos::python_runtime
                             return raise_os_error(e);
                         return make_tuple({ make_int(r), make_int(status) });
                     } },
-                { "wait", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "wait", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("wait", aArgs, aKwargs)) return nullptr;
                         int status = 0;
                         gil_release();
                         auto const r = ::wait(&status);
@@ -2774,29 +4659,66 @@ namespace neos::python_runtime
                         std::string p;
                         if (!parse_arguments("execv", aArgs, aKwargs, { "path", "argv" }, 2u, 2u, a) || !path_of(a, 0u, p, "execv"))
                             return nullptr;
-                        std::vector<object*> items;
-                        if (!collect(a[1], items))
-                            return nullptr;
+                        // (as CPython's os_execv_impl: a tuple or list, not empty, whose first item is not empty)
+                        if (kind_of(a[1]) != NEOS_PY_TUPLE && kind_of(a[1]) != NEOS_PY_LIST)
+                            return error("TypeError", "execv() arg 2 must be a tuple or list");
                         std::vector<std::string> args;
-                        for (auto i : items)
-                        {
-                            std::string text;
-                            bool const ok = path_argument(i, text, "execv", "argv");
-                            release(i);
-                            if (!ok)
-                                return nullptr;
-                            args.push_back(text);
-                        }
+                        if (!exec_arguments(a[1], args, "execv"))
+                            return nullptr;
                         if (args.empty())
                             return error("ValueError", "execv() arg 2 must not be empty");
+                        if (args[0].empty())
+                            return error("ValueError", "execv() arg 2 first element cannot be empty");
                         std::vector<char*> argv;
                         for (auto& x : args)
                             argv.push_back(x.data());
                         argv.push_back(nullptr);
                         std::fflush(nullptr);
                         ::execv(p.c_str(), argv.data());
-                        return raise_os_error(errno);
+                        return raise_os_error(errno, a[0]);
                     } },
+                // (as CPython's os_execve_impl: a path (or a file descriptor: fexecve), argv (a tuple or list, not empty, whose first item is not
+                // empty) and env (a mapping, whose names are not empty and have no '=' after their first character))
+                { "execve", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.execve"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        std::string p;
+                        std::optional<int> fd;
+                        if (!parse_arguments("execve", aArgs, aKwargs, { "path", "argv", "env" }, 3u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "execve"))
+                            return nullptr;
+                        if (kind_of(a[1]) != NEOS_PY_TUPLE && kind_of(a[1]) != NEOS_PY_LIST)
+                            return error("TypeError", "execve: argv must be a tuple or list");
+                        std::vector<std::string> args;
+                        if (!exec_arguments(a[1], args, "execve"))
+                            return nullptr;
+                        if (args.empty())
+                            return error("ValueError", "execve: argv must not be empty");
+                        if (!is_mapping(a[2]))
+                            return error("TypeError", "execve: environment must be a mapping object");
+                        if (args[0].empty())
+                            return error("ValueError", "execve: argv first element cannot be empty");
+                        std::vector<std::string> environment;
+                        if (!environment_list(a[2], environment, "execve"))
+                            return nullptr;
+                        std::vector<char*> argv;
+                        for (auto& x : args)
+                            argv.push_back(x.data());
+                        argv.push_back(nullptr);
+                        std::vector<char*> envp;
+                        for (auto& x : environment)
+                            envp.push_back(x.data());
+                        envp.push_back(nullptr);
+                        std::fflush(nullptr);
+                        if (fd)
+                            ::fexecve(*fd, argv.data(), envp.data());
+                        else
+                            ::execve(p.c_str(), argv.data(), envp.data());
+                        return raise_os_error(errno, a[0]);
+                    } },
+                { "posix_spawn", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return posix_spawn_call(false, aArgs, aKwargs); } },
+                { "posix_spawnp", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return posix_spawn_call(true, aArgs, aKwargs); } },
                 { "nice", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         if (!host_unrestricted("os.nice"))
@@ -2811,16 +4733,14 @@ namespace neos::python_runtime
                             return raise_os_error(errno);
                         return make_int(r);
                     } },
-                { "uname", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "uname", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("uname", aArgs, aKwargs)) return nullptr;
                         struct utsname u{};
                         if (::uname(&u) != 0)
                             return raise_os_error(errno);
-                        auto const& t = structseq_type("posix.uname_result", { "sysname", "nodename", "release", "version", "machine" }, 5u);
+                        auto const& t = uname_result_type();
                         return make_structseq(t, { make_str(u.sysname), make_str(u.nodename), make_str(u.release), make_str(u.version), make_str(u.machine) });
                     } },
-                { "getloadavg", [](std::vector<object*> const&, object*) -> object*
-                    {
+                { "getloadavg", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("getloadavg", aArgs, aKwargs)) return nullptr;
                         double load[3] = {};
                         if (::getloadavg(load, 3) != 3)
                             return error("OSError", "Load averages are unobtainable");
@@ -2832,10 +4752,11 @@ namespace neos::python_runtime
                             return nullptr;
                         std::vector<object*> a;
                         std::string from, to;
+                        int dirFd = 0;
                         if (!parse_arguments("symlink", aArgs, aKwargs, { "src", "dst", "target_is_directory", "dir_fd" }, 2u, 0u, a) || !path_of(a, 0u, from, "symlink", "src") ||
-                            !path_of(a, 1u, to, "symlink", "dst"))
+                            !path_of(a, 1u, to, "symlink", "dst") || !dir_fd_of(a[3], dirFd))
                             return nullptr;
-                        if (::symlink(from.c_str(), to.c_str()) != 0)
+                        if (::symlinkat(from.c_str(), dirFd, to.c_str()) != 0)
                             return raise_os_error(errno, a[0], a[1]);
                         return none();
                     } },
@@ -2843,10 +4764,11 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("readlink", aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "readlink"))
+                        int dirFd = 0;
+                        if (!parse_arguments("readlink", aArgs, aKwargs, { "path", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "readlink") || !dir_fd_of(a[1], dirFd))
                             return nullptr;
                         std::string buffer(4096u, '\0');
-                        auto const n = ::readlink(p.c_str(), buffer.data(), buffer.size());
+                        auto const n = ::readlinkat(dirFd, p.c_str(), buffer.data(), buffer.size());
                         if (n < 0)
                             return raise_os_error(errno, a[0]);
                         buffer.resize(static_cast<std::size_t>(n));
@@ -2859,12 +4781,93 @@ namespace neos::python_runtime
                             return nullptr;
                         std::vector<object*> a;
                         std::string from, to;
+                        int fromFd = 0, toFd = 0;
                         if (!parse_arguments("link", aArgs, aKwargs, { "src", "dst", "src_dir_fd", "dst_dir_fd", "follow_symlinks" }, 2u, 0u, a) ||
-                            !path_of(a, 0u, from, "link", "src") || !path_of(a, 1u, to, "link", "dst"))
+                            !path_of(a, 0u, from, "link", "src") || !path_of(a, 1u, to, "link", "dst") || !dir_fd_of(a[2], fromFd) || !dir_fd_of(a[3], toFd))
                             return nullptr;
-                        if (::link(from.c_str(), to.c_str()) != 0)
+                        // (follow_symlinks (the default): a link to the file that src refers to, as CPython's linkat with AT_SYMLINK_FOLLOW)
+                        if (::linkat(fromFd, from.c_str(), toFd, to.c_str(), follow_of(a[4]) ? AT_SYMLINK_FOLLOW : 0) != 0)
                             return raise_os_error(errno, a[0], a[1]);
                         return none();
+                    } },
+                // (fchmod, fchown, fchdir and fstatvfs (a descriptor's: errors without file names) and lchown (as CPython's))
+                { "fchmod", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.fchmod"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        long long fd = 0, mode = 0;
+                        if (!parse_arguments("fchmod", aArgs, aKwargs, { "fd", "mode" }, 2u, 0u, a) || !int_argument(a[0], fd, "fchmod") || !int_argument(a[1], mode, "fchmod"))
+                            return nullptr;
+                        return ::fchmod(static_cast<int>(fd), static_cast<mode_t>(mode)) != 0 ? raise_os_error(errno) : none();
+                    } },
+                { "fchown", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.fchown"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        long long fd = 0, uid = 0, gid = 0;
+                        if (!parse_arguments("fchown", aArgs, aKwargs, { "fd", "uid", "gid" }, 3u, 0u, a) || !int_argument(a[0], fd, "fchown") || !id_argument(a[1], uid, false) ||
+                            !id_argument(a[2], gid, true))
+                            return nullptr;
+                        return ::fchown(static_cast<int>(fd), static_cast<uid_t>(uid), static_cast<gid_t>(gid)) != 0 ? raise_os_error(errno) : none();
+                    } },
+                { "fchdir", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.fchdir"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        if (!parse_arguments("fchdir", aArgs, aKwargs, { "fd" }, 1u, 0u, a))
+                            return nullptr;
+                        // (an int, or an object with fileno() (CPython's fildes_converter))
+                        long long fd = 0;
+                        if (is_int_like(a[0]))
+                        {
+                            if (!to_index(a[0], fd))
+                                return nullptr;
+                        }
+                        else
+                        {
+                            ref const fileno{ getattr(a[0], "fileno") };
+                            if (!fileno)
+                            {
+                                clear_error();
+                                return error("TypeError", "argument must be an int, or have a fileno() method.");
+                            }
+                            ref const number{ invoke(fileno.get(), {}) };
+                            if (!number)
+                                return nullptr;
+                            if (!is_int_like(number.get()))
+                                return error("TypeError", "fileno() returned a non-integer");
+                            if (!to_index(number.get(), fd))
+                                return nullptr;
+                        }
+                        if (fd < 0)
+                            return error("ValueError", "file descriptor cannot be a negative integer (" + std::to_string(fd) + ")");
+                        return ::fchdir(static_cast<int>(fd)) != 0 ? raise_os_error(errno) : none();
+                    } },
+                { "fstatvfs", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("fstatvfs", aArgs, aKwargs, { "fd" }, 1u, 1u, a) || !int_argument(a[0], fd, "fstatvfs"))
+                            return nullptr;
+                        struct statvfs v{};
+                        if (::fstatvfs(static_cast<int>(fd), &v) != 0)
+                            return raise_os_error(errno);
+                        return statvfs_result(v);
+                    } },
+                { "lchown", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.lchown"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        std::string p;
+                        long long uid = 0, gid = 0;
+                        if (!parse_arguments("lchown", aArgs, aKwargs, { "path", "uid", "gid" }, 3u, 0u, a) || !path_of(a, 0u, p, "lchown") || !id_argument(a[1], uid, false) ||
+                            !id_argument(a[2], gid, true))
+                            return nullptr;
+                        return ::lchown(p.c_str(), static_cast<uid_t>(uid), static_cast<gid_t>(gid)) != 0 ? raise_os_error(errno, a[0]) : none();
                     } },
                 { "chown", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -2873,11 +4876,14 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         std::string p;
                         long long uid = 0, gid = 0;
-                        if (!parse_arguments("chown", aArgs, aKwargs, { "path", "uid", "gid", "dir_fd", "follow_symlinks" }, 3u, 0u, a) || !path_of(a, 0u, p, "chown") ||
-                            !int_argument(a[1], uid, "chown") || !int_argument(a[2], gid, "chown"))
+                        int dirFd = 0;
+                        std::optional<int> fd;
+                        if (!parse_arguments("chown", aArgs, aKwargs, { "path", "uid", "gid", "dir_fd", "follow_symlinks" }, 3u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "chown") ||
+                            !id_argument(a[1], uid, false) || !id_argument(a[2], gid, true) || !dir_fd_of(a[3], dirFd) || !fd_alone("chown", fd, dirFd, follow_of(a[4])))
                             return nullptr;
-                        bool const follow = a[4] == nullptr || truth(a[4]) == 1;
-                        if ((follow ? ::chown(p.c_str(), static_cast<uid_t>(uid), static_cast<gid_t>(gid)) : ::lchown(p.c_str(), static_cast<uid_t>(uid), static_cast<gid_t>(gid))) != 0)
+                        if (fd)
+                            return ::fchown(*fd, static_cast<uid_t>(uid), static_cast<gid_t>(gid)) != 0 ? raise_os_error(errno, a[0]) : none();
+                        if (::fchownat(dirFd, p.c_str(), static_cast<uid_t>(uid), static_cast<gid_t>(gid), follow_of(a[4]) ? 0 : AT_SYMLINK_NOFOLLOW) != 0)
                             return raise_os_error(errno, a[0]);
                         return none();
                     } },
@@ -2888,14 +4894,15 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         std::string p;
                         long long mode = 0666;
+                        int dirFd = 0;
                         if (!parse_arguments("mkfifo", aArgs, aKwargs, { "path", "mode", "dir_fd" }, 1u, 0u, a) || !path_of(a, 0u, p, "mkfifo") ||
-                            (a[1] != nullptr && !int_argument(a[1], mode, "mkfifo")))
+                            (a[1] != nullptr && !int_argument(a[1], mode, "mkfifo")) || !dir_fd_of(a[2], dirFd))
                             return nullptr;
-                        if (::mkfifo(p.c_str(), static_cast<mode_t>(mode)) != 0)
+                        if (::mkfifoat(dirFd, p.c_str(), static_cast<mode_t>(mode)) != 0)
                             return raise_os_error(errno, a[0]);
                         return none();
                     } },
-                { "sync", [](std::vector<object*> const&, object*) -> object* { ::sync(); return none(); } },
+                { "sync", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { if (!no_arguments("sync", aArgs, aKwargs)) return nullptr; ::sync(); return none(); } },
                 { "sysconf", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
@@ -2905,39 +4912,82 @@ namespace neos::python_runtime
                         if (kind_of(a[0]) == NEOS_PY_STR)
                         {
                             auto const& n = as<str_object>(a[0])->value;
-                            if (n == "SC_PAGE_SIZE" || n == "SC_PAGESIZE") name = _SC_PAGESIZE;
-                            else if (n == "SC_NPROCESSORS_ONLN") name = _SC_NPROCESSORS_ONLN;
-                            else if (n == "SC_NPROCESSORS_CONF") name = _SC_NPROCESSORS_CONF;
-                            else if (n == "SC_CLK_TCK") name = _SC_CLK_TCK;
-                            else if (n == "SC_OPEN_MAX") name = _SC_OPEN_MAX;
-                            else if (n == "SC_PHYS_PAGES") name = _SC_PHYS_PAGES;
-                            else if (n == "SC_ARG_MAX") name = _SC_ARG_MAX;
-                            else
+                            auto const found = std::find_if(sSysconfNames.begin(), sSysconfNames.end(), [&](auto const& e) { return n == e.first; });
+                            if (found == sSysconfNames.end())
                                 return error("ValueError", "unrecognized configuration name");
+                            name = found->second;
                         }
-                        else if (!int_argument(a[0], name, "sysconf"))
-                            return nullptr;
+                        else if (is_int_like(a[0]))
+                        {
+                            if (!int_argument(a[0], name, "sysconf"))
+                                return nullptr;
+                        }
+                        else
+                            return error("TypeError", "configuration names must be strings or integers");
                         errno = 0;
                         auto const r = ::sysconf(static_cast<int>(name));
                         if (r == -1 && errno != 0)
                             return raise_os_error(errno);
                         return make_int(r);
                     } },
+                // (as CPython's os_pathconf_impl, os_fpathconf_impl and os_confstr_impl: EINVAL (the path's or the name's) has no file name)
+                { "pathconf", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string p;
+                        std::optional<int> fd;
+                        int name = 0;
+                        if (!parse_arguments("pathconf", aArgs, aKwargs, { "path", "name" }, 2u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "pathconf") || 
+                            !conf_name(a[1], sPathconfNames, name))
+                            return nullptr;
+                        errno = 0;
+                        auto const r = fd ? ::fpathconf(*fd, name) : ::pathconf(p.c_str(), name);
+                        if (r == -1 && errno != 0)
+                            return errno == EINVAL ? raise_os_error(errno) : raise_os_error(errno, a[0]);
+                        return make_int(r);
+                    } },
+                { "fpathconf", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string p;
+                        std::optional<int> fd;
+                        int name = 0;
+                        if (!parse_arguments("fpathconf", aArgs, aKwargs, { "fd", "name" }, 2u, 2u, a) || !path_or_fd_of(a, 0u, p, fd, "fpathconf") || 
+                            !conf_name(a[1], sPathconfNames, name))
+                            return nullptr;
+                        errno = 0;
+                        auto const r = fd ? ::fpathconf(*fd, name) : ::pathconf(p.c_str(), name);
+                        if (r == -1 && errno != 0)
+                            return raise_os_error(errno);
+                        return make_int(r);
+                    } },
+                { "confstr", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        int name = 0;
+                        if (!parse_arguments("confstr", aArgs, aKwargs, { "name" }, 1u, 1u, a) || !conf_name(a[0], sConfstrNames, name))
+                            return nullptr;
+                        // (no value: None)
+                        errno = 0;
+                        auto const length = ::confstr(name, nullptr, 0u);
+                        if (length == 0u)
+                            return errno != 0 ? raise_os_error(errno) : none();
+                        std::string value(length, '\0');
+                        ::confstr(name, value.data(), value.size());
+                        value.resize(length - 1u);
+                        return make_str(value);
+                    } },
                 { "statvfs", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
                         std::string p;
-                        if (!parse_arguments("statvfs", aArgs, aKwargs, { "path" }, 1u, 0u, a) || !path_of(a, 0u, p, "statvfs"))
+                        std::optional<int> fd;
+                        if (!parse_arguments("statvfs", aArgs, aKwargs, { "path" }, 1u, 0u, a) || !path_or_fd_of(a, 0u, p, fd, "statvfs"))
                             return nullptr;
                         struct statvfs v{};
-                        if (::statvfs(p.c_str(), &v) != 0)
+                        if ((fd ? ::fstatvfs(*fd, &v) : ::statvfs(p.c_str(), &v)) != 0)
                             return raise_os_error(errno, a[0]);
-                        auto const& t = structseq_type("os.statvfs_result", { "f_bsize", "f_frsize", "f_blocks", "f_bfree", "f_bavail", "f_files", "f_ffree", "f_favail",
-                            "f_flag", "f_namemax", "f_fsid" }, 10u);
-                        return make_structseq(t, { make_int(static_cast<long long>(v.f_bsize)), make_int(static_cast<long long>(v.f_frsize)), make_int(static_cast<long long>(v.f_blocks)),
-                            make_int(static_cast<long long>(v.f_bfree)), make_int(static_cast<long long>(v.f_bavail)), make_int(static_cast<long long>(v.f_files)),
-                            make_int(static_cast<long long>(v.f_ffree)), make_int(static_cast<long long>(v.f_favail)), make_int(static_cast<long long>(v.f_flag)),
-                            make_int(static_cast<long long>(v.f_namemax)), make_int(static_cast<long long>(v.f_fsid)) });
+                        return statvfs_result(v);
                     } },
                 { "ttyname", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -2948,6 +4998,1023 @@ namespace neos::python_runtime
                         auto const name = ::ttyname(static_cast<int>(fd));
                         return name == nullptr ? raise_os_error(errno) : make_str(name);
                     } },
+                // --- the scheduler (sched.h)
+                { "sched_yield", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("sched_yield", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        gil_release();
+                        auto const r = ::sched_yield();
+                        gil_acquire();
+                        return r != 0 ? raise_os_error(errno) : (retain(none()), none());
+                    } },
+                { "sched_get_priority_min", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long policy = 0;
+                        if (!parse_arguments("sched_get_priority_min", aArgs, aKwargs, { "policy" }, 1u, 0u, a) || !int_argument(a[0], policy, "sched_get_priority_min"))
+                            return nullptr;
+                        auto const r = ::sched_get_priority_min(static_cast<int>(policy));
+                        return r < 0 ? raise_os_error(errno) : make_int(r);
+                    } },
+                { "sched_get_priority_max", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long policy = 0;
+                        if (!parse_arguments("sched_get_priority_max", aArgs, aKwargs, { "policy" }, 1u, 0u, a) || !int_argument(a[0], policy, "sched_get_priority_max"))
+                            return nullptr;
+                        auto const r = ::sched_get_priority_max(static_cast<int>(policy));
+                        return r < 0 ? raise_os_error(errno) : make_int(r);
+                    } },
+                // (Modules/posixmodule.c's functions that follow: their arguments, errors and results)
+                { "abort", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!no_arguments("abort", aArgs, aKwargs))
+                            return nullptr;
+                        std::abort();
+                    } },
+                { "chroot", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.chroot"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        std::string p;
+                        if (!parse_arguments("chroot", aArgs, aKwargs, { "path" }, 1u, 0u, a) || !path_argument(a[0], p, "chroot"))
+                            return nullptr;
+                        if (::chroot(p.c_str()) != 0)
+                            return raise_os_error(errno, a[0]);
+                        return new_reference(none());
+                    } },
+                { "ctermid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!no_arguments("ctermid", aArgs, aKwargs))
+                            return nullptr;
+                        char buffer[L_ctermid] = {};
+                        if (::ctermid(buffer) == nullptr)
+                            return raise_os_error(errno);
+                        return make_str(buffer);
+                    } },
+                { "fdatasync", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("fdatasync", aArgs, aKwargs, { "fd" }, 1u, 1u, a))
+                            return nullptr;
+                        // (a file descriptor, or an object's fileno())
+                        if (!to_index(a[0], fd))
+                        {
+                            clear_error();
+                            ref const fileno{ call_method_named(a[0], "fileno", {}) };
+                            if (!fileno || !int_argument(fileno.get(), fd, "fdatasync"))
+                                return nullptr;
+                        }
+                        gil_release();
+#if defined(__APPLE__)
+                        auto const r = ::fsync(static_cast<int>(fd));
+#else
+                        auto const r = ::fdatasync(static_cast<int>(fd));
+#endif
+                        auto const e = errno;
+                        gil_acquire();
+                        return r != 0 ? raise_os_error(e) : new_reference(none());
+                    } },
+                { "getpriority", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long which = 0, who = 0;
+                        if (!parse_arguments("getpriority", aArgs, aKwargs, { "which", "who" }, 2u, 0u, a) || !int_argument(a[0], which, "getpriority") ||
+                            !int_argument(a[1], who, "getpriority"))
+                            return nullptr;
+                        errno = 0;
+                        auto const r = ::getpriority(static_cast<int>(which), static_cast<id_t>(who));
+                        if (r == -1 && errno != 0)
+                            return raise_os_error(errno);
+                        return make_int(r);
+                    } },
+                { "setpriority", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.setpriority"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        long long which = 0, who = 0, priority = 0;
+                        if (!parse_arguments("setpriority", aArgs, aKwargs, { "which", "who", "priority" }, 3u, 0u, a) || !int_argument(a[0], which, "setpriority") ||
+                            !int_argument(a[1], who, "setpriority") || !int_argument(a[2], priority, "setpriority"))
+                            return nullptr;
+                        if (::setpriority(static_cast<int>(which), static_cast<id_t>(who), static_cast<int>(priority)) != 0)
+                            return raise_os_error(errno);
+                        return new_reference(none());
+                    } },
+                { "lockf", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0, command = 0, length = 0;
+                        if (!parse_arguments("lockf", aArgs, aKwargs, { "fd", "command", "length" }, 3u, 3u, a) || !int_argument(a[0], fd, "lockf") ||
+                            !int_argument(a[1], command, "lockf") || !int_argument(a[2], length, "lockf"))
+                            return nullptr;
+                        gil_release();
+                        auto const r = ::lockf(static_cast<int>(fd), static_cast<int>(command), static_cast<off_t>(length));
+                        auto const e = errno;
+                        gil_acquire();
+                        return r != 0 ? raise_os_error(e) : new_reference(none());
+                    } },
+                { "major", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long device = 0;
+                        if (!parse_arguments("major", aArgs, aKwargs, { "device" }, 1u, 1u, a) || !int_argument(a[0], device, "major"))
+                            return nullptr;
+                        return make_unsigned(static_cast<std::uint64_t>(major(static_cast<dev_t>(device))));
+                    } },
+                { "minor", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long device = 0;
+                        if (!parse_arguments("minor", aArgs, aKwargs, { "device" }, 1u, 1u, a) || !int_argument(a[0], device, "minor"))
+                            return nullptr;
+                        return make_unsigned(static_cast<std::uint64_t>(minor(static_cast<dev_t>(device))));
+                    } },
+                { "makedev", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long majorNumber = 0, minorNumber = 0;
+                        if (!parse_arguments("makedev", aArgs, aKwargs, { "major", "minor" }, 2u, 2u, a) || !int_argument(a[0], majorNumber, "makedev") ||
+                            !int_argument(a[1], minorNumber, "makedev"))
+                            return nullptr;
+                        return make_unsigned(static_cast<std::uint64_t>(makedev(static_cast<unsigned>(majorNumber), static_cast<unsigned>(minorNumber))));
+                    } },
+                { "mknod", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.mknod"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        std::string p;
+                        long long mode = 0600, device = 0;
+                        int dirFd = AT_FDCWD;
+                        if (!positional_at_most("mknod", aArgs, 3u, false) || !parse_arguments("mknod", aArgs, aKwargs, { "path", "mode", "device", "dir_fd" }, 1u, 0u, a) || !path_argument(a[0], p, "mknod") ||
+                            (a[1] != nullptr && !int_argument(a[1], mode, "mknod")) || (a[2] != nullptr && !int_argument(a[2], device, "mknod")) || !dir_fd_of(a[3], dirFd))
+                            return nullptr;
+                        if (::mknodat(dirFd, p.c_str(), static_cast<mode_t>(mode), static_cast<dev_t>(device)) != 0)
+                            return raise_os_error(errno, a[0]);
+                        return new_reference(none());
+                    } },
+                { "posix_fallocate", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0, offset = 0, length = 0;
+                        if (!parse_arguments("posix_fallocate", aArgs, aKwargs, { "fd", "offset", "len" }, 3u, 3u, a) || !int_argument(a[0], fd, "posix_fallocate") ||
+                            !int_argument(a[1], offset, "posix_fallocate") || !int_argument(a[2], length, "posix_fallocate"))
+                            return nullptr;
+#if defined(__APPLE__)
+                        return raise_os_error(EOPNOTSUPP);
+#else
+                        gil_release();
+                        auto const r = ::posix_fallocate(static_cast<int>(fd), static_cast<off_t>(offset), static_cast<off_t>(length));
+                        gil_acquire();
+                        return r != 0 ? raise_os_error(r) : new_reference(none());
+#endif
+                    } },
+                { "pread", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0, length = 0, offset = 0;
+                        if (!parse_arguments("pread", aArgs, aKwargs, { "fd", "length", "offset" }, 3u, 3u, a) || !int_argument(a[0], fd, "pread") ||
+                            !int_argument(a[1], length, "pread") || !int_argument(a[2], offset, "pread"))
+                            return nullptr;
+                        if (length < 0)
+                            return raise_os_error(EINVAL);
+                        std::string buffer(static_cast<std::size_t>(length), '\0');
+                        ssize_t n = 0;
+                        int e = 0;
+                        do
+                        {
+                            gil_release();
+                            n = ::pread(static_cast<int>(fd), buffer.data(), buffer.size(), static_cast<off_t>(offset));
+                            e = errno;
+                            gil_acquire();
+                        } while (n < 0 && e == EINTR && check_signals());
+                        if (n < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        buffer.resize(static_cast<std::size_t>(n));
+                        return make_bytes(std::move(buffer));
+                    } },
+                { "pwrite", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0, offset = 0;
+                        std::string_view data;
+                        if (!parse_arguments("pwrite", aArgs, aKwargs, { "fd", "str", "offset" }, 3u, 3u, a) || !int_argument(a[0], fd, "pwrite") ||
+                            !int_argument(a[2], offset, "pwrite"))
+                            return nullptr;
+                        if (!bytes_like(a[1], data))
+                            return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(a[1]) + "'");
+                        ssize_t n = 0;
+                        int e = 0;
+                        do
+                        {
+                            gil_release();
+                            n = ::pwrite(static_cast<int>(fd), data.data(), data.size(), static_cast<off_t>(offset));
+                            e = errno;
+                            gil_acquire();
+                        } while (n < 0 && e == EINTR && check_signals());
+                        if (n < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        return make_int(static_cast<long long>(n));
+                    } },
+                { "writev", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("writev", aArgs, aKwargs, { "fd", "buffers" }, 2u, 2u, a) || !int_argument(a[0], fd, "writev"))
+                            return nullptr;
+                        // (buffers: a sequence of bytes-like objects)
+                        if (!has_attribute(a[1], "__getitem__") || !has_attribute(a[1], "__len__"))
+                            return error("TypeError", "writev() arg 2 must be a sequence");
+                        std::vector<object*> items;
+                        if (!collect(a[1], items))
+                            return nullptr;
+                        std::vector<ref> held;
+                        std::vector<iovec> vectors;
+                        for (auto i : items)
+                        {
+                            held.emplace_back(i);
+                            std::string_view data;
+                            if (!bytes_like(i, data))
+                                return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(i) + "'");
+                            vectors.push_back(iovec{ const_cast<char*>(data.data()), data.size() });
+                        }
+                        ssize_t n = 0;
+                        int e = 0;
+                        do
+                        {
+                            gil_release();
+                            n = ::writev(static_cast<int>(fd), vectors.data(), static_cast<int>(vectors.size()));
+                            e = errno;
+                            gil_acquire();
+                        } while (n < 0 && e == EINTR && check_signals());
+                        if (n < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        return make_int(static_cast<long long>(n));
+                    } },
+                { "tcgetpgrp", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("tcgetpgrp", aArgs, aKwargs, { "fd" }, 1u, 1u, a) || !int_argument(a[0], fd, "tcgetpgrp"))
+                            return nullptr;
+                        auto const r = ::tcgetpgrp(static_cast<int>(fd));
+                        return r < 0 ? raise_os_error(errno) : make_int(r);
+                    } },
+                { "tcsetpgrp", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.tcsetpgrp"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        long long fd = 0, pgid = 0;
+                        if (!parse_arguments("tcsetpgrp", aArgs, aKwargs, { "fd", "pgid" }, 2u, 2u, a) || !int_argument(a[0], fd, "tcsetpgrp") ||
+                            !int_argument(a[1], pgid, "tcsetpgrp"))
+                            return nullptr;
+                        if (::tcsetpgrp(static_cast<int>(fd), static_cast<pid_t>(pgid)) != 0)
+                            return raise_os_error(errno);
+                        return new_reference(none());
+                    } },
+                { "WCOREDUMP", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long s = 0;
+                        if (!parse_arguments("WCOREDUMP", aArgs, aKwargs, { "status" }, 1u, 1u, a) || !int_argument(a[0], s, "WCOREDUMP"))
+                            return nullptr;
+                        return make_bool(WCOREDUMP(static_cast<int>(s)));
+                    } },
+                { "WIFCONTINUED", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long s = 0;
+                        if (!parse_arguments("WIFCONTINUED", aArgs, aKwargs, { "status" }, 1u, 0u, a) || !int_argument(a[0], s, "WIFCONTINUED"))
+                            return nullptr;
+                        return make_bool(WIFCONTINUED(static_cast<int>(s)));
+                    } },
+                { "getgrouplist", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string user;
+                        long long group = 0;
+                        if (!parse_arguments("getgrouplist", aArgs, aKwargs, { "user", "group" }, 2u, 2u, a))
+                            return nullptr;
+                        if (kind_of(a[0]) != NEOS_PY_STR)
+                            return error("TypeError", std::string{ "getgrouplist() argument 1 must be str, not " } + type_name(a[0]));
+                        user = as<str_object>(a[0])->value;
+                        if (!int_argument(a[1], group, "getgrouplist"))
+                            return nullptr;
+                        // (the list grown until it is large enough)
+                        int count = 64;
+                        std::vector<gid_t> groups;
+                        for (;;)
+                        {
+                            groups.assign(static_cast<std::size_t>(count), 0);
+                            int n = count;
+#if defined(__APPLE__)
+                            auto const r = ::getgrouplist(user.c_str(), static_cast<int>(group), reinterpret_cast<int*>(groups.data()), &n);
+#else
+                            auto const r = ::getgrouplist(user.c_str(), static_cast<gid_t>(group), groups.data(), &n);
+#endif
+                            if (r >= 0)
+                            {
+                                groups.resize(static_cast<std::size_t>(n));
+                                break;
+                            }
+                            if (count >= 65536)
+                                return raise_os_error(errno != 0 ? errno : EINVAL);
+                            count = std::max(count * 2, n);
+                        }
+                        std::vector<object*> items;
+                        for (auto g : groups)
+                            items.push_back(make_int(static_cast<long long>(g)));
+                        return make_list(std::move(items));
+                    } },
+                { "register_at_fork", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        // (keyword arguments only, at least one, each callable: called by fork (before: the last registered first))
+                        if (!aArgs.empty())
+                            return error("TypeError", "register_at_fork() takes no positional arguments");
+                        std::vector<object*> a;
+                        if (!parse_arguments("register_at_fork", aArgs, aKwargs, { "before", "after_in_child", "after_in_parent" }, 0u, 0u, a))
+                            return nullptr;
+                        if (a[0] == nullptr && a[1] == nullptr && a[2] == nullptr)
+                            return error("TypeError", "At least one argument is required.");
+                        char const* const names[] = { "before", "after_in_child", "after_in_parent" };
+                        for (std::size_t i = 0u; i < 3u; ++i)
+                            if (a[i] != nullptr && !is_callable(a[i]))
+                                return error("TypeError", std::string{ "'" } + names[i] + "' must be callable, not " + type_name(a[i]));
+                        auto* const hooks = fork_hooks();
+                        for (std::size_t i = 0u; i < 3u; ++i)
+                            if (a[i] != nullptr)
+                                hooks[i].push_back(new_reference(a[i]));
+                        return new_reference(none());
+                    } },
+                { "posix_openpt", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long flags = 0;
+                        if (!parse_arguments("posix_openpt", aArgs, aKwargs, { "oflag" }, 1u, 1u, a) || !int_argument(a[0], flags, "posix_openpt"))
+                            return nullptr;
+                        // (not inheritable, as CPython's)
+                        int const fd = ::posix_openpt(static_cast<int>(flags));
+                        if (fd < 0)
+                            return raise_os_error(errno);
+                        ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+                        return make_int(fd);
+                    } },
+                { "grantpt", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("grantpt", aArgs, aKwargs, { "fd" }, 1u, 1u, a) || !fd_or_fileno(a[0], fd, "grantpt"))
+                            return nullptr;
+                        if (::grantpt(static_cast<int>(fd)) != 0)
+                            return raise_os_error(errno);
+                        return new_reference(none());
+                    } },
+                { "unlockpt", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("unlockpt", aArgs, aKwargs, { "fd" }, 1u, 1u, a) || !fd_or_fileno(a[0], fd, "unlockpt"))
+                            return nullptr;
+                        if (::unlockpt(static_cast<int>(fd)) != 0)
+                            return raise_os_error(errno);
+                        return new_reference(none());
+                    } },
+                { "ptsname", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("ptsname", aArgs, aKwargs, { "fd" }, 1u, 1u, a) || !fd_or_fileno(a[0], fd, "ptsname"))
+                            return nullptr;
+                        char const* const name = ::ptsname(static_cast<int>(fd));
+                        if (name == nullptr)
+                            return raise_os_error(errno);
+                        return make_str(name);
+                    } },
+                // (login_tty(fd): a new session, the terminal its controlling terminal and the standard streams (as CPython's fallback))
+                { "login_tty", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.login_tty"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("login_tty", aArgs, aKwargs, { "fd" }, 1u, 1u, a) || !fd_or_fileno(a[0], fd, "login_tty"))
+                            return nullptr;
+                        if (!login_terminal(static_cast<int>(fd)))
+                            return raise_os_error(errno);
+                        return new_reference(none());
+                    } },
+                { "forkpty", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!no_arguments("forkpty", aArgs, aKwargs) || !host_unrestricted("os.fork"))
+                            return nullptr;
+                        // (a pseudo-terminal (openpty's), then fork: the child's terminal is its slave end (login_tty); (pid, master))
+                        int const master = ::posix_openpt(O_RDWR | O_NOCTTY);
+                        if (master < 0)
+                            return raise_os_error(errno);
+                        char const* name = nullptr;
+                        if (::grantpt(master) != 0 || ::unlockpt(master) != 0 || (name = ::ptsname(master)) == nullptr)
+                        {
+                            int const e = errno;
+                            ::close(master);
+                            return raise_os_error(e);
+                        }
+                        int const slave = ::open(name, O_RDWR | O_NOCTTY);
+                        if (slave < 0)
+                        {
+                            int const e = errno;
+                            ::close(master);
+                            return raise_os_error(e);
+                        }
+                        auto const pid = fork_process();
+                        if (pid < 0)
+                        {
+                            int const e = errno;
+                            ::close(master);
+                            ::close(slave);
+                            return failed() ? nullptr : raise_os_error(e);
+                        }
+                        if (pid == 0)
+                        {
+                            ::close(master);
+                            if (!login_terminal(slave))
+                                ::_exit(1);
+                            return make_tuple({ make_int(0), make_int(-1) });
+                        }
+                        ::close(slave);
+                        return make_tuple({ make_int(pid), make_int(master) });
+                    } },
+                { "wait3", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long options = 0;
+                        if (!parse_arguments("wait3", aArgs, aKwargs, { "options" }, 1u, 0u, a) || !int_argument(a[0], options, "wait3"))
+                            return nullptr;
+                        return wait_with_usage(-1, static_cast<int>(options), false);
+                    } },
+                { "wait4", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0, options = 0;
+                        if (!parse_arguments("wait4", aArgs, aKwargs, { "pid", "options" }, 2u, 0u, a) || !int_argument(a[0], pid, "wait4") ||
+                            !int_argument(a[1], options, "wait4"))
+                            return nullptr;
+                        return wait_with_usage(static_cast<pid_t>(pid), static_cast<int>(options), true);
+                    } },
+                { "waitid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long idtype = 0, id = 0, options = 0;
+                        if (!parse_arguments("waitid", aArgs, aKwargs, { "idtype", "id", "options" }, 3u, 3u, a) || !int_argument(a[0], idtype, "waitid") ||
+                            !int_argument(a[1], id, "waitid") || !int_argument(a[2], options, "waitid"))
+                            return nullptr;
+                        siginfo_t info{};
+                        int r = 0, e = 0;
+                        do
+                        {
+                            gil_release();
+                            r = ::waitid(static_cast<idtype_t>(idtype), static_cast<id_t>(id), &info, static_cast<int>(options));
+                            e = errno;
+                            gil_acquire();
+                        } while (r < 0 && e == EINTR && check_signals());
+                        if (r < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        // (no child in a waitable state (WNOHANG): None)
+                        if (info.si_pid == 0)
+                            return new_reference(none());
+                        auto const& t = structseq_type("posix.waitid_result", { "si_pid", "si_uid", "si_signo", "si_status", "si_code" }, 5u);
+                        return make_structseq(t, { make_int(info.si_pid), make_int(static_cast<long long>(info.si_uid)), make_int(info.si_signo),
+                            make_int(info.si_status), make_int(info.si_code) });
+                    } },
+#if defined(__linux__)
+                { "readv", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("readv", aArgs, aKwargs, { "fd", "buffers" }, 2u, 2u, a) || !int_argument(a[0], fd, "readv"))
+                            return nullptr;
+                        std::vector<ref> held;
+                        std::vector<iovec> vectors;
+                        if (!io_vectors(a[1], true, "readv", held, vectors))
+                            return nullptr;
+                        return vector_io(static_cast<int>(fd), vectors, -1, 0, false);
+                    } },
+                { "preadv", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0, offset = 0, flags = 0;
+                        if (!parse_arguments("preadv", aArgs, aKwargs, { "fd", "buffers", "offset", "flags" }, 3u, 4u, a) || !int_argument(a[0], fd, "preadv") ||
+                            !int_argument(a[2], offset, "preadv") || (a[3] != nullptr && !int_argument(a[3], flags, "preadv")))
+                            return nullptr;
+                        std::vector<ref> held;
+                        std::vector<iovec> vectors;
+                        if (!io_vectors(a[1], true, "preadv", held, vectors))
+                            return nullptr;
+                        return vector_io(static_cast<int>(fd), vectors, offset, static_cast<int>(flags), false);
+                    } },
+                { "pwritev", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0, offset = 0, flags = 0;
+                        if (!parse_arguments("pwritev", aArgs, aKwargs, { "fd", "buffers", "offset", "flags" }, 3u, 4u, a) || !int_argument(a[0], fd, "pwritev") ||
+                            !int_argument(a[2], offset, "pwritev") || (a[3] != nullptr && !int_argument(a[3], flags, "pwritev")))
+                            return nullptr;
+                        std::vector<ref> held;
+                        std::vector<iovec> vectors;
+                        if (!io_vectors(a[1], false, "pwritev", held, vectors))
+                            return nullptr;
+                        return vector_io(static_cast<int>(fd), vectors, offset, static_cast<int>(flags), true);
+                    } },
+                { "timerfd_create", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long clock = 0, flags = 0;
+                        if (!parse_arguments("timerfd_create", aArgs, aKwargs, { "clockid", "flags" }, 1u, 1u, a) || !int_argument(a[0], clock, "timerfd_create") ||
+                            (a[1] != nullptr && !int_argument(a[1], flags, "timerfd_create")))
+                            return nullptr;
+                        if (aArgs.size() > 1u)
+                            return error("TypeError", "timerfd_create() takes exactly 1 positional argument (" + std::to_string(aArgs.size()) + " given)");
+                        auto const fd = ::timerfd_create(static_cast<int>(clock), static_cast<int>(flags));
+                        return fd < 0 ? raise_os_error(errno) : make_int(fd);
+                    } },
+                { "timerfd_settime", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return timerfd_set(aArgs, aKwargs, false); } },
+                { "timerfd_settime_ns", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return timerfd_set(aArgs, aKwargs, true); } },
+                { "timerfd_gettime", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return timerfd_get(aArgs, aKwargs, false); } },
+                { "timerfd_gettime_ns", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return timerfd_get(aArgs, aKwargs, true); } },
+                { "pipe2", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long flags = 0;
+                        if (!parse_arguments("pipe2", aArgs, aKwargs, { "flags" }, 1u, 1u, a) || !int_argument(a[0], flags, "pipe2"))
+                            return nullptr;
+                        int fds[2] = {};
+                        if (::pipe2(fds, static_cast<int>(flags)) != 0)
+                            return raise_os_error(errno);
+                        return make_tuple({ make_int(fds[0]), make_int(fds[1]) });
+                    } },
+                { "posix_fadvise", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0, offset = 0, length = 0, advice = 0;
+                        if (!parse_arguments("posix_fadvise", aArgs, aKwargs, { "fd", "offset", "len", "advice" }, 4u, 4u, a) || !int_argument(a[0], fd, "posix_fadvise") ||
+                            !int_argument(a[1], offset, "posix_fadvise") || !int_argument(a[2], length, "posix_fadvise") || !int_argument(a[3], advice, "posix_fadvise"))
+                            return nullptr;
+                        gil_release();
+                        auto const r = ::posix_fadvise(static_cast<int>(fd), static_cast<off_t>(offset), static_cast<off_t>(length), static_cast<int>(advice));
+                        gil_acquire();
+                        return r != 0 ? raise_os_error(r) : new_reference(none());
+                    } },
+                { "getrandom", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long size = 0, flags = 0;
+                        if (!parse_arguments("getrandom", aArgs, aKwargs, { "size", "flags" }, 1u, 0u, a) || !int_argument(a[0], size, "getrandom") ||
+                            (a[1] != nullptr && !int_argument(a[1], flags, "getrandom")))
+                            return nullptr;
+                        if (size < 0)
+                            return raise_os_error(EINVAL);
+                        std::string buffer(static_cast<std::size_t>(size), '\0');
+                        ssize_t n = 0;
+                        int e = 0;
+                        do
+                        {
+                            gil_release();
+                            n = static_cast<ssize_t>(::syscall(SYS_getrandom, buffer.data(), buffer.size(), static_cast<unsigned>(flags)));
+                            e = errno;
+                            gil_acquire();
+                        } while (n < 0 && e == EINTR && check_signals());
+                        if (n < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        buffer.resize(static_cast<std::size_t>(n));
+                        return make_bytes(std::move(buffer));
+                    } },
+                { "eventfd", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long initval = 0, flags = EFD_CLOEXEC;
+                        if (!parse_arguments("eventfd", aArgs, aKwargs, { "initval", "flags" }, 1u, 0u, a) || !int_argument(a[0], initval, "eventfd") ||
+                            (a[1] != nullptr && !int_argument(a[1], flags, "eventfd")))
+                            return nullptr;
+                        if (initval < 0 || initval > static_cast<long long>(UINT_MAX))
+                            return error("OverflowError", "Python int too large to convert to C unsigned long");
+                        auto const fd = ::eventfd(static_cast<unsigned>(initval), static_cast<int>(flags));
+                        return fd < 0 ? raise_os_error(errno) : make_int(fd);
+                    } },
+                { "eventfd_read", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("eventfd_read", aArgs, aKwargs, { "fd" }, 1u, 0u, a) || !fd_or_fileno(a[0], fd, "eventfd_read"))
+                            return nullptr;
+                        eventfd_t value = 0;
+                        int r = 0, e = 0;
+                        do
+                        {
+                            gil_release();
+                            r = ::eventfd_read(static_cast<int>(fd), &value);
+                            e = errno;
+                            gil_acquire();
+                        } while (r < 0 && e == EINTR && check_signals());
+                        if (r < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        return make_unsigned(static_cast<std::uint64_t>(value));
+                    } },
+                { "eventfd_write", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long fd = 0;
+                        if (!parse_arguments("eventfd_write", aArgs, aKwargs, { "fd", "value" }, 2u, 0u, a) || !fd_or_fileno(a[0], fd, "eventfd_write"))
+                            return nullptr;
+                        std::uint64_t value = 0;
+                        if (!unsigned_argument(a[1], value))
+                            return nullptr;
+                        int r = 0, e = 0;
+                        do
+                        {
+                            gil_release();
+                            r = ::eventfd_write(static_cast<int>(fd), static_cast<eventfd_t>(value));
+                            e = errno;
+                            gil_acquire();
+                        } while (r < 0 && e == EINTR && check_signals());
+                        if (r < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        return new_reference(none());
+                    } },
+                { "memfd_create", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string name;
+                        long long flags = MFD_CLOEXEC;
+                        if (!parse_arguments("memfd_create", aArgs, aKwargs, { "name", "flags" }, 1u, 0u, a) || !path_argument(a[0], name, "memfd_create", "name") ||
+                            (a[1] != nullptr && !int_argument(a[1], flags, "memfd_create")))
+                            return nullptr;
+                        auto const fd = static_cast<int>(::syscall(SYS_memfd_create, name.c_str(), static_cast<unsigned>(flags)));
+                        return fd < 0 ? raise_os_error(errno) : make_int(fd);
+                    } },
+                { "sendfile", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long out = 0, in = 0, count = 0, offset = 0;
+                        if (!parse_arguments("sendfile", aArgs, aKwargs, { "out_fd", "in_fd", "offset", "count" }, 4u, 0u, a) || !int_argument(a[0], out, "sendfile") ||
+                            !int_argument(a[1], in, "sendfile") || !int_argument(a[3], count, "sendfile"))
+                            return nullptr;
+                        // (offset None: from the file's position)
+                        bool const atPosition = kind_of(a[2]) == NEOS_PY_NONE;
+                        if (!atPosition && !int_argument(a[2], offset, "sendfile"))
+                            return nullptr;
+                        if (count < 0)
+                            return error("ValueError", "count cannot be negative");
+                        off_t position = static_cast<off_t>(offset);
+                        ssize_t n = 0;
+                        int e = 0;
+                        do
+                        {
+                            gil_release();
+                            n = ::sendfile(static_cast<int>(out), static_cast<int>(in), atPosition ? nullptr : &position, static_cast<std::size_t>(count));
+                            e = errno;
+                            gil_acquire();
+                        } while (n < 0 && e == EINTR && check_signals());
+                        if (n < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        return make_int(static_cast<long long>(n));
+                    } },
+                { "copy_file_range", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long source = 0, destination = 0, count = 0, sourceOffset = 0, destinationOffset = 0;
+                        if (!parse_arguments("copy_file_range", aArgs, aKwargs, { "src", "dst", "count", "offset_src", "offset_dst" }, 3u, 0u, a) ||
+                            !int_argument(a[0], source, "copy_file_range") || !int_argument(a[1], destination, "copy_file_range") || !int_argument(a[2], count, "copy_file_range"))
+                            return nullptr;
+                        if (count < 0)
+                            return error("ValueError", "negative count");
+                        bool const hasSource = a[3] != nullptr && kind_of(a[3]) != NEOS_PY_NONE, hasDestination = a[4] != nullptr && kind_of(a[4]) != NEOS_PY_NONE;
+                        if ((hasSource && !int_argument(a[3], sourceOffset, "copy_file_range")) || (hasDestination && !int_argument(a[4], destinationOffset, "copy_file_range")))
+                            return nullptr;
+                        loff_t s = static_cast<loff_t>(sourceOffset), d = static_cast<loff_t>(destinationOffset);
+                        ssize_t n = 0;
+                        int e = 0;
+                        do
+                        {
+                            gil_release();
+                            n = static_cast<ssize_t>(::syscall(SYS_copy_file_range, static_cast<int>(source), hasSource ? &s : nullptr, static_cast<int>(destination),
+                                hasDestination ? &d : nullptr, static_cast<std::size_t>(count), 0u));
+                            e = errno;
+                            gil_acquire();
+                        } while (n < 0 && e == EINTR && check_signals());
+                        if (n < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        return make_int(static_cast<long long>(n));
+                    } },
+                { "splice", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long source = 0, destination = 0, count = 0, sourceOffset = 0, destinationOffset = 0, flags = 0;
+                        if (!parse_arguments("splice", aArgs, aKwargs, { "src", "dst", "count", "offset_src", "offset_dst", "flags" }, 3u, 0u, a) ||
+                            !int_argument(a[0], source, "splice") || !int_argument(a[1], destination, "splice") || !int_argument(a[2], count, "splice") ||
+                            (a[5] != nullptr && !int_argument(a[5], flags, "splice")))
+                            return nullptr;
+                        if (count < 0)
+                            return error("ValueError", "negative count");
+                        bool const hasSource = a[3] != nullptr && kind_of(a[3]) != NEOS_PY_NONE, hasDestination = a[4] != nullptr && kind_of(a[4]) != NEOS_PY_NONE;
+                        if ((hasSource && !int_argument(a[3], sourceOffset, "splice")) || (hasDestination && !int_argument(a[4], destinationOffset, "splice")))
+                            return nullptr;
+                        loff_t s = static_cast<loff_t>(sourceOffset), d = static_cast<loff_t>(destinationOffset);
+                        ssize_t n = 0;
+                        int e = 0;
+                        do
+                        {
+                            gil_release();
+                            n = ::splice(static_cast<int>(source), hasSource ? &s : nullptr, static_cast<int>(destination), hasDestination ? &d : nullptr,
+                                static_cast<std::size_t>(count), static_cast<unsigned>(flags));
+                            e = errno;
+                            gil_acquire();
+                        } while (n < 0 && e == EINTR && check_signals());
+                        if (n < 0)
+                            return failed() ? nullptr : raise_os_error(e);
+                        return make_int(static_cast<long long>(n));
+                    } },
+                { "unshare", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.unshare"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        long long flags = 0;
+                        if (!parse_arguments("unshare", aArgs, aKwargs, { "flags" }, 1u, 0u, a) || !int_argument(a[0], flags, "unshare"))
+                            return nullptr;
+                        if (::unshare(static_cast<int>(flags)) != 0)
+                            return raise_os_error(errno);
+                        return new_reference(none());
+                    } },
+                { "setns", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.setns"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        long long fd = 0, nstype = 0;
+                        if (!parse_arguments("setns", aArgs, aKwargs, { "fd", "nstype" }, 1u, 0u, a) || !fd_or_fileno(a[0], fd, "setns") ||
+                            (a[1] != nullptr && !int_argument(a[1], nstype, "setns")))
+                            return nullptr;
+                        if (::setns(static_cast<int>(fd), static_cast<int>(nstype)) != 0)
+                            return raise_os_error(errno);
+                        return new_reference(none());
+                    } },
+                { "pidfd_open", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0, flags = 0;
+                        if (!parse_arguments("pidfd_open", aArgs, aKwargs, { "pid", "flags" }, 1u, 0u, a) || !int_argument(a[0], pid, "pidfd_open") ||
+                            (a[1] != nullptr && !int_argument(a[1], flags, "pidfd_open")))
+                            return nullptr;
+                        auto const fd = static_cast<int>(::syscall(SYS_pidfd_open, static_cast<pid_t>(pid), static_cast<unsigned>(flags)));
+                        return fd < 0 ? raise_os_error(errno) : make_int(fd);
+                    } },
+                { "getxattr", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!positional_at_most("getxattr", aArgs, 2u, true) || !parse_arguments("getxattr", aArgs, aKwargs, { "path", "attribute", "follow_symlinks" }, 2u, 0u, a))
+                            return nullptr;
+                        xattr_target target;
+                        std::string attribute;
+                        if (!xattr_target_of(a[0], a[2], "getxattr", target) || !path_argument(a[1], attribute, "getxattr", "attribute"))
+                            return nullptr;
+                        // (the value: its size found first, then read (a race that grows it: again))
+                        for (int attempt = 0; attempt < 8; ++attempt)
+                        {
+                            auto const size = target.get(attribute, nullptr, 0u);
+                            if (size < 0)
+                                return raise_os_error(errno, a[0]);
+                            std::string value(static_cast<std::size_t>(size), '\0');
+                            auto const n = target.get(attribute, value.data(), value.size());
+                            if (n >= 0)
+                            {
+                                value.resize(static_cast<std::size_t>(n));
+                                return make_bytes(std::move(value));
+                            }
+                            if (errno != ERANGE)
+                                return raise_os_error(errno, a[0]);
+                        }
+                        return raise_os_error(ERANGE, a[0]);
+                    } },
+                { "setxattr", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.setxattr"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        if (!positional_at_most("setxattr", aArgs, 4u, false) || !parse_arguments("setxattr", aArgs, aKwargs, { "path", "attribute", "value", "flags", "follow_symlinks" }, 3u, 0u, a))
+                            return nullptr;
+                        xattr_target target;
+                        std::string attribute;
+                        std::string_view value;
+                        long long flags = 0;
+                        if (!xattr_target_of(a[0], a[4], "setxattr", target) || !path_argument(a[1], attribute, "setxattr", "attribute") ||
+                            (a[3] != nullptr && !int_argument(a[3], flags, "setxattr")))
+                            return nullptr;
+                        if (!bytes_like(a[2], value))
+                            return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(a[2]) + "'");
+                        if (target.set(attribute, value, static_cast<int>(flags)) != 0)
+                            return raise_os_error(errno, a[0]);
+                        return new_reference(none());
+                    } },
+                { "removexattr", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.removexattr"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        if (!positional_at_most("removexattr", aArgs, 2u, true) || !parse_arguments("removexattr", aArgs, aKwargs, { "path", "attribute", "follow_symlinks" }, 2u, 0u, a))
+                            return nullptr;
+                        xattr_target target;
+                        std::string attribute;
+                        if (!xattr_target_of(a[0], a[2], "removexattr", target) || !path_argument(a[1], attribute, "removexattr", "attribute"))
+                            return nullptr;
+                        if (target.remove(attribute) != 0)
+                            return raise_os_error(errno, a[0]);
+                        return new_reference(none());
+                    } },
+                { "listxattr", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!positional_at_most("listxattr", aArgs, 1u, false) || !parse_arguments("listxattr", aArgs, aKwargs, { "path", "follow_symlinks" }, 0u, 0u, a))
+                            return nullptr;
+                        // (path None: the current directory)
+                        ref const current{ make_str(".") };
+                        object* const path = a[0] != nullptr && kind_of(a[0]) != NEOS_PY_NONE ? a[0] : current.get();
+                        xattr_target target;
+                        if (!xattr_target_of(path, a[1], "listxattr", target))
+                            return nullptr;
+                        for (int attempt = 0; attempt < 8; ++attempt)
+                        {
+                            auto const size = target.list(nullptr, 0u);
+                            if (size < 0)
+                                return raise_os_error(errno, path);
+                            std::string names(static_cast<std::size_t>(size), '\0');
+                            auto const n = target.list(names.data(), names.size());
+                            if (n >= 0)
+                            {
+                                names.resize(static_cast<std::size_t>(n));
+                                std::vector<object*> items;
+                                for (std::size_t i = 0u; i < names.size();)
+                                {
+                                    auto const end = names.find('\0', i);
+                                    auto const name = names.substr(i, end == std::string::npos ? std::string::npos : end - i);
+                                    if (!name.empty())
+                                        items.push_back(decode_filename(name));
+                                    if (end == std::string::npos)
+                                        break;
+                                    i = end + 1u;
+                                }
+                                return make_list(std::move(items));
+                            }
+                            if (errno != ERANGE)
+                                return raise_os_error(errno, path);
+                        }
+                        return raise_os_error(ERANGE, path);
+                    } },
+
+                { "sched_getscheduler", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        if (!parse_arguments("sched_getscheduler", aArgs, aKwargs, { "pid" }, 1u, 1u, a) || !int_argument(a[0], pid, "sched_getscheduler"))
+                            return nullptr;
+                        auto const r = ::sched_getscheduler(static_cast<pid_t>(pid));
+                        return r < 0 ? raise_os_error(errno) : make_int(r);
+                    } },
+                { "sched_setscheduler", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        long long policy = 0;
+                        struct sched_param param{};
+                        if (!parse_arguments("sched_setscheduler", aArgs, aKwargs, { "pid", "policy", "param" }, 3u, 3u, a) || !int_argument(a[0], pid, "sched_setscheduler") ||
+                            !int_argument(a[1], policy, "sched_setscheduler") || !sched_param_of(a[2], param))
+                            return nullptr;
+                        return ::sched_setscheduler(static_cast<pid_t>(pid), static_cast<int>(policy), &param) != 0 ? raise_os_error(errno) : (retain(none()), none());
+                    } },
+                { "sched_getparam", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        if (!parse_arguments("sched_getparam", aArgs, aKwargs, { "pid" }, 1u, 1u, a) || !int_argument(a[0], pid, "sched_getparam"))
+                            return nullptr;
+                        struct sched_param param{};
+                        if (::sched_getparam(static_cast<pid_t>(pid), &param) != 0)
+                            return raise_os_error(errno);
+                        return make_structseq(sched_param_type(), { make_int(param.sched_priority) });
+                    } },
+                { "sched_setparam", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        struct sched_param param{};
+                        if (!parse_arguments("sched_setparam", aArgs, aKwargs, { "pid", "param" }, 2u, 2u, a) || !int_argument(a[0], pid, "sched_setparam") ||
+                            !sched_param_of(a[1], param))
+                            return nullptr;
+                        return ::sched_setparam(static_cast<pid_t>(pid), &param) != 0 ? raise_os_error(errno) : (retain(none()), none());
+                    } },
+                { "sched_rr_get_interval", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        if (!parse_arguments("sched_rr_get_interval", aArgs, aKwargs, { "pid" }, 1u, 1u, a) || !int_argument(a[0], pid, "sched_rr_get_interval"))
+                            return nullptr;
+                        struct timespec interval{};
+                        if (::sched_rr_get_interval(static_cast<pid_t>(pid), &interval) != 0)
+                            return raise_os_error(errno);
+                        return make_float(static_cast<double>(interval.tv_sec) + 1e-9 * static_cast<double>(interval.tv_nsec));
+                    } },
+                { "sched_getaffinity", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        if (!parse_arguments("sched_getaffinity", aArgs, aKwargs, { "pid" }, 1u, 1u, a) || !int_argument(a[0], pid, "sched_getaffinity"))
+                            return nullptr;
+                        // (a set big enough for the CPUs: bigger until the kernel's is no bigger (EINVAL: too small))
+                        for (int count = std::max(16, static_cast<int>(::sysconf(_SC_NPROCESSORS_CONF)));; count *= 2)
+                        {
+                            auto const set = CPU_ALLOC(count);
+                            if (set == nullptr)
+                                return error("MemoryError", "");
+                            auto const size = CPU_ALLOC_SIZE(count);
+                            if (::sched_getaffinity(static_cast<pid_t>(pid), size, set) != 0)
+                            {
+                                auto const e = errno;
+                                CPU_FREE(set);
+                                if (e == EINVAL && count < (1 << 24))
+                                    continue;
+                                return raise_os_error(e);
+                            }
+                            std::vector<object*> cpus;
+                            for (int cpu = 0; cpu < count; ++cpu)
+                                if (CPU_ISSET_S(cpu, size, set))
+                                    cpus.push_back(make_int(cpu));
+                            CPU_FREE(set);
+                            ref const list{ make_list(std::move(cpus)) };
+                            return b_set({ list.get() }, nullptr);
+                        }
+                    } },
+                { "sched_setaffinity", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        if (!parse_arguments("sched_setaffinity", aArgs, aKwargs, { "pid", "mask" }, 2u, 2u, a) || !int_argument(a[0], pid, "sched_setaffinity"))
+                            return nullptr;
+                        // (the mask: an iterable of CPU numbers)
+                        ref const it{ iter(a[1]) };
+                        if (!it)
+                            return nullptr;
+                        std::vector<int> cpus;
+                        int highest = -1;
+                        for (;;)
+                        {
+                            ref const item{ next(it.get()) };
+                            if (!item)
+                            {
+                                if (failed())
+                                    return nullptr;
+                                break;
+                            }
+                            auto const k = kind_of(item.get());
+                            if (k != NEOS_PY_INT && k != NEOS_PY_BOOL && !has_special_method(item.get(), "__index__"))
+                            {
+                                ref const type{ class_of(item.get()) };
+                                std::string text;
+                                if (!repr_of(type.get(), text))
+                                    return nullptr;
+                                return error("TypeError", "expected an iterator of ints, but iterator yielded " + text);
+                            }
+                            long long cpu = 0;
+                            if (!to_index(item.get(), cpu))
+                            {
+                                // (an int that a C long cannot hold)
+                                clear_error();
+                                return error("OverflowError", "Python int too large to convert to C long");
+                            }
+                            if (cpu < 0)
+                                return error("ValueError", "negative CPU number");
+                            if (cpu > std::numeric_limits<int>::max() - 1)
+                                return error("OverflowError", "CPU number too large");
+                            cpus.push_back(static_cast<int>(cpu));
+                            highest = std::max(highest, static_cast<int>(cpu));
+                        }
+                        auto const count = highest + 1;
+                        auto const set = CPU_ALLOC(std::max(count, 1));
+                        if (set == nullptr)
+                            return error("MemoryError", "");
+                        auto const size = CPU_ALLOC_SIZE(std::max(count, 1));
+                        CPU_ZERO_S(size, set);
+                        for (auto cpu : cpus)
+                            CPU_SET_S(cpu, size, set);
+                        auto const r = ::sched_setaffinity(static_cast<pid_t>(pid), size, set);
+                        auto const e = errno;
+                        CPU_FREE(set);
+                        return r != 0 ? raise_os_error(e) : (retain(none()), none());
+                    } },
+#endif
 #endif
             };
 
@@ -2961,14 +6028,370 @@ namespace neos::python_runtime
 #else
                     { "O_NONBLOCK", O_NONBLOCK }, { "O_NDELAY", O_NDELAY }, { "O_SYNC", O_SYNC }, { "O_DSYNC", O_DSYNC }, { "O_NOCTTY", O_NOCTTY },
                     { "O_CLOEXEC", O_CLOEXEC }, { "O_DIRECTORY", O_DIRECTORY }, { "O_NOFOLLOW", O_NOFOLLOW }, { "O_ACCMODE", O_ACCMODE },
-                    { "WNOHANG", WNOHANG }, { "WUNTRACED", WUNTRACED }, { "EX_OK", 0 }, { "F_LOCK", F_LOCK }, { "F_TLOCK", F_TLOCK }, { "F_ULOCK", F_ULOCK }, { "F_TEST", F_TEST },
+                    { "WNOHANG", WNOHANG }, { "WUNTRACED", WUNTRACED }, { "EX_OK", 0 },
+                    { "POSIX_SPAWN_OPEN", POSIX_SPAWN_OPEN_TAG }, { "POSIX_SPAWN_CLOSE", POSIX_SPAWN_CLOSE_TAG }, { "POSIX_SPAWN_DUP2", POSIX_SPAWN_DUP2_TAG }, { "F_LOCK", F_LOCK }, { "F_TLOCK", F_TLOCK }, { "F_ULOCK", F_ULOCK }, { "F_TEST", F_TEST },
                     { "PRIO_PROCESS", 0 }, { "PRIO_PGRP", 1 }, { "PRIO_USER", 2 },
+                    { "SCHED_OTHER", SCHED_OTHER }, { "SCHED_FIFO", SCHED_FIFO }, { "SCHED_RR", SCHED_RR },
+#if defined(__linux__)
+                    { "SCHED_BATCH", SCHED_BATCH }, { "SCHED_IDLE", SCHED_IDLE }, { "SCHED_RESET_ON_FORK", SCHED_RESET_ON_FORK },
+#endif
+                    // (the constants that the platform defines (as Modules/posixmodule.c's all_ins))
+#ifdef CLD_CONTINUED
+                    { "CLD_CONTINUED", CLD_CONTINUED },
+#endif
+#ifdef CLD_DUMPED
+                    { "CLD_DUMPED", CLD_DUMPED },
+#endif
+#ifdef CLD_EXITED
+                    { "CLD_EXITED", CLD_EXITED },
+#endif
+#ifdef CLD_KILLED
+                    { "CLD_KILLED", CLD_KILLED },
+#endif
+#ifdef CLD_STOPPED
+                    { "CLD_STOPPED", CLD_STOPPED },
+#endif
+#ifdef CLD_TRAPPED
+                    { "CLD_TRAPPED", CLD_TRAPPED },
+#endif
+#ifdef CLONE_FILES
+                    { "CLONE_FILES", CLONE_FILES },
+#endif
+#ifdef CLONE_FS
+                    { "CLONE_FS", CLONE_FS },
+#endif
+#ifdef CLONE_NEWIPC
+                    { "CLONE_NEWIPC", CLONE_NEWIPC },
+#endif
+#ifdef CLONE_NEWNET
+                    { "CLONE_NEWNET", CLONE_NEWNET },
+#endif
+#ifdef CLONE_NEWNS
+                    { "CLONE_NEWNS", CLONE_NEWNS },
+#endif
+#ifdef CLONE_NEWPID
+                    { "CLONE_NEWPID", CLONE_NEWPID },
+#endif
+#ifdef CLONE_NEWUSER
+                    { "CLONE_NEWUSER", CLONE_NEWUSER },
+#endif
+#ifdef CLONE_NEWUTS
+                    { "CLONE_NEWUTS", CLONE_NEWUTS },
+#endif
+#ifdef CLONE_SIGHAND
+                    { "CLONE_SIGHAND", CLONE_SIGHAND },
+#endif
+#ifdef CLONE_SYSVSEM
+                    { "CLONE_SYSVSEM", CLONE_SYSVSEM },
+#endif
+#ifdef CLONE_THREAD
+                    { "CLONE_THREAD", CLONE_THREAD },
+#endif
+#ifdef CLONE_VM
+                    { "CLONE_VM", CLONE_VM },
+#endif
+#ifdef EFD_CLOEXEC
+                    { "EFD_CLOEXEC", EFD_CLOEXEC },
+#endif
+#ifdef EFD_NONBLOCK
+                    { "EFD_NONBLOCK", EFD_NONBLOCK },
+#endif
+#ifdef EFD_SEMAPHORE
+                    { "EFD_SEMAPHORE", EFD_SEMAPHORE },
+#endif
+#ifdef EX_CANTCREAT
+                    { "EX_CANTCREAT", EX_CANTCREAT },
+#endif
+#ifdef EX_CONFIG
+                    { "EX_CONFIG", EX_CONFIG },
+#endif
+#ifdef EX_DATAERR
+                    { "EX_DATAERR", EX_DATAERR },
+#endif
+#ifdef EX_IOERR
+                    { "EX_IOERR", EX_IOERR },
+#endif
+#ifdef EX_NOHOST
+                    { "EX_NOHOST", EX_NOHOST },
+#endif
+#ifdef EX_NOINPUT
+                    { "EX_NOINPUT", EX_NOINPUT },
+#endif
+#ifdef EX_NOPERM
+                    { "EX_NOPERM", EX_NOPERM },
+#endif
+#ifdef EX_NOUSER
+                    { "EX_NOUSER", EX_NOUSER },
+#endif
+#ifdef EX_OSERR
+                    { "EX_OSERR", EX_OSERR },
+#endif
+#ifdef EX_OSFILE
+                    { "EX_OSFILE", EX_OSFILE },
+#endif
+#ifdef EX_PROTOCOL
+                    { "EX_PROTOCOL", EX_PROTOCOL },
+#endif
+#ifdef EX_SOFTWARE
+                    { "EX_SOFTWARE", EX_SOFTWARE },
+#endif
+#ifdef EX_TEMPFAIL
+                    { "EX_TEMPFAIL", EX_TEMPFAIL },
+#endif
+#ifdef EX_UNAVAILABLE
+                    { "EX_UNAVAILABLE", EX_UNAVAILABLE },
+#endif
+#ifdef EX_USAGE
+                    { "EX_USAGE", EX_USAGE },
+#endif
+#ifdef GRND_NONBLOCK
+                    { "GRND_NONBLOCK", GRND_NONBLOCK },
+#endif
+#ifdef GRND_RANDOM
+                    { "GRND_RANDOM", GRND_RANDOM },
+#endif
+#ifdef MFD_ALLOW_SEALING
+                    { "MFD_ALLOW_SEALING", MFD_ALLOW_SEALING },
+#endif
+#ifdef MFD_CLOEXEC
+                    { "MFD_CLOEXEC", MFD_CLOEXEC },
+#endif
+#ifdef MFD_HUGETLB
+                    { "MFD_HUGETLB", MFD_HUGETLB },
+#endif
+#ifdef MFD_HUGE_16GB
+                    { "MFD_HUGE_16GB", MFD_HUGE_16GB },
+#endif
+#ifdef MFD_HUGE_16MB
+                    { "MFD_HUGE_16MB", MFD_HUGE_16MB },
+#endif
+#ifdef MFD_HUGE_1GB
+                    { "MFD_HUGE_1GB", MFD_HUGE_1GB },
+#endif
+#ifdef MFD_HUGE_1MB
+                    { "MFD_HUGE_1MB", MFD_HUGE_1MB },
+#endif
+#ifdef MFD_HUGE_256MB
+                    { "MFD_HUGE_256MB", MFD_HUGE_256MB },
+#endif
+#ifdef MFD_HUGE_2GB
+                    { "MFD_HUGE_2GB", MFD_HUGE_2GB },
+#endif
+#ifdef MFD_HUGE_2MB
+                    { "MFD_HUGE_2MB", MFD_HUGE_2MB },
+#endif
+#ifdef MFD_HUGE_32MB
+                    { "MFD_HUGE_32MB", MFD_HUGE_32MB },
+#endif
+#ifdef MFD_HUGE_512KB
+                    { "MFD_HUGE_512KB", MFD_HUGE_512KB },
+#endif
+#ifdef MFD_HUGE_512MB
+                    { "MFD_HUGE_512MB", MFD_HUGE_512MB },
+#endif
+#ifdef MFD_HUGE_64KB
+                    { "MFD_HUGE_64KB", MFD_HUGE_64KB },
+#endif
+#ifdef MFD_HUGE_8MB
+                    { "MFD_HUGE_8MB", MFD_HUGE_8MB },
+#endif
+#ifdef MFD_HUGE_MASK
+                    { "MFD_HUGE_MASK", MFD_HUGE_MASK },
+#endif
+#ifdef MFD_HUGE_SHIFT
+                    { "MFD_HUGE_SHIFT", MFD_HUGE_SHIFT },
+#endif
+#ifdef NGROUPS_MAX
+                    { "NGROUPS_MAX", NGROUPS_MAX },
+#endif
+#ifdef O_ASYNC
+                    { "O_ASYNC", O_ASYNC },
+#endif
+#ifdef O_DIRECT
+                    { "O_DIRECT", O_DIRECT },
+#endif
+#ifdef O_FSYNC
+                    { "O_FSYNC", O_FSYNC },
+#endif
+#ifdef O_LARGEFILE
+                    { "O_LARGEFILE", O_LARGEFILE },
+#endif
+#ifdef O_NOATIME
+                    { "O_NOATIME", O_NOATIME },
+#endif
+#ifdef O_PATH
+                    { "O_PATH", O_PATH },
+#endif
+#ifdef O_RSYNC
+                    { "O_RSYNC", O_RSYNC },
+#endif
+#ifdef O_TMPFILE
+                    { "O_TMPFILE", O_TMPFILE },
+#endif
+#ifdef POSIX_FADV_DONTNEED
+                    { "POSIX_FADV_DONTNEED", POSIX_FADV_DONTNEED },
+#endif
+#ifdef POSIX_FADV_NOREUSE
+                    { "POSIX_FADV_NOREUSE", POSIX_FADV_NOREUSE },
+#endif
+#ifdef POSIX_FADV_NORMAL
+                    { "POSIX_FADV_NORMAL", POSIX_FADV_NORMAL },
+#endif
+#ifdef POSIX_FADV_RANDOM
+                    { "POSIX_FADV_RANDOM", POSIX_FADV_RANDOM },
+#endif
+#ifdef POSIX_FADV_SEQUENTIAL
+                    { "POSIX_FADV_SEQUENTIAL", POSIX_FADV_SEQUENTIAL },
+#endif
+#ifdef POSIX_FADV_WILLNEED
+                    { "POSIX_FADV_WILLNEED", POSIX_FADV_WILLNEED },
+#endif
+#ifdef RTLD_DEEPBIND
+                    { "RTLD_DEEPBIND", RTLD_DEEPBIND },
+#endif
+#ifdef RTLD_GLOBAL
+                    { "RTLD_GLOBAL", RTLD_GLOBAL },
+#endif
+#ifdef RTLD_LAZY
+                    { "RTLD_LAZY", RTLD_LAZY },
+#endif
+#ifdef RTLD_LOCAL
+                    { "RTLD_LOCAL", RTLD_LOCAL },
+#endif
+#ifdef RTLD_NODELETE
+                    { "RTLD_NODELETE", RTLD_NODELETE },
+#endif
+#ifdef RTLD_NOLOAD
+                    { "RTLD_NOLOAD", RTLD_NOLOAD },
+#endif
+#ifdef RTLD_NOW
+                    { "RTLD_NOW", RTLD_NOW },
+#endif
+#ifdef SEEK_DATA
+                    { "SEEK_DATA", SEEK_DATA },
+#endif
+#ifdef SEEK_HOLE
+                    { "SEEK_HOLE", SEEK_HOLE },
+#endif
+#ifdef SPLICE_F_MORE
+                    { "SPLICE_F_MORE", SPLICE_F_MORE },
+#endif
+#ifdef SPLICE_F_MOVE
+                    { "SPLICE_F_MOVE", SPLICE_F_MOVE },
+#endif
+#ifdef SPLICE_F_NONBLOCK
+                    { "SPLICE_F_NONBLOCK", SPLICE_F_NONBLOCK },
+#endif
+#ifdef ST_APPEND
+                    { "ST_APPEND", ST_APPEND },
+#endif
+#ifdef ST_MANDLOCK
+                    { "ST_MANDLOCK", ST_MANDLOCK },
+#endif
+#ifdef ST_NOATIME
+                    { "ST_NOATIME", ST_NOATIME },
+#endif
+#ifdef ST_NODEV
+                    { "ST_NODEV", ST_NODEV },
+#endif
+#ifdef ST_NODIRATIME
+                    { "ST_NODIRATIME", ST_NODIRATIME },
+#endif
+#ifdef ST_NOEXEC
+                    { "ST_NOEXEC", ST_NOEXEC },
+#endif
+#ifdef ST_NOSUID
+                    { "ST_NOSUID", ST_NOSUID },
+#endif
+#ifdef ST_RDONLY
+                    { "ST_RDONLY", ST_RDONLY },
+#endif
+#ifdef ST_RELATIME
+                    { "ST_RELATIME", ST_RELATIME },
+#endif
+#ifdef ST_SYNCHRONOUS
+                    { "ST_SYNCHRONOUS", ST_SYNCHRONOUS },
+#endif
+#ifdef ST_WRITE
+                    { "ST_WRITE", ST_WRITE },
+#endif
+#ifdef TFD_CLOEXEC
+                    { "TFD_CLOEXEC", TFD_CLOEXEC },
+#endif
+#ifdef TFD_NONBLOCK
+                    { "TFD_NONBLOCK", TFD_NONBLOCK },
+#endif
+#ifdef TFD_TIMER_ABSTIME
+                    { "TFD_TIMER_ABSTIME", TFD_TIMER_ABSTIME },
+#endif
+#ifdef TMP_MAX
+                    { "TMP_MAX", TMP_MAX },
+#endif
+#ifdef WCONTINUED
+                    { "WCONTINUED", WCONTINUED },
+#endif
+#ifdef WEXITED
+                    { "WEXITED", WEXITED },
+#endif
+#ifdef WNOWAIT
+                    { "WNOWAIT", WNOWAIT },
+#endif
+#ifdef WSTOPPED
+                    { "WSTOPPED", WSTOPPED },
+#endif
+#ifdef XATTR_CREATE
+                    { "XATTR_CREATE", XATTR_CREATE },
+#endif
+#ifdef XATTR_REPLACE
+                    { "XATTR_REPLACE", XATTR_REPLACE },
+#endif
+#ifdef XATTR_SIZE_MAX
+                    { "XATTR_SIZE_MAX", XATTR_SIZE_MAX },
+#endif
+#if defined(__linux__)
+                    { "P_ALL", P_ALL }, { "P_PID", P_PID }, { "P_PGID", P_PGID },
+#ifdef P_PIDFD
+                    { "P_PIDFD", P_PIDFD },
+#else
+                    { "P_PIDFD", 3 },
+#endif
+#endif
 #endif
                 };
                 for (auto const& c : constants)
                     aAttributes.emplace_back(c.first, make_int(c.second));
+#if !defined(_WIN32)
+                // (posix.waitid_result)
+                structseq_type("posix.waitid_result", { "si_pid", "si_uid", "si_signo", "si_status", "si_code" }, 5u);
+                aAttributes.emplace_back("waitid_result", type_object_for("waitid_result", "posix.waitid_result"));
+#endif
+#if defined(__linux__)
+                sched_param_type();
+                aAttributes.emplace_back("sched_param", type_object_for("sched_param", "posix.sched_param"));
+#endif
                 for (auto const& f : sPosixFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                // (os.sysconf_names)
+                auto const names = make_dict();
+                for (auto const& [n, v] : sSysconfNames)
+                {
+                    ref const key{ make_str(n) };
+                    ref const value{ make_int(v) };
+                    dict_set(names, key.get(), value.get());
+                }
+                aAttributes.emplace_back("sysconf_names", names);
+                // (os.pathconf_names and os.confstr_names)
+                for (auto const& [attribute, table] : { std::pair{ "pathconf_names", &sPathconfNames }, std::pair{ "confstr_names", &sConfstrNames } })
+                {
+                    auto const d = make_dict();
+                    for (auto const& [n, v] : *table)
+                    {
+                        ref const key{ make_str(n) };
+                        ref const value{ make_int(v) };
+                        dict_set(d, key.get(), value.get());
+                    }
+                    aAttributes.emplace_back(attribute, d);
+                }
             }
 
             bool os_module(std::vector<std::pair<std::string, object*>>& aAttributes)
@@ -2976,7 +6399,8 @@ namespace neos::python_runtime
                 posix_constants(aAttributes);
                 for (auto const& f : sOsFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
-                aAttributes.emplace_back("unlink", make_builtin(sOsFunctions[9]));
+                static builtin_entry const sUnlink{ "unlink", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return remove_path("unlink", aArgs, aKwargs); } };
+                aAttributes.emplace_back("unlink", make_builtin(sUnlink));
                 aAttributes.emplace_back("environ", environment());
                 aAttributes.emplace_back("path", fn_import(sPlatform.windows ? "ntpath" : "posixpath"));
                 // (sys.modules['os.path']: its path module (as os.py sets it))
@@ -3005,6 +6429,64 @@ namespace neos::python_runtime
                 for (auto const& c : { std::pair{ "F_OK", 0 }, { "R_OK", 4 }, { "W_OK", 2 }, { "X_OK", 1 }, { "SEEK_SET", 0 }, { "SEEK_CUR", 1 }, { "SEEK_END", 2 },
                     { "O_RDONLY", 0 }, { "O_WRONLY", 1 }, { "O_RDWR", 2 } })
                     aAttributes.emplace_back(c.first, make_int(c.second));
+                // (os.py's supports_dir_fd, supports_fd, supports_follow_symlinks and supports_effective_ids: the functions (of this module) whose
+                // dir_fd, fd path, follow_symlinks=False and effective_ids arguments are supported (the *at functions on POSIX; none on Windows))
+                auto const functions = [&](std::initializer_list<char const*> aNames) -> object*
+                {
+                    std::vector<object*> items;
+                    for (auto name : aNames)
+                        for (auto const& [n, v] : aAttributes)
+                            if (n == name && v != nullptr)
+                            {
+                                items.push_back((retain(v), v));
+                                break;
+                            }
+                    ref const list{ make_list(std::move(items)) };
+                    return b_set({ list.get() }, nullptr);
+                };
+#if defined(_WIN32)
+                aAttributes.emplace_back("supports_dir_fd", functions({}));
+                aAttributes.emplace_back("supports_follow_symlinks", functions({}));
+                aAttributes.emplace_back("supports_effective_ids", functions({}));
+                aAttributes.emplace_back("supports_bytes_environ", make_bool(false));
+#else
+                aAttributes.emplace_back("supports_dir_fd", functions({ "access", "chmod", "chown", "link", "lstat", "mkdir", "mkfifo", "open", "readlink", "rename",
+                    "rmdir", "stat", "symlink", "unlink", "utime" }));
+                aAttributes.emplace_back("supports_follow_symlinks", functions({ "access", "chown", "link", "stat", "utime" }));
+                aAttributes.emplace_back("supports_effective_ids", functions({ "access" }));
+                aAttributes.emplace_back("supports_bytes_environ", make_bool(true));
+#endif
+#if defined(_WIN32)
+                aAttributes.emplace_back("supports_fd", functions({}));
+#else
+                aAttributes.emplace_back("supports_fd", functions({ "chdir", "chmod", "chown", "execve", "listdir", "pathconf", "scandir", "stat", "statvfs", "truncate", 
+                    "utime" }));
+#endif
+                // (the struct sequences' types; os.stat_result(sequence): its float times that the sequence does not give are its integer 
+                // times (as CPython's statresult_new))
+                set_structseq_constructor(stat_result_type(), [](structseq_descriptor const& aDescriptor, object* aArgs, object* aKwargs) -> object*
+                {
+                    ref result{ structseq_construct(aDescriptor, aArgs, aKwargs) };
+                    if (!result)
+                        return nullptr;
+                    for (std::size_t i = 0u; i < 3u; ++i)
+                        if (auto const f = structseq_field(result.get(), 10u + i); f != nullptr && kind_of(f) == NEOS_PY_NONE)
+                            if (auto const integer = structseq_field(result.get(), 7u + i))
+                                structseq_set_field(result.get(), 10u + i, new_reference(integer));
+                    return result.release_ownership();
+                }, false);
+                aAttributes.emplace_back("stat_result", (stat_result_type(), type_object_for("stat_result", "os.stat_result")));
+                aAttributes.emplace_back("terminal_size", (terminal_size_type(), type_object_for("terminal_size", "os.terminal_size")));
+                aAttributes.emplace_back("times_result", (times_result_type(), type_object_for("times_result", "posix.times_result")));
+#if !defined(_WIN32)
+                aAttributes.emplace_back("uname_result", (uname_result_type(), type_object_for("uname_result", "posix.uname_result")));
+                aAttributes.emplace_back("statvfs_result", (statvfs_result_type(), type_object_for("statvfs_result", "os.statvfs_result")));
+#endif
+                // (os.DirEntry: the type of os.scandir's entries (isinstance; DirEntry[str]: a GenericAlias), which cannot be made directly)
+                aAttributes.emplace_back("DirEntry", context()->type_new(context(), "DirEntry", "posix.DirEntry",
+                    [](neos_py_context*, void*, object*, object*) -> object* { return error("TypeError", "cannot create 'posix.DirEntry' instances"); }, nullptr,
+                    [](neos_py_context*, void*, object* aObject) -> int { return aObject != nullptr && aObject->type == &sDirEntryType.base ? 1 : 0; }));
+                observed_types().try_emplace("posix.DirEntry", &sDirEntryType);
                 return true;
             }
 
@@ -3019,6 +6501,10 @@ namespace neos::python_runtime
                 { "S_ISBLK", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_bool((m & kIFMT) == 0060000) : nullptr; } },
                 { "S_ISFIFO", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_bool((m & kIFMT) == 0010000) : nullptr; } },
                 { "S_ISSOCK", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_bool((m & kIFMT) == 0140000) : nullptr; } },
+                // (doors, event ports and whiteouts (Solaris, BSD): never (as CPython's _stat on other systems))
+                { "S_ISDOOR", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_bool(false) : nullptr; } },
+                { "S_ISPORT", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_bool(false) : nullptr; } },
+                { "S_ISWHT", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_bool(false) : nullptr; } },
                 { "S_IMODE", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_int(m & 07777) : nullptr; } },
                 { "S_IFMT", [](std::vector<object*> const& aArgs, object*) -> object* { long long m = 0; return aArgs.size() == 1u && to_index(aArgs[0], m) ? make_int(m & kIFMT) : nullptr; } },
                 { "filemode", [](std::vector<object*> const& aArgs, object*) -> object*
@@ -3055,6 +6541,33 @@ namespace neos::python_runtime
                     // (the names CPython defines on every platform: S_IREAD, S_IWRITE and S_IEXEC (Windows's), S_ENFMT; Solaris's and BSD's types: 0)
                     { "S_IREAD", 0400 }, { "S_IWRITE", 0200 }, { "S_IEXEC", 0100 }, { "S_ENFMT", 02000 }, { "S_IFDOOR", 0 }, { "S_IFPORT", 0 }, { "S_IFWHT", 0 } })
                     aAttributes.emplace_back(c.first, make_int(c.second));
+                // (Lib/stat.py's names for chflags (BSD's UF_* and SF_*) and Windows's file attributes: on every platform)
+                for (auto const& c : std::initializer_list<std::pair<char const*, long long>>{ { "UF_SETTABLE", 0x0000ffff }, { "UF_NODUMP", 0x00000001 }, 
+                    { "UF_IMMUTABLE", 0x00000002 }, { "UF_APPEND", 0x00000004 }, { "UF_OPAQUE", 0x00000008 }, { "UF_NOUNLINK", 0x00000010 }, { "UF_COMPRESSED", 0x00000020 }, 
+                    { "UF_TRACKED", 0x00000040 }, { "UF_DATAVAULT", 0x00000080 }, { "UF_HIDDEN", 0x00008000 }, { "SF_SETTABLE", 0xffff0000ll }, { "SF_ARCHIVED", 0x00010000 }, 
+                    { "SF_IMMUTABLE", 0x00020000 }, { "SF_APPEND", 0x00040000 }, { "SF_RESTRICTED", 0x00080000 }, { "SF_NOUNLINK", 0x00100000 }, { "SF_SNAPSHOT", 0x00200000 }, 
+                    { "SF_FIRMLINK", 0x00800000 }, { "SF_DATALESS", 0x40000000 }, { "FILE_ATTRIBUTE_ARCHIVE", 32 }, { "FILE_ATTRIBUTE_COMPRESSED", 2048 }, 
+                    { "FILE_ATTRIBUTE_DEVICE", 64 }, { "FILE_ATTRIBUTE_DIRECTORY", 16 }, { "FILE_ATTRIBUTE_ENCRYPTED", 16384 }, { "FILE_ATTRIBUTE_HIDDEN", 2 }, 
+                    { "FILE_ATTRIBUTE_INTEGRITY_STREAM", 32768 }, { "FILE_ATTRIBUTE_NORMAL", 128 }, { "FILE_ATTRIBUTE_NOT_CONTENT_INDEXED", 8192 }, 
+                    { "FILE_ATTRIBUTE_NO_SCRUB_DATA", 131072 }, { "FILE_ATTRIBUTE_OFFLINE", 4096 }, { "FILE_ATTRIBUTE_READONLY", 1 }, { "FILE_ATTRIBUTE_REPARSE_POINT", 1024 }, 
+                    { "FILE_ATTRIBUTE_SPARSE_FILE", 512 }, { "FILE_ATTRIBUTE_SYSTEM", 4 }, { "FILE_ATTRIBUTE_TEMPORARY", 256 }, { "FILE_ATTRIBUTE_VIRTUAL", 65536 } })
+                    aAttributes.emplace_back(c.first, make_int(c.second));
+                // (_filemode_table: filemode's ((bits, character), ...) for each of its ten characters)
+                {
+                    static std::vector<std::vector<std::pair<long long, char const*>>> const sTable = { 
+                        { { 0120000, "l" }, { 0140000, "s" }, { 0100000, "-" }, { 0060000, "b" }, { 0040000, "d" }, { 0020000, "c" }, { 0010000, "p" } },
+                        { { 0400, "r" } }, { { 0200, "w" } }, { { 0100 | 04000, "s" }, { 04000, "S" }, { 0100, "x" } }, { { 040, "r" } }, { { 020, "w" } }, 
+                        { { 010 | 02000, "s" }, { 02000, "S" }, { 010, "x" } }, { { 04, "r" } }, { { 02, "w" } }, { { 01 | 01000, "t" }, { 01000, "T" }, { 01, "x" } } };
+                    std::vector<object*> rows;
+                    for (auto const& row : sTable)
+                    {
+                        std::vector<object*> entries;
+                        for (auto const& [bits, character] : row)
+                            entries.push_back(make_tuple({ make_int(bits), make_str(character) }));
+                        rows.push_back(make_tuple(std::move(entries)));
+                    }
+                    aAttributes.emplace_back("_filemode_table", make_tuple(std::move(rows)));
+                }
                 return true;
             }
 
@@ -4012,12 +7525,24 @@ namespace neos::python_runtime
                 return false;
             }
 
+            // (os.<aName>(args): a builtin function of the module (POSIX's too), or the module's attribute (e.g. fsdecode))
             object* os_call(char const* aName, std::vector<object*> const& aArgs, object* aKwargs = nullptr)
             {
                 for (auto const& f : sOsFunctions)
                     if (std::strcmp(f.name, aName) == 0)
                         return f.function(aArgs, aKwargs);
-                return error("AttributeError", std::string{ "module 'os' has no attribute '" } + aName + "'");
+#if !defined(_WIN32)
+                for (auto const& f : sPosixFunctions)
+                    if (std::strcmp(f.name, aName) == 0)
+                        return f.function(aArgs, aKwargs);
+#endif
+                ref const function{ module_attribute("os", aName) };
+                if (!function)
+                    return nullptr;
+                std::vector<object*> args;
+                for (auto a : aArgs)
+                    args.push_back(new_reference(a));
+                return invoke(function.get(), std::move(args), aKwargs);
             }
 
             object* path_open(object* aSelf, char const* aMode, object* aEncoding, object* aErrors, object* aNewline)
@@ -4641,6 +8166,47 @@ namespace neos::python_runtime
                 return os_call(aName, args, aKwargs);
             }
 
+            // (is_block_device etc. (PathBase's): whether its mode (stat's) is of the kind; False if it does not exist or is a broken symbolic link 
+            // (_ignore_error's errors: ENOENT, ENOTDIR, EBADF and ELOOP))
+            object* path_is_kind(std::vector<object*> const& aArgs, object* aKwargs, char const* aName, long long aKind)
+            {
+                path_self s;
+                std::vector<object*> a;
+                if (!path_self_of(aArgs, s) || !parse_arguments(aName, s.args, aKwargs, {}, 0u, 0u, a))
+                    return nullptr;
+                stat_values st;
+                int e = 0;
+                if (!do_stat(s.text, true, st, e))
+                {
+                    if (e == ENOENT || e == ENOTDIR || e == EBADF || e == ELOOP)
+                        return make_bool(false);
+                    ref const filename{ make_str(s.text) };
+                    return raise_os_error(e, filename.get());
+                }
+                return make_bool((st.mode & kIFMT) == aKind);
+            }
+
+            // (owner and group (Path's): the login name of its uid (pwd.getpwuid) or the name of its gid (grp.getgrgid))
+            object* path_owner(std::vector<object*> const& aArgs, object* aKwargs, bool aGroup)
+            {
+                path_self s;
+                std::vector<object*> a;
+                char const* const name = aGroup ? "group" : "owner";
+                if (!path_self_of(aArgs, s) || !parse_arguments(name, s.args, aKwargs, { "follow_symlinks" }, 0u, 0u, a))
+                    return nullptr;
+                ref const kwargs{ make_dict() };
+                if (a[0] != nullptr)
+                {
+                    ref const key{ make_str("follow_symlinks") };
+                    dict_set(kwargs.get(), key.get(), a[0]);
+                }
+                ref const st{ path_os_call(s, "stat", {}, kwargs.get()) };
+                ref const id{ st ? getattr(st.get(), aGroup ? "st_gid" : "st_uid") : nullptr };
+                ref const lookup{ id ? module_attribute(aGroup ? "grp" : "pwd", aGroup ? "getgrgid" : "getpwuid") : nullptr };
+                ref const entry{ lookup ? invoke(lookup.get(), { new_reference(id.get()) }) : nullptr };
+                return entry ? getattr(entry.get(), aGroup ? "gr_name" : "pw_name") : nullptr;
+            }
+
             builtin_entry const sPathMethods[] =
             {
                 { "cwd", [](std::vector<object*> const& aArgs, object*) -> object*
@@ -4894,9 +8460,107 @@ namespace neos::python_runtime
                             return nullptr;
                         path_self s;
                         std::vector<object*> a;
-                        if (!path_self_of(aArgs, s) || !parse_arguments("chmod", s.args, aKwargs, { "mode", "follow_symlinks" }, 1u, 0u, a))
+                        if (!path_self_of(aArgs, s) || !parse_arguments("chmod", s.args, aKwargs, { "mode", "follow_symlinks" }, 1u, 1u, a))
                             return nullptr;
-                        return path_os_call(s, "chmod", { a[0] });
+                        if (a[1] == nullptr)
+                            return path_os_call(s, "chmod", { a[0] });
+                        ref const kwargs{ make_dict() };
+                        ref const key{ make_str("follow_symlinks") };
+                        dict_set(kwargs.get(), key.get(), a[1]);
+                        return path_os_call(s, "chmod", { a[0] }, kwargs.get());
+                    } },
+                // (Lib/pathlib's lchmod, symlink_to, hardlink_to, readlink, is_block_device, is_char_device, is_fifo, is_socket, owner, group and 
+                // from_uri (CPython 3.13.18's _local.py and _abc.py))
+                { "lchmod", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("pathlib.Path.lchmod"))
+                            return nullptr;
+                        path_self s;
+                        std::vector<object*> a;
+                        if (!path_self_of(aArgs, s) || !parse_arguments("lchmod", s.args, aKwargs, { "mode" }, 1u, 0u, a))
+                            return nullptr;
+                        ref const kwargs{ make_dict() };
+                        ref const key{ make_str("follow_symlinks") };
+                        ref const no{ make_bool(false) };
+                        dict_set(kwargs.get(), key.get(), no.get());
+                        return path_os_call(s, "chmod", { a[0] }, kwargs.get());
+                    } },
+                { "symlink_to", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("pathlib.Path.symlink_to"))
+                            return nullptr;
+                        path_self s;
+                        std::vector<object*> a;
+                        if (!path_self_of(aArgs, s) || !parse_arguments("symlink_to", s.args, aKwargs, { "target", "target_is_directory" }, 1u, 0u, a))
+                            return nullptr;
+                        ref const path{ make_str(s.text) };
+                        ref const directory{ make_bool(a[1] != nullptr && truth(a[1]) == 1) };
+                        return os_call("symlink", { a[0], path.get(), a[1] != nullptr ? a[1] : directory.get() }, nullptr);
+                    } },
+                { "hardlink_to", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("pathlib.Path.hardlink_to"))
+                            return nullptr;
+                        path_self s;
+                        std::vector<object*> a;
+                        if (!path_self_of(aArgs, s) || !parse_arguments("hardlink_to", s.args, aKwargs, { "target" }, 1u, 0u, a))
+                            return nullptr;
+                        ref const path{ make_str(s.text) };
+                        return os_call("link", { a[0], path.get() }, nullptr);
+                    } },
+                { "readlink", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        path_self s;
+                        std::vector<object*> a;
+                        if (!path_self_of(aArgs, s) || !parse_arguments("readlink", s.args, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        ref target{ path_os_call(s, "readlink") };
+                        if (!target)
+                            return nullptr;
+                        return new_path(s.self, { target.release_ownership() });
+                    } },
+                { "is_block_device", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return path_is_kind(aArgs, aKwargs, "is_block_device", 0060000); } },
+                { "is_char_device", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return path_is_kind(aArgs, aKwargs, "is_char_device", 0020000); } },
+                { "is_fifo", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return path_is_kind(aArgs, aKwargs, "is_fifo", 0010000); } },
+                { "is_socket", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return path_is_kind(aArgs, aKwargs, "is_socket", 0140000); } },
+                { "owner", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return path_owner(aArgs, aKwargs, false); } },
+                { "group", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return path_owner(aArgs, aKwargs, true); } },
+                { "from_uri", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (aArgs.empty())
+                            return error("TypeError", "from_uri() missing cls");
+                        if (!parse_arguments("from_uri", { aArgs.begin() + 1, aArgs.end() }, aKwargs, { "uri" }, 1u, 0u, a))
+                            return nullptr;
+                        if (kind_of(builtin_value(a[0])) != NEOS_PY_STR)
+                            return error("AttributeError", std::string{ "'" } + type_name(a[0]) + "' object has no attribute 'startswith'");
+                        std::string const uri = as<str_object>(builtin_value(a[0]))->value;
+                        if (!uri.starts_with("file:"))
+                            return error("ValueError", "URI does not start with 'file:': " + repr_string(uri));
+                        auto path = uri.substr(5u);
+                        if (path.substr(0u, 3u) == "///")
+                            path = path.substr(2u);         // (an empty authority)
+                        else if (path.substr(0u, 12u) == "//localhost/")
+                            path = path.substr(11u);        // (localhost's)
+                        // (a slash before a DOS device or UNC path)
+                        if (path.substr(0u, 3u) == "///" || (path.substr(0u, 1u) == "/" && path.size() > 2u && (path[2] == ':' || path[2] == '|')))
+                            path = path.substr(1u);
+                        // (a bar for a DOS drive's colon)
+                        if (path.size() > 1u && path[1] == '|')
+                            path = path.substr(0u, 1u) + ":" + path.substr(2u);
+                        ref const text{ make_str(path) };
+                        ref const unquote{ module_attribute("urllib.parse", "unquote_to_bytes") };
+                        ref const bytes{ unquote ? invoke(unquote.get(), { new_reference(text.get()) }) : nullptr };
+                        ref const decoded{ bytes ? os_call("fsdecode", { bytes.get() }, nullptr) : nullptr };
+                        ref const result{ decoded ? invoke(aArgs[0], { new_reference(decoded.get()) }) : nullptr };
+                        if (!result)
+                            return nullptr;
+                        ref const absolute{ call_method_named(result.get(), "is_absolute", {}) };
+                        if (!absolute)
+                            return nullptr;
+                        if (truth(absolute.get()) != 1)
+                            return error("ValueError", "URI is not absolute: " + repr_string(uri));
+                        return new_reference(result.get());
                     } },
                 { "open", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -5082,7 +8746,7 @@ namespace neos::python_runtime
                     for (auto const& m : sPathMethods)
                     {
                         auto const function = make_builtin(m);
-                        if (std::strcmp(m.name, "cwd") == 0 || std::strcmp(m.name, "home") == 0)
+                        if (std::strcmp(m.name, "cwd") == 0 || std::strcmp(m.name, "home") == 0 || std::strcmp(m.name, "from_uri") == 0)
                         {
                             ns.emplace_back(m.name, b_classmethod({ function }, nullptr));
                             release(function);
@@ -5229,6 +8893,543 @@ namespace neos::python_runtime
                     auto const f = as<tuple_object>(sFunctions)->items[i];
                     aAttributes.emplace_back(i == 0u ? "fsencode" : i == 1u ? "fsdecode" : "get_exec_path", (retain(f), f));
                 }
+                // (os.environ (and, POSIX, os.environb): ported from CPython 3.13.18's Lib/os.py (_Environ, _createenviron): a mapping of the
+                // process's environment (posix.environ: its data (str keys and values)) whose changes are its (putenv, unsetenv), so that child
+                // processes and the C library (e.g. time.tzset's TZ) see them)
+                static object* const sEnvironments = py_guarded([]()
+                {
+                    auto const native = [](char const* aName, char const* aDoc, native_body aBody)
+                    {
+                        return make_native_function(aName, std::string{ "_Environ." } + aName, aDoc, "os", std::move(aBody));
+                    };
+                    auto const self_of = [](char const* aName, std::vector<py> const& aArgs, object* aKwargs, std::vector<py_parameter> aParameters)
+                    {
+                        aParameters.insert(aParameters.begin(), py_positional("self"));
+                        return py_bind(std::string{ "_Environ." } + aName, aParameters, aArgs, aKwargs);
+                    };
+                    py const ns = py_dict();
+                    ns.set_item(py{ "__module__" }, py{ "os" });
+                    ns.set_item(py{ "__qualname__" }, py{ "_Environ" });
+                    ns.set_item(py{ "__init__" }, native("__init__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__init__", aArgs, aKwargs, { py_positional("data"), py_positional("encodekey"), py_positional("decodekey"),
+                                py_positional("encodevalue"), py_positional("decodevalue") });
+                            a[0].set_attr("encodekey", a[2]);
+                            a[0].set_attr("decodekey", a[3]);
+                            a[0].set_attr("encodevalue", a[4]);
+                            a[0].set_attr("decodevalue", a[5]);
+                            a[0].set_attr("_data", a[1]);
+                            return py::none();
+                        }));
+                    ns.set_item(py{ "__getitem__" }, native("__getitem__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__getitem__", aArgs, aKwargs, { py_positional("key") });
+                            py value;
+                            try
+                            {
+                                value = a[0].attr("_data")[a[0].attr("encodekey")(a[1])];
+                            }
+                            catch (raised const&)
+                            {
+                                py const e = py_take_exception();
+                                if (!isinstance(e, builtin("KeyError")))
+                                    py_reraise(e);
+                                // (raise KeyError(key) from None)
+                                py const error = builtin("KeyError")(a[1]);
+                                error.set_attr("__suppress_context__", py::boolean(true));
+                                py_raise(error);
+                            }
+                            return a[0].attr("decodevalue")(value);
+                        }));
+                    ns.set_item(py{ "__setitem__" }, native("__setitem__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__setitem__", aArgs, aKwargs, { py_positional("key"), py_positional("value") });
+                            py const key = a[0].attr("encodekey")(a[1]);
+                            py const value = a[0].attr("encodevalue")(a[2]);
+                            import_attribute("os", "putenv")(key, value);
+                            a[0].attr("_data").set_item(key, value);
+                            return py::none();
+                        }));
+                    ns.set_item(py{ "__delitem__" }, native("__delitem__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__delitem__", aArgs, aKwargs, { py_positional("key") });
+                            py const encodedKey = a[0].attr("encodekey")(a[1]);
+                            import_attribute("os", "unsetenv")(encodedKey);
+                            try
+                            {
+                                a[0].attr("_data").method("__delitem__", { encodedKey });
+                            }
+                            catch (raised const&)
+                            {
+                                py const e = py_take_exception();
+                                if (!isinstance(e, builtin("KeyError")))
+                                    py_reraise(e);
+                                py const error = builtin("KeyError")(a[1]);
+                                error.set_attr("__suppress_context__", py::boolean(true));
+                                py_raise(error);
+                            }
+                            return py::none();
+                        }));
+                    ns.set_item(py{ "__iter__" }, native("__iter__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            // (the keys when it is called, decoded: a list's iterator (as the generator's: its keys are listed first))
+                            auto const a = self_of("__iter__", aArgs, aKwargs, {});
+                            std::vector<py> keys;
+                            py const decodekey = a[0].attr("decodekey");
+                            for (py const& key : builtin("list")(a[0].attr("_data")).items())
+                                keys.push_back(decodekey(key));
+                            return builtin("iter")(py_list(keys));
+                        }));
+                    ns.set_item(py{ "__len__" }, native("__len__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__len__", aArgs, aKwargs, {});
+                            return builtin("len")(a[0].attr("_data"));
+                        }));
+                    ns.set_item(py{ "__repr__" }, native("__repr__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__repr__", aArgs, aKwargs, {});
+                            std::string items;
+                            for (py const& item : a[0].attr("_data").method("items").items())
+                            {
+                                if (!items.empty())
+                                    items += ", ";
+                                items += a[0].attr("decodekey")(item[py{ 0 }]).repr() + ": " + a[0].attr("decodevalue")(item[py{ 1 }]).repr();
+                            }
+                            return py{ "environ({" + items + "})" };
+                        }));
+                    ns.set_item(py{ "copy" }, native("copy", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("copy", aArgs, aKwargs, {});
+                            return builtin("dict")(a[0]);
+                        }));
+                    ns.set_item(py{ "setdefault" }, native("setdefault", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("setdefault", aArgs, aKwargs, { py_positional("key"), py_positional("value") });
+                            if (!a[0].contains(a[1]))
+                                a[0].set_item(a[1], a[2]);
+                            return a[0][a[1]];
+                        }));
+                    ns.set_item(py{ "__ior__" }, native("__ior__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__ior__", aArgs, aKwargs, { py_positional("other") });
+                            a[0].method("update", { a[1] });
+                            return a[0];
+                        }));
+                    ns.set_item(py{ "__or__" }, native("__or__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__or__", aArgs, aKwargs, { py_positional("other") });
+                            if (!isinstance(a[1], import_attribute("collections.abc", "Mapping")))
+                                return builtin("NotImplemented");
+                            py const result = builtin("dict")(a[0]);
+                            result.method("update", { a[1] });
+                            return result;
+                        }));
+                    ns.set_item(py{ "__ror__" }, native("__ror__", "", [self_of](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = self_of("__ror__", aArgs, aKwargs, { py_positional("other") });
+                            if (!isinstance(a[1], import_attribute("collections.abc", "Mapping")))
+                                return builtin("NotImplemented");
+                            py const result = builtin("dict")(a[1]);
+                            result.method("update", { a[0] });
+                            return result;
+                        }));
+                    py const cls = builtin("type")(py{ "_Environ" }, py_tuple({ import_attribute("collections.abc", "MutableMapping") }), ns);
+                    // (_createenviron: its data is the process's environment (str keys and values); keys and values must be str (environb's: 
+                    // bytes, of the same data: decoded and encoded as the file system's (UTF-8, surrogateescape)))
+                    // (_createenviron: keys and values must be str (encodekey, encodevalue); POSIX: the data is posix.environ (bytes: encoded 
+                    // and decoded as the file system's, UTF-8 with surrogateescape), and environb is of the same data (bytes, _check_bytes); 
+                    // Windows: a copy of nt.environ whose names are upper case)
+                    auto const typed = [](char const* aName, char const* aType, bool aEncode, bool aUpper) -> py
+                    {
+                        std::string const type{ aType };
+                        return make_native_function(aName, aName, "", "os", [type, aEncode, aUpper](std::vector<py> const& aArgs, object*) -> py
+                            {
+                                if (aArgs.size() != 1u)
+                                    py_raise("TypeError", "expected 1 argument");
+                                if (!isinstance(aArgs[0], builtin(type.c_str())))
+                                    py_raise("TypeError", type + " expected, not " + std::string{ type_name(aArgs[0].get()) });
+                                py value = aArgs[0];
+                                if (aUpper)
+                                    value = value.method("upper");
+                                return aEncode ? value.method("encode", { py{ "utf-8" }, py{ "surrogateescape" } }) : value;
+                            });
+                    };
+#if defined(_WIN32)
+                    py const encode = typed("check_str", "str", false, false);
+                    py const encodekey = typed("encodekey", "str", false, true);
+                    py const decode = builtin("str");
+                    py const data = py_dict();
+                    for (py const& item : py{ environment() }.method("items").items())
+                        data.set_item(encodekey(item[py{ 0 }]), item[py{ 1 }]);
+                    py const environMapping = cls(data, encodekey, decode, encode, decode);    // (not "environ": a macro of the Windows C runtime)
+                    return py_tuple({ environMapping });
+#else
+                    py const data{ environment() };
+                    py const encode = typed("encode", "str", true, false);
+                    py const decode = make_native_function("decode", "decode", "", "os", [](std::vector<py> const& aArgs, object*) -> py
+                        {
+                            return aArgs.at(0).method("decode", { py{ "utf-8" }, py{ "surrogateescape" } });
+                        });
+                    py const environMapping = cls(data, encode, decode, encode, decode);
+                    py const checkBytes = typed("_check_bytes", "bytes", false, false);
+                    py const environb = cls(environMapping.attr("_data"), checkBytes, builtin("bytes"), checkBytes, builtin("bytes"));
+                    return py_tuple({ environMapping, environb });
+#endif
+                });
+                if (sEnvironments == nullptr)
+                    return false;
+                for (auto& a : aAttributes)
+                    if (a.first == "environ")
+                    {
+                        release(a.second);
+                        a.second = new_reference(as<tuple_object>(sEnvironments)->items[0]);
+                    }
+                if (as<tuple_object>(sEnvironments)->items.size() > 1u)
+                    aAttributes.emplace_back("environb", new_reference(as<tuple_object>(sEnvironments)->items[1]));
+                // (Lib/os.py's getenv and (POSIX) getenvb: environ.get(key, default) and environb.get(key, default))
+                for (auto const& [name, mapping, doc] : { std::tuple{ "getenv", "environ", "Get an environment variable, return None if it doesn't exist.\n    "
+                    "The optional second argument can specify an alternate default.\n    key, default and the result are str." }, std::tuple{ "getenvb", "environb",
+                    "Get an environment variable, return None if it doesn't exist.\n        The optional second argument can specify an alternate default.\n        "
+                    "key, default and the result are bytes." } })
+                {
+#if defined(_WIN32)
+                    if (std::string_view{ name } == "getenvb")
+                        continue;
+#endif
+                    std::string const functionName{ name };
+                    std::string const mappingName{ mapping };
+                    auto const function = py_guarded([&]()
+                    {
+                        return make_native_function(functionName, functionName, doc, "os", [functionName, mappingName](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                auto const a = py_bind(functionName, { py_positional("key"), py_positional("default", py::none()) }, aArgs, aKwargs);
+                                return import_attribute("os", mappingName.c_str()).method("get", { a[0], a[1] });
+                            });
+                    });
+                    if (function == nullptr)
+                        return false;
+                    auto const existing = std::find_if(aAttributes.begin(), aAttributes.end(), [&](auto const& a) { return a.first == functionName; });
+                    if (existing != aAttributes.end())
+                    {
+                        release(existing->second);
+                        existing->second = function;
+                    }
+                    else
+                        aAttributes.emplace_back(functionName, function);
+                }
+#if !defined(_WIN32)
+                // (Lib/os.py's execl, execle, execlp, execlpe, execvp, execvpe (_execvpe) and, of fork and execv, P_WAIT, P_NOWAIT, P_NOWAITO, 
+                // spawnv, spawnve, spawnvp, spawnvpe (_spawnvef), spawnl, spawnle, spawnlp and spawnlpe (CPython 3.13.18's))
+                static object* const sExecFunctions = py_guarded([]()
+                {
+                    auto const os = [](char const* aName) { return import_attribute("os", aName); };
+                    // (a function of *args: its required positional arguments (as a Python function's, CPython's messages), then the rest)
+                    auto const native = [](char const* aName, char const* aDoc, std::vector<char const*> aParameters, std::function<py(std::vector<py> const&, py const&)> aBody)
+                    {
+                        std::string const name{ aName };
+                        return make_native_function(name, name, aDoc, "os", [name, aParameters, aBody](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                std::vector<py_parameter> parameters;
+                                for (auto p : aParameters)
+                                    parameters.push_back(py_positional(p));
+                                py rest;
+                                auto const a = py_bind(name, parameters, aArgs, aKwargs, &rest);
+                                return aBody(a, rest);
+                            });
+                    };
+                    auto const tail = [](py const& aTuple) -> py
+                    {
+                        // (args[-1] and args[:-1])
+                        return aTuple[builtin("slice")(py::none(), py{ -1 })];
+                    };
+                    // (_execvpe(file, args, env=None))
+                    auto const execvpe = [os](py const& aFile, py const& aArgs, py aEnv) -> py
+                    {
+                        py execFunction;
+                        std::vector<py> argrest;
+                        if (!aEnv.is_none())
+                        {
+                            execFunction = os("execve");
+                            argrest = { aArgs, aEnv };
+                        }
+                        else
+                        {
+                            execFunction = os("execv");
+                            argrest = { aArgs };
+                            aEnv = os("environ");
+                        }
+                        py file = aFile;
+                        if (os("path").attr("dirname")(file).truthy())
+                        {
+                            std::vector<py> callArgs{ file };
+                            callArgs.insert(callArgs.end(), argrest.begin(), argrest.end());
+                            execFunction.call(callArgs);
+                            return py::none();
+                        }
+                        py savedException = py::none();
+                        py lastException = py::none();
+                        file = os("fsencode")(file);
+                        for (py const& directory : os("get_exec_path")(aEnv).items())
+                        {
+                            py const fullname = os("path").attr("join")(os("fsencode")(directory), file);
+                            try
+                            {
+                                std::vector<py> callArgs{ fullname };
+                                callArgs.insert(callArgs.end(), argrest.begin(), argrest.end());
+                                execFunction.call(callArgs);
+                            }
+                            catch (raised const&)
+                            {
+                                py const e = py_take_exception();
+                                if (isinstance(e, builtin("FileNotFoundError")) || isinstance(e, builtin("NotADirectoryError")))
+                                    lastException = e;
+                                else if (isinstance(e, builtin("OSError")))
+                                {
+                                    lastException = e;
+                                    if (savedException.is_none())
+                                        savedException = e;
+                                }
+                                else
+                                    py_reraise(e);
+                            }
+                        }
+                        if (!savedException.is_none())
+                            py_raise(savedException);
+                        py_raise(lastException);
+                    };
+                    std::vector<std::pair<std::string, py>> functions;
+                    functions.emplace_back("execl", native("execl", "execl(file, *args)\n\n    Execute the executable file with argument list args, replacing the\n    current process. ",
+                        { "file" }, [os](std::vector<py> const& a, py const& rest) -> py { return os("execv")(a[0], rest); }));
+                    functions.emplace_back("execle", native("execle", "execle(file, *args, env)\n\n    Execute the executable file with argument list args and\n    environment env, replacing the current process. ",
+                        { "file" }, [os, tail](std::vector<py> const& a, py const& rest) -> py { return os("execve")(a[0], tail(rest), rest[py{ -1 }]); }));
+                    functions.emplace_back("execlp", native("execlp", "execlp(file, *args)\n\n    Execute the executable file (which is searched for along $PATH)\n    with argument list args, replacing the current process. ",
+                        { "file" }, [os](std::vector<py> const& a, py const& rest) -> py { return os("execvp")(a[0], rest); }));
+                    functions.emplace_back("execlpe", native("execlpe", "execlpe(file, *args, env)\n\n    Execute the executable file (which is searched for along $PATH)\n    with argument list args and environment env, replacing the current\n    process. ",
+                        { "file" }, [os, tail](std::vector<py> const& a, py const& rest) -> py { return os("execvpe")(a[0], tail(rest), rest[py{ -1 }]); }));
+                    functions.emplace_back("_execvpe", make_native_function("_execvpe", "_execvpe", "", "os", [execvpe](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = py_bind("_execvpe", { py_positional("file"), py_positional("args"), py_positional("env", py::none()) }, aArgs, aKwargs);
+                            return execvpe(a[0], a[1], a[2]);
+                        }));
+                    functions.emplace_back("execvp", make_native_function("execvp", "execvp", "execvp(file, args)\n\n    Execute the executable file (which is searched for along $PATH)\n    with argument list args, replacing the current process.\n    args may be a list or tuple of strings. ", "os",
+                        [execvpe](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = py_bind("execvp", { py_positional("file"), py_positional("args") }, aArgs, aKwargs);
+                            return execvpe(a[0], a[1], py::none());
+                        }));
+                    functions.emplace_back("execvpe", make_native_function("execvpe", "execvpe", "execvpe(file, args, env)\n\n    Execute the executable file (which is searched for along $PATH)\n    with argument list args and environment env, replacing the\n    current process.\n    args may be a list or tuple of strings. ", "os",
+                        [execvpe](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = py_bind("execvpe", { py_positional("file"), py_positional("args"), py_positional("env") }, aArgs, aKwargs);
+                            return execvpe(a[0], a[1], a[2]);
+                        }));
+                    // (_spawnvef(mode, file, args, env, func))
+                    auto const spawn = [os](py const& aMode, py const& aFile, py const& aArgs, py const& aEnv, char const* aFunction) -> py
+                    {
+                        if (!isinstance(aArgs, builtin("tuple")) && !isinstance(aArgs, builtin("list")))
+                            py_raise("TypeError", "argv must be a tuple or a list");
+                        if (!aArgs.truthy() || !aArgs[py{ 0 }].truthy())
+                            py_raise("ValueError", "argv first element cannot be empty");
+                        py const pid = os("fork")();
+                        if (!pid.truthy())
+                        {
+                            // (the child)
+                            try
+                            {
+                                if (aEnv.is_none())
+                                    os(aFunction)(aFile, aArgs);
+                                else
+                                    os(aFunction)(aFile, aArgs, aEnv);
+                            }
+                            catch (raised const&)
+                            {
+                                py_take_exception();
+                                os("_exit")(py{ 127 });
+                            }
+                            return py::none();
+                        }
+                        // (the parent)
+                        if (aMode == os("P_NOWAIT"))
+                            return pid;
+                        for (;;)
+                        {
+                            py const result = os("waitpid")(pid, py{ 0 });
+                            py const status = result[py{ 1 }];
+                            if (os("WIFSTOPPED")(status).truthy())
+                                continue;
+                            return os("waitstatus_to_exitcode")(status);
+                        }
+                    };
+                    struct spawner { char const* name; char const* function; bool env; char const* doc; };
+                    static spawner const sSpawners[] =
+                    {
+                        { "spawnv", "execv", false, "spawnv(mode, file, args) -> integer\n\nExecute file with arguments from args in a subprocess.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. " },
+                        { "spawnve", "execve", true, "spawnve(mode, file, args, env) -> integer\n\nExecute file with arguments from args in a subprocess with the\nspecified environment.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. " },
+                        { "spawnvp", "execvp", false, "spawnvp(mode, file, args) -> integer\n\nExecute file (which is looked for along $PATH) with arguments from\nargs in a subprocess.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. " },
+                        { "spawnvpe", "execvpe", true, "spawnvpe(mode, file, args, env) -> integer\n\nExecute file (which is looked for along $PATH) with arguments from\nargs in a subprocess with the supplied environment.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. " }
+                    };
+                    for (auto const& s : sSpawners)
+                    {
+                        auto const& spawnerEntry = s;
+                        functions.emplace_back(s.name, make_native_function(s.name, s.name, s.doc, "os", [spawn, spawnerEntry](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                std::vector<py_parameter> parameters{ py_positional("mode"), py_positional("file"), py_positional("args") };
+                                if (spawnerEntry.env)
+                                    parameters.push_back(py_positional("env"));
+                                auto const a = py_bind(spawnerEntry.name, parameters, aArgs, aKwargs);
+                                return spawn(a[0], a[1], a[2], spawnerEntry.env ? a[3] : py::none(), spawnerEntry.function);
+                            }));
+                    }
+                    functions.emplace_back("spawnl", native("spawnl", "spawnl(mode, file, *args) -> integer\n\nExecute file with arguments from args in a subprocess.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. ",
+                        { "mode", "file" }, [os](std::vector<py> const& a, py const& rest) -> py { return os("spawnv")(a[0], a[1], rest); }));
+                    functions.emplace_back("spawnle", native("spawnle", "spawnle(mode, file, *args, env) -> integer\n\nExecute file with arguments from args in a subprocess with the\nsupplied environment.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. ",
+                        { "mode", "file" }, [os, tail](std::vector<py> const& a, py const& rest) -> py { return os("spawnve")(a[0], a[1], tail(rest), rest[py{ -1 }]); }));
+                    functions.emplace_back("spawnlp", native("spawnlp", "spawnlp(mode, file, *args) -> integer\n\nExecute file (which is looked for along $PATH) with arguments from\nargs in a subprocess with the supplied environment.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. ",
+                        { "mode", "file" }, [os](std::vector<py> const& a, py const& rest) -> py { return os("spawnvp")(a[0], a[1], rest); }));
+                    functions.emplace_back("spawnlpe", native("spawnlpe", "spawnlpe(mode, file, *args, env) -> integer\n\nExecute file (which is looked for along $PATH) with arguments from\nargs in a subprocess with the supplied environment.\nIf mode == P_NOWAIT return the pid of the process.\nIf mode == P_WAIT return the process's exit code if it exits normally;\notherwise return -SIG, where SIG is the signal that killed it. ",
+                        { "mode", "file" }, [os, tail](std::vector<py> const& a, py const& rest) -> py { return os("spawnvpe")(a[0], a[1], tail(rest), rest[py{ -1 }]); }));
+                    std::vector<py> items;
+                    for (auto const& f : functions)
+                        items.push_back(py_tuple({ py{ f.first }, f.second }));
+                    return py_tuple(items);
+                });
+                if (sExecFunctions == nullptr)
+                    return false;
+                for (auto const item : as<tuple_object>(sExecFunctions)->items)
+                {
+                    auto const& pair = as<tuple_object>(item)->items;
+                    aAttributes.emplace_back(as<str_object>(pair[0])->value, new_reference(pair[1]));
+                }
+                aAttributes.emplace_back("P_WAIT", make_int(0));
+                aAttributes.emplace_back("P_NOWAIT", make_int(1));
+                aAttributes.emplace_back("P_NOWAITO", make_int(1));
+#endif
+                // (the names that Lib/os.py imports (abc, sys, st, GenericAlias, Mapping, MutableMapping and _check_methods) or defines (_fspath, 
+                // _Environ (os.environ's class), _exists, _get_exports_list and renames))
+                {
+                    static object* const sOsNames = py_guarded([&]()
+                    {
+                        std::vector<py> items;
+                        auto const add = [&](char const* aName, py const& aValue) { items.push_back(py_tuple({ py{ aName }, aValue })); };
+                        add("abc", py{ fn_import("abc") });
+                        add("sys", py{ fn_import("sys") });
+                        add("st", py{ fn_import("stat") });
+                        add("GenericAlias", import_attribute("types", "GenericAlias"));
+                        add("Mapping", import_attribute("collections.abc", "Mapping"));
+                        add("MutableMapping", import_attribute("collections.abc", "MutableMapping"));
+                        add("_check_methods", import_attribute("_collections_abc", "_check_methods"));
+                        add("_exists", make_native_function("_exists", "_exists", "", "os", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                auto const a = py_bind("_exists", { py_positional("name") }, aArgs, aKwargs);
+                                return py::boolean(py{ fn_import("os") }.attr("__dict__").method("__contains__", { a[0] }).truthy());
+                            }));
+                        add("_get_exports_list", make_native_function("_get_exports_list", "_get_exports_list", "", "os", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                auto const a = py_bind("_get_exports_list", { py_positional("module") }, aArgs, aKwargs);
+                                try
+                                {
+                                    return builtin("list")(a[0].attr("__all__"));
+                                }
+                                catch (raised const&)
+                                {
+                                    py const e = py_take_exception();
+                                    if (!isinstance(e, builtin("AttributeError")))
+                                        py_reraise(e);
+                                }
+                                std::vector<py> names;
+                                for (py const& n : builtin("dir")(a[0]).items())
+                                    if (!n.str().empty() && n.str()[0] != '_')
+                                        names.push_back(n);
+                                return py_list(names);
+                            }));
+                        add("renames", make_native_function("renames", "renames", "renames(old, new)\n\n    Super-rename; create directories as necessary and delete any left\n"
+                            "    empty.  Works like rename, except creation of any intermediate\n    directories needed to make the new pathname good is attempted\n"
+                            "    first.  After the rename, directories corresponding to rightmost\n    path segments of the old name will be pruned until either the\n"
+                            "    whole path is consumed or a nonempty directory is found.\n\n    Note: this function can fail with the new directory structure made\n"
+                            "    if you lack permissions needed to unlink the leaf directory or\n    file.\n\n    ", "os", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                auto const a = py_bind("renames", { py_positional("old"), py_positional("new") }, aArgs, aKwargs);
+                                py const os{ fn_import("os") };
+                                py const path = os.attr("path");
+                                py parts = path.attr("split")(a[1]);
+                                py head = parts[py{ 0 }], tail = parts[py{ 1 }];
+                                if (head.truthy() && tail.truthy() && !path.attr("exists")(head).truthy())
+                                    os.attr("makedirs")(head);
+                                os.attr("rename")(a[0], a[1]);
+                                parts = path.attr("split")(a[0]);
+                                head = parts[py{ 0 }];
+                                tail = parts[py{ 1 }];
+                                if (head.truthy() && tail.truthy())
+                                {
+                                    try
+                                    {
+                                        os.attr("removedirs")(head);
+                                    }
+                                    catch (raised const&)
+                                    {
+                                        py const e = py_take_exception();
+                                        if (!isinstance(e, builtin("OSError")))
+                                            py_reraise(e);
+                                    }
+                                }
+                                return py::none();
+                            }));
+                        return py_tuple(items);
+                    });
+                    if (sOsNames == nullptr)
+                        return false;
+                    for (auto const item : as<tuple_object>(sOsNames)->items)
+                    {
+                        auto const& pair = as<tuple_object>(item)->items;
+                        aAttributes.emplace_back(as<str_object>(pair[0])->value, new_reference(pair[1]));
+                    }
+                    for (auto const& [name, value] : std::vector<std::pair<std::string, object*>>{ aAttributes })
+                    {
+                        // (_fspath: os.py's (a function of its own, as fspath's))
+                        if (name == "fspath")
+                        {
+                            object* const fspath = value;
+                            ref const pure{ py_guarded([fspath]()
+                            {
+                                py const function = py::borrowed(fspath);
+                                return make_native_function("_fspath", "_fspath", "Return the path representation of a path-like object.\n\n    If str or bytes is "
+                                    "passed in, it is returned unchanged. Otherwise the\n    os.PathLike interface is used to get the path representation. If the\n    path "
+                                    "representation is not str or bytes, TypeError is raised. If the\n    provided path is not str, bytes, or os.PathLike, TypeError is raised.\n    ", "os",
+                                    [function](std::vector<py> const& aArgs, object* aKwargs) -> py
+                                    {
+                                        auto const a = py_bind("_fspath", { py_positional("path") }, aArgs, aKwargs);
+                                        return function(a[0]);
+                                    });
+                            }) };
+                            if (!pure)
+                                return false;
+                            aAttributes.emplace_back("_fspath", new_reference(pure.get()));
+                        }
+                        if (name == "environ")
+                            aAttributes.emplace_back("_Environ", class_of(value));
+                    }
+                }
+                // (__all__: as Lib/os.py's (its own names, posix's public names (_get_exports_list) and _exit): the public names but the 
+                // modules and names that os.py imports (abc, sys, st, GenericAlias, Mapping, MutableMapping), PathLike, process_cpu_count and the
+                // supports_* sets)
+                {
+                    static std::set<std::string_view> const sExcluded = { "GenericAlias", "Mapping", "MutableMapping", "PathLike", "abc", "process_cpu_count", "st", 
+                        "supports_dir_fd", "supports_effective_ids", "supports_fd", "supports_follow_symlinks", "sys" };
+                    std::vector<object*> names;
+                    std::set<std::string> seen;
+                    auto const add = [&](std::string const& aName)
+                    {
+                        if (seen.insert(aName).second)
+                            names.push_back(make_str(aName));
+                    };
+                    for (auto const& a : aAttributes)
+                        if (!a.first.empty() && a.first[0] != '_' && !sExcluded.contains(a.first))
+                            add(a.first);
+                    add("path");
+                    if (std::any_of(aAttributes.begin(), aAttributes.end(), [](auto const& a) { return a.first == "_exit"; }))
+                        add("_exit");
+                    aAttributes.emplace_back("__all__", make_list(std::move(names)));
+                }
                 return true;
             }
 
@@ -5237,6 +9438,186 @@ namespace neos::python_runtime
             inline bool const sPosixModule = register_module("nt", os_module);
 #else
             inline bool const sPosixModule = register_module("posix", os_module);
+#endif
+#if !defined(_WIN32)
+            // --- resource (Modules/resource.c: getrlimit, setrlimit, prlimit, getrusage and getpagesize; struct_rusage; RLIMIT_*, RUSAGE_* 
+            // and RLIM_INFINITY (-1, as CPython converts it))
+
+            object* rlimit_result(struct rlimit const& aLimit)
+            {
+                auto const value = [](rlim_t aValue) { return aValue == RLIM_INFINITY ? make_int(-1) : make_int(static_cast<long long>(aValue)); };
+                return make_tuple({ value(aLimit.rlim_cur), value(aLimit.rlim_max) });
+            }
+
+            // (py2rlimit: a sequence of two ints (-1: RLIM_INFINITY))
+            bool rlimit_argument(object* aLimits, struct rlimit& aResult)
+            {
+                std::vector<object*> items;
+                ref const tuple{ fn_tuple_of(aLimits) };
+                if (!tuple)
+                {
+                    clear_error();
+                    error("ValueError", "expected a tuple of 2 integers");
+                    return false;
+                }
+                auto const& parts = as<tuple_object>(tuple.get())->items;
+                if (parts.size() != 2u)
+                {
+                    error("ValueError", "expected a tuple of 2 integers");
+                    return false;
+                }
+                rlim_t* const targets[] = { &aResult.rlim_cur, &aResult.rlim_max };
+                for (std::size_t i = 0u; i < 2u; ++i)
+                {
+                    long long value = 0;
+                    if (!to_index(parts[i], value))
+                        return false;
+                    *targets[i] = value == -1 ? RLIM_INFINITY : static_cast<rlim_t>(value);
+                }
+                return true;
+            }
+
+            bool resource_kind(object* aResource, int& aResult, char const* aFunction)
+            {
+                long long value = 0;
+                if (!int_argument(aResource, value, aFunction))
+                    return false;
+                if (value < 0 || value >= RLIM_NLIMITS)
+                {
+                    error("ValueError", "invalid resource specified");
+                    return false;
+                }
+                aResult = static_cast<int>(value);
+                return true;
+            }
+
+            builtin_entry const sResourceFunctions[] =
+            {
+                { "getrlimit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        int kind = 0;
+                        if (!parse_arguments("getrlimit", aArgs, aKwargs, { "resource" }, 1u, 1u, a) || !resource_kind(a[0], kind, "getrlimit"))
+                            return nullptr;
+                        struct rlimit limit{};
+                        if (::getrlimit(kind, &limit) != 0)
+                            return raise_os_error(errno);
+                        return rlimit_result(limit);
+                    } },
+                { "setrlimit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("resource.setrlimit"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        int kind = 0;
+                        struct rlimit limit{};
+                        if (!parse_arguments("setrlimit", aArgs, aKwargs, { "resource", "limits" }, 2u, 2u, a) || !resource_kind(a[0], kind, "setrlimit") ||
+                            !rlimit_argument(a[1], limit))
+                            return nullptr;
+                        if (::setrlimit(kind, &limit) != 0)
+                        {
+                            if (errno == EINVAL)
+                                return error("ValueError", "current limit exceeds maximum limit");
+                            if (errno == EPERM)
+                                return error("ValueError", "not allowed to raise maximum limit");
+                            return raise_os_error(errno);
+                        }
+                        return new_reference(none());
+                    } },
+#if defined(__linux__)
+                { "prlimit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long pid = 0;
+                        int kind = 0;
+                        if (!parse_arguments("prlimit", aArgs, aKwargs, { "pid", "resource", "limits" }, 2u, 3u, a) || !int_argument(a[0], pid, "prlimit") ||
+                            !resource_kind(a[1], kind, "prlimit"))
+                            return nullptr;
+                        struct rlimit newLimit{}, oldLimit{};
+                        bool const setting = a[2] != nullptr && kind_of(a[2]) != NEOS_PY_NONE;
+                        if (setting && (!host_unrestricted("resource.prlimit") || !rlimit_argument(a[2], newLimit)))
+                            return nullptr;
+                        if (::prlimit(static_cast<pid_t>(pid), static_cast<enum __rlimit_resource>(kind), setting ? &newLimit : nullptr, &oldLimit) != 0)
+                        {
+                            if (errno == EINVAL)
+                                return error("ValueError", "current limit exceeds maximum limit");
+                            return raise_os_error(errno);
+                        }
+                        return rlimit_result(oldLimit);
+                    } },
+#endif
+                { "getrusage", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long who = 0;
+                        if (!parse_arguments("getrusage", aArgs, aKwargs, { "who" }, 1u, 1u, a) || !int_argument(a[0], who, "getrusage"))
+                            return nullptr;
+                        struct rusage usage{};
+                        if (::getrusage(static_cast<int>(who), &usage) != 0)
+                        {
+                            if (errno == EINVAL)
+                                return error("ValueError", "invalid who parameter");
+                            return raise_os_error(errno);
+                        }
+                        return rusage_result(usage);
+                    } },
+                { "getpagesize", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!no_keywords(aKwargs, "getpagesize") || !aArgs.empty())
+                            return error("TypeError", "resource.getpagesize() takes no arguments (" + std::to_string(aArgs.size()) + " given)");
+                        return make_int(static_cast<long long>(::sysconf(_SC_PAGESIZE)));
+                    } },
+            };
+
+            bool resource_module(std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                for (auto const& f : sResourceFunctions)
+                    aAttributes.emplace_back(f.name, make_builtin(f));
+                rusage_type();
+                aAttributes.emplace_back("struct_rusage", type_object_for("struct_rusage", "resource.struct_rusage"));
+                aAttributes.emplace_back("error", exception_class("OSError"));
+                std::vector<std::pair<char const*, long long>> const constants = {
+                    { "RLIMIT_CPU", RLIMIT_CPU }, { "RLIMIT_FSIZE", RLIMIT_FSIZE }, { "RLIMIT_DATA", RLIMIT_DATA }, { "RLIMIT_STACK", RLIMIT_STACK }, 
+                    { "RLIMIT_CORE", RLIMIT_CORE }, { "RLIMIT_NOFILE", RLIMIT_NOFILE }, { "RLIMIT_AS", RLIMIT_AS },
+#ifdef RLIMIT_RSS
+                    { "RLIMIT_RSS", RLIMIT_RSS },
+#endif
+#ifdef RLIMIT_NPROC
+                    { "RLIMIT_NPROC", RLIMIT_NPROC },
+#endif
+#ifdef RLIMIT_MEMLOCK
+                    { "RLIMIT_MEMLOCK", RLIMIT_MEMLOCK },
+#endif
+#ifdef RLIMIT_OFILE
+                    { "RLIMIT_OFILE", RLIMIT_OFILE },
+#endif
+#ifdef RLIMIT_MSGQUEUE
+                    { "RLIMIT_MSGQUEUE", RLIMIT_MSGQUEUE },
+#endif
+#ifdef RLIMIT_NICE
+                    { "RLIMIT_NICE", RLIMIT_NICE },
+#endif
+#ifdef RLIMIT_RTPRIO
+                    { "RLIMIT_RTPRIO", RLIMIT_RTPRIO },
+#endif
+#ifdef RLIMIT_RTTIME
+                    { "RLIMIT_RTTIME", RLIMIT_RTTIME },
+#endif
+#ifdef RLIMIT_SIGPENDING
+                    { "RLIMIT_SIGPENDING", RLIMIT_SIGPENDING },
+#endif
+                    { "RUSAGE_SELF", RUSAGE_SELF }, { "RUSAGE_CHILDREN", RUSAGE_CHILDREN },
+#ifdef RUSAGE_THREAD
+                    { "RUSAGE_THREAD", RUSAGE_THREAD },
+#endif
+                };
+                for (auto const& c : constants)
+                    aAttributes.emplace_back(c.first, make_int(c.second));
+                aAttributes.emplace_back("RLIM_INFINITY", make_int(-1));
+                return true;
+            }
+
+            inline bool const sResource = register_module("resource", resource_module);
 #endif
             inline bool const sPathlib = register_module("pathlib", pathlib_module);
             inline bool const sErrno = register_module("errno", errno_module);

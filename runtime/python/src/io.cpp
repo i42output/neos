@@ -52,6 +52,7 @@
 #include <vector>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #if defined(_WIN32)
 #include <io.h>
 #else
@@ -144,6 +145,7 @@ namespace neos::python_runtime
                 bool appending = false;
                 bool closed = false;
                 bool standard = false;          ///< (stdin, stdout or stderr: not closed)
+                bool lineBuffering = false;     ///< (buffering=1, or a terminal: line buffered)
                 int stream = -1;                ///< (0, 1 or 2 for the standard streams)
                 std::string encoding = "utf-8";
                 std::string errors = "strict";
@@ -428,6 +430,30 @@ namespace neos::python_runtime
                 return make_str(std::move(text));
             }
 
+            object* file_read(file_object& f, long long aSize);
+
+            // (a binary file's readinto(b): at most len(b) bytes read into b (a writable bytes-like object); the number read)
+            object* file_readinto(file_object& f, object* aBuffer)
+            {
+                if (!check_open(f))
+                    return nullptr;
+                if (!f.readable)
+                    return (unsupported("not readable"), nullptr);
+                std::string_view view;
+                if (kind_of(aBuffer) == NEOS_PY_STR || std::string_view{ type_name(aBuffer) } == "bytes" || !bytes_like(aBuffer, view))
+                    return error("TypeError", std::string{ "readinto() argument must be read-write bytes-like object, not " } + type_name(aBuffer));
+                std::string data(view.size(), '\0');
+                auto const n = data.empty() ? 0u : file_fread(data.data(), data.size(), f);
+                data.resize(n);
+                ref const first{ make_int(0) };
+                ref const last{ make_int(static_cast<long long>(n)) };
+                ref const slice{ make_slice(first.get(), last.get(), nullptr) };
+                ref const value{ make_bytes(std::move(data)) };
+                if (setitem(aBuffer, slice.get(), value.get()) != 0)
+                    return nullptr;
+                return make_int(static_cast<long long>(n));
+            }
+
             object* file_read(file_object& f, long long aSize)
             {
                 if (!check_open(f))
@@ -613,6 +639,30 @@ namespace neos::python_runtime
                         auto const n = size_argument(a[0]);
                         return n == -2 ? nullptr : file_read(f, n);
                     } },
+                // (a binary file's (BufferedReader, BufferedRandom): read1, readinto, readinto1 (as BytesIO's))
+                { "read1", [](file_object& f, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("read1", aArgs, aKwargs, { "size" }, 0u, 1u, a))
+                            return nullptr;
+                        auto const n = size_argument(a[0]);
+                        // (-1: up to a buffer's worth (io.DEFAULT_BUFFER_SIZE))
+                        return n == -2 ? nullptr : file_read(f, n < 0 ? 8192 : n);
+                    } },
+                { "readinto", [](file_object& f, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("readinto", aArgs, aKwargs, { "buffer" }, 1u, 1u, a))
+                            return nullptr;
+                        return file_readinto(f, a[0]);
+                    } },
+                { "readinto1", [](file_object& f, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("readinto1", aArgs, aKwargs, { "buffer" }, 1u, 1u, a))
+                            return nullptr;
+                        return file_readinto(f, a[0]);
+                    } },
                 { "readline", [](file_object& f, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
@@ -788,10 +838,17 @@ namespace neos::python_runtime
                 {
                     auto& f = as_file(aSelf);
                     for (auto const& m : sFileMethods)
-                        if (std::strcmp(m.name, aName) == 0)
+                        if (std::strcmp(m.name, aName) == 0 && !(f.text && (std::strcmp(aName, "read1") == 0 || std::strncmp(aName, "readinto", 8u) == 0)))
                             return make_function(m.name, call_file_method, const_cast<file_method*>(&m), aSelf);
                     if (std::strcmp(aName, "name") == 0)
                         return (retain(f.name), f.name);
+                    // (as CPython's _io classes': not picklable ("cannot pickle 'TextIOWrapper' instances": the type's name))
+                    if (std::strcmp(aName, "__getstate__") == 0)
+                        return make_function(aName, [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        {
+                            auto const self = as<tuple_object>(aArgs)->items.at(0);
+                            return error("TypeError", std::string{ "cannot pickle '" } + python_type(self)->name + "' instances");
+                        }, nullptr, aSelf);
                     if (std::strcmp(aName, "mode") == 0)
                         return make_str(f.mode);
                     if (std::strcmp(aName, "closed") == 0)
@@ -803,7 +860,7 @@ namespace neos::python_runtime
                     if (f.text && std::strcmp(aName, "newlines") == 0)
                         return (retain(none()), none());
                     if (f.text && std::strcmp(aName, "line_buffering") == 0)
-                        return make_bool(f.standard);
+                        return make_bool(f.standard || f.lineBuffering);
                     return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
                 };
                 type.iter = [](neos_py_context*, object* aSelf) -> object*
@@ -843,6 +900,8 @@ namespace neos::python_runtime
                 bool closed = false;
                 std::optional<std::string> newline = "\n";   ///< (StringIO's newline argument (none: None))
                 int seen = 0;                   ///< (StringIO's newlines written, if its newline is None or "": 1: "\n", 2: "\r", 4: "\r\n")
+                object* dict = nullptr;         ///< (its __dict__ (its attributes), made when first used)
+                ~memory_file_object() { release(dict); }
             };
 
             neos_py_type make_memory_file_type(char const* aQualifiedName, char const* aName);
@@ -1225,10 +1284,26 @@ namespace neos::python_runtime
                             return nullptr;
                         auto const value = memory_slice(m, 0u, memory_size(m));
                         auto const position = make_int(static_cast<long long>(m.position));
+                        // (its __dict__: a copy, or None if it has none)
+                        object* dict = nullptr;
+                        if (m.dict != nullptr)
+                        {
+                            dict = make_dict();
+                            for (auto const& [k, v] : as<dict_object>(m.dict)->items)
+                                if (dict_set(dict, k, v) != 0)
+                                {
+                                    release(dict);
+                                    release(value);
+                                    release(position);
+                                    return nullptr;
+                                }
+                        }
+                        else
+                            dict = (retain(none()), none());
                         if (!m.text)
-                            return make_tuple({ value, position, (retain(none()), none()) });
+                            return make_tuple({ value, position, dict });
                         auto const newline = m.newline ? make_str(*m.newline) : (retain(none()), none());
-                        return make_tuple({ value, newline, position, (retain(none()), none()) });
+                        return make_tuple({ value, newline, position, dict });
                     } },
                 { "__setstate__", [](memory_file_object& m, object* aSelf, std::vector<object*> const& aArgs, object*) -> object*
                     {
@@ -1274,9 +1349,36 @@ namespace neos::python_runtime
                             m.bytes = std::string{ data };
                         }
                         m.position = static_cast<std::size_t>(position);
+                        // (its __dict__: updated with the state's (or the state's, if it has none))
+                        if (kind_of(dictItem) == NEOS_PY_DICT)
+                        {
+                            if (m.dict == nullptr)
+                                m.dict = (retain(dictItem), dictItem);
+                            else
+                                for (auto const& [k, v] : as<dict_object>(dictItem)->items)
+                                    if (dict_set(m.dict, k, v) != 0)
+                                        return nullptr;
+                        }
                         return (retain(none()), none());
                     } }
             };
+
+            // (a data descriptor of StringIO or BytesIO (an attribute that is not its __dict__'s))
+            bool memory_data_attribute(memory_file_object const& m, char const* aName)
+            {
+                std::string_view const name{ aName };
+                return name == "closed" || (m.text && (name == "newlines" || name == "encoding" || name == "errors" || name == "line_buffering"));
+            }
+
+            // (a method of StringIO (aText) or BytesIO, unbound)
+            object* memory_unbound_method(bool aText, char const* aName)
+            {
+                for (auto const& method : sMemoryMethods)
+                    if (std::strcmp(method.name, aName) == 0 && (aText ? std::strcmp(aName, "getbuffer") != 0 && std::strcmp(aName, "read1") != 0 &&
+                        std::strncmp(aName, "readinto", 8u) != 0 : true) && std::strncmp(aName, "__", 2u) != 0)
+                        return unbound_method(aText ? "_io.StringIO" : "_io.BytesIO", aName);
+                return nullptr;
+            }
 
             object* call_memory_method(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
             {
@@ -1296,6 +1398,24 @@ namespace neos::python_runtime
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
                     auto& m = as_memory(aSelf);
+                    if (std::strcmp(aName, "__dict__") == 0)
+                    {
+                        if (m.dict == nullptr)
+                            m.dict = make_dict();
+                        return (retain(m.dict), m.dict);
+                    }
+                    // (its attributes (its __dict__'s) before its methods (non-data descriptors), after its data descriptors)
+                    if (m.dict != nullptr && !memory_data_attribute(m, aName))
+                    {
+                        ref const key{ make_str(aName) };
+                        if (auto const position = dict_find(m.dict, key.get()); position >= 0)
+                        {
+                            auto const value = as<dict_object>(m.dict)->items[static_cast<std::size_t>(position)].second;
+                            return (retain(value), value);
+                        }
+                        else if (position < -1)
+                            return nullptr;
+                    }
                     for (auto const& method : sMemoryMethods)
                         if (std::strcmp(method.name, aName) == 0 && (m.text ? std::strcmp(aName, "getbuffer") != 0 && std::strcmp(aName, "read1") != 0 && 
                             std::strncmp(aName, "readinto", 8u) != 0 : true))
@@ -1325,6 +1445,31 @@ namespace neos::python_runtime
                     if (m.text && std::strcmp(aName, "line_buffering") == 0)
                         return make_bool(false);
                     return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
+                };
+                // (its attributes: in its __dict__ (its data descriptors are not writable))
+                type.setattr = [](neos_py_context*, object* aSelf, char const* aName, object* aValue) -> int
+                {
+                    auto& m = as_memory(aSelf);
+                    if (memory_data_attribute(m, aName) || std::strcmp(aName, "__dict__") == 0)
+                    {
+                        error("AttributeError", std::string{ "attribute '" } + aName + "' of '" + (m.text ? "_io.StringIO" : "_io.BytesIO") + "' objects is not writable");
+                        return -1;
+                    }
+                    if (m.dict == nullptr)
+                        m.dict = make_dict();
+                    ref const key{ make_str(aName) };
+                    if (aValue != nullptr)
+                        return dict_set(m.dict, key.get(), aValue) == 0 ? 0 : -1;
+                    auto const position = dict_find(m.dict, key.get());
+                    if (position < -1)
+                        return -1;
+                    if (position == -1)
+                    {
+                        error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
+                        return -1;
+                    }
+                    dict_erase(*as<dict_object>(m.dict), static_cast<std::size_t>(position));
+                    return 0;
                 };
                 type.iter = [](neos_py_context*, object* aSelf) -> object*
                 {
@@ -1495,9 +1640,81 @@ namespace neos::python_runtime
                     if (n != "" && n != "\n" && n != "\r" && n != "\r\n")
                         return error("ValueError", "illegal newline value: " + n);
                 }
+                // (buffering: an int (-1: the default; 0: unbuffered (binary only: the raw FileIO); 1: line buffered (text only)))
+                long long buffering = -1;
+                if (a[2] != nullptr)
+                {
+                    if (!is_int_like(a[2]))
+                        return error("TypeError", std::string{ "'" } + type_name(a[2]) + "' object cannot be interpreted as an integer");
+                    if (!to_index(a[2], buffering))
+                        return nullptr;
+                }
+                bool const closefd = a[6] == nullptr || truth(a[6]) == 1;
+                object* const opener = a[7] != nullptr && kind_of(a[7]) != NEOS_PY_NONE ? a[7] : nullptr;
+                if (isBinary && buffering == 1)
+                {
+                    ref const warn{ module_attribute("warnings", "warn") };
+                    if (!warn)
+                        return nullptr;
+                    ref const warned{ invoke(warn.get(), { make_str("line buffering (buffering=1) isn't supported in binary mode, the default buffer size will be used"),
+                        exception_class("RuntimeWarning") }) };
+                    if (!warned)
+                        return nullptr;
+                    buffering = -1;
+                }
+                if (buffering == 0)
+                {
+                    // (unbuffered: the raw file (io.FileIO, with the mode's r, w, x or a and +); text: refused once it is open, as CPython)
+                    std::string const rawmode = std::string{ creating != 0 ? "x" : reading != 0 ? "r" : writing != 0 ? "w" : "a" } + (updating != 0 ? "+" : "");
+                    ref const fileIO{ module_attribute("io", "FileIO") };
+                    if (!fileIO)
+                        return nullptr;
+                    ref raw{ invoke(fileIO.get(), { new_reference(a[0]), make_str(rawmode), make_bool(closefd), new_reference(opener != nullptr ? opener : none()) }) };
+                    if (!raw)
+                        return nullptr;
+                    if (!isBinary)
+                    {
+                        ref const close{ getattr(raw.get(), "close") };
+                        ref const r{ close ? invoke(close.get(), {}) : nullptr };
+                        if (!r)
+                            return nullptr;
+                        return error("ValueError", "can't have unbuffered text I/O");
+                    }
+                    return raw.release_ownership();
+                }
+                if (!closefd && descriptor < 0)
+                    return error("ValueError", "Cannot use closefd=False with file name");
                 // (a file opened to write (or created): restricted (a descriptor's is its opener's))
                 if (descriptor < 0 && (writing != 0 || creating != 0 || appending != 0 || updating != 0) && !host_unrestricted("open"))
                     return nullptr;
+                if (opener != nullptr && descriptor < 0)
+                {
+                    // (opener(file, flags): the descriptor to open (FileIO's flags))
+                    int flags = (reading != 0 && updating == 0) ? O_RDONLY : (reading == 0 && updating == 0) ? O_WRONLY : O_RDWR;
+                    if (creating != 0)
+                        flags |= O_EXCL | O_CREAT;
+                    else if (writing != 0)
+                        flags |= O_CREAT | O_TRUNC;
+                    else if (appending != 0)
+                        flags |= O_APPEND | O_CREAT;
+#if defined(O_BINARY)
+                    flags |= O_BINARY;
+#endif
+#if defined(_WIN32)
+                    flags |= O_NOINHERIT;
+#elif defined(O_CLOEXEC)
+                    flags |= O_CLOEXEC;
+#endif
+                    ref const fd{ invoke(opener, { new_reference(a[0]), make_int(flags) }) };
+                    if (!fd)
+                        return nullptr;
+                    if (!is_int_like(fd.get()))
+                        return error("TypeError", "expected integer from opener");
+                    if (!to_index(fd.get(), descriptor))
+                        return nullptr;
+                    if (descriptor < 0)
+                        return error("ValueError", "opener returned " + std::to_string(descriptor));
+                }
                 // (a directory)
 #if defined(_WIN32)
                 struct _stat64 st{};
@@ -1525,7 +1742,6 @@ namespace neos::python_runtime
                 if (descriptor >= 0)
                 {
                     // (closefd=False: the descriptor stays open (the file has a duplicate of it))
-                    bool const closefd = a[6] == nullptr || truth(a[6]) == 1;
                     // (fdopen's mode: "w" does not truncate an open file)
                     char const* const fdmode = reading != 0 && updating == 0 ? "rb" : appending != 0 ? (updating != 0 ? "a+b" : "ab") : 
                         updating != 0 ? "r+b" : "wb";
@@ -1555,6 +1771,16 @@ namespace neos::python_runtime
                 f->appending = appending != 0;
                 f->encoding = encoding;
                 f->errors = errorsMode;
+                // (buffering: 1 (text), or a terminal: line buffered; more than 1: a buffer of that size)
+#if defined(_WIN32)
+                f->lineBuffering = !isBinary && (buffering == 1 || (buffering < 0 && ::_isatty(::_fileno(file)) != 0));
+#else
+                f->lineBuffering = !isBinary && (buffering == 1 || (buffering < 0 && ::isatty(::fileno(file)) != 0));
+#endif
+                if (f->lineBuffering)
+                    std::setvbuf(file, nullptr, _IOLBF, BUFSIZ);
+                else if (buffering > 1)
+                    std::setvbuf(file, nullptr, _IOFBF, static_cast<std::size_t>(buffering));
                 if (a[5] != nullptr)
                 {
                     retain(a[5]);
@@ -1595,6 +1821,10 @@ namespace neos::python_runtime
                         text ? [](neos_py_context*, void*, object* aObject) -> int { return aObject != nullptr && aObject->type == &sStringIOType.base ? 1 : 0; } :
                             [](neos_py_context*, void*, object* aObject) -> int { return aObject != nullptr && aObject->type == &sBytesIOType.base ? 1 : 0; });
                     observed_types().try_emplace(text ? "_io.StringIO" : "_io.BytesIO", text ? &sStringIOType : &sBytesIOType);
+                    // (their methods, unbound (e.g. io.BytesIO.write(f, data)))
+                    register_type_attributes(text ? "_io.StringIO" : "_io.BytesIO", text ?
+                        [](char const* aName) -> object* { return memory_unbound_method(true, aName); } :
+                        [](char const* aName) -> object* { return memory_unbound_method(false, aName); });
                     aAttributes.emplace_back(text ? "StringIO" : "BytesIO", type);
                 }
                 aAttributes.emplace_back("SEEK_SET", make_int(0));

@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::email_headerregistry_module
         void make_email_headerregistry()
         {
             static module_writer const& w = writer("email.headerregistry");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.headerregistry", "MappingProxyType", import_attribute("types", "MappingProxyType"));
             define("email.headerregistry", "Address", w.make_class("Address", {  }, {
                 { "__init__", w.method("Address", "__init__", { py_positional("display_name", S<"">()), py_positional("username", S<"">()), py_positional("domain", S<"">()), py_positional("addr_spec", none()) }, [](arguments a) -> py
                     {
@@ -667,7 +669,7 @@ namespace neos::python_runtime::detail::email_headerregistry_module
                 { "params", B<"property">()(w.method("ParameterizedMIMEHeader", "params", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (Mod<"types">().attr("MappingProxyType"))(self.attr("_params"));
+                        return (G<"email.headerregistry.MappingProxyType">())(self.attr("_params"));
                     })) }, }));
 
             define("email.headerregistry", "ContentTypeHeader", w.make_class("ContentTypeHeader", { G<"email.headerregistry.ParameterizedMIMEHeader">() }, {
@@ -837,7 +839,6 @@ namespace neos::python_runtime::detail::email_headerregistry_module
                 }
                 if (auto const doc = email_headerregistry_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("MappingProxyType", import_attribute("types", "MappingProxyType").release());
                 aAttributes.emplace_back("utils", import_attribute("email", "utils").release());
                 aAttributes.emplace_back("errors", import_attribute("email", "errors").release());
                 aAttributes.emplace_back("parser", import_attribute("email", "_header_value_parser").release());
@@ -849,6 +850,14 @@ namespace neos::python_runtime::detail::email_headerregistry_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.headerregistry", email_headerregistry_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.headerregistry", email_headerregistry_module, assigned);
     }
 }

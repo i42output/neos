@@ -160,6 +160,11 @@ namespace neos::python_runtime::detail::shelve_module
         void make_shelve()
         {
             static module_writer const& w = writer("shelve");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("shelve", "DEFAULT_PROTOCOL", import_attribute("pickle", "DEFAULT_PROTOCOL"));
+            define("shelve", "Pickler", import_attribute("pickle", "Pickler"));
+            define("shelve", "Unpickler", import_attribute("pickle", "Unpickler"));
+            define("shelve", "BytesIO", import_attribute("io", "BytesIO"));
             define("shelve", "__all__", py_list({ S<"Shelf">(), S<"BsdDbShelf">(), S<"DbfilenameShelf">(), S<"open">() }));
             define("shelve", "_ClosedDict", w.make_class("_ClosedDict", { Mod<"collections.abc">().attr("MutableMapping") }, {
                 { "closed", w.method("_ClosedDict", "closed", {  }, [](arguments a) -> py
@@ -221,7 +226,7 @@ namespace neos::python_runtime::detail::shelve_module
                         self.set_attr("dict", dict);
                         if (protocol.is_none())
                         {
-                            protocol = Mod<"pickle">().attr("DEFAULT_PROTOCOL");
+                            protocol = G<"shelve.DEFAULT_PROTOCOL">();
                         }
                         self.set_attr("_protocol", protocol);
                         self.set_attr("writeback", writeback);
@@ -280,8 +285,8 @@ namespace neos::python_runtime::detail::shelve_module
                             pyclass::handler_scope handler2;
                             if (matches(handler2.exception, B<"KeyError">()))
                             {
-                                f = (Mod<"io">().attr("BytesIO"))(self.attr("dict")[key.method("encode", { self.attr("keyencoding") })]);
-                                value = (Mod<"pickle">().attr("Unpickler"))(f).method("load");
+                                f = (G<"shelve.BytesIO">())(self.attr("dict")[key.method("encode", { self.attr("keyencoding") })]);
+                                value = (G<"shelve.Unpickler">())(f).method("load");
                                 if (self.attr("writeback").truthy())
                                 {
                                     self.attr("cache").set_item(key, value);
@@ -303,8 +308,8 @@ namespace neos::python_runtime::detail::shelve_module
                         {
                             self.attr("cache").set_item(key, value);
                         }
-                        f = (Mod<"io">().attr("BytesIO"))();
-                        p = (Mod<"pickle">().attr("Pickler"))(f, self.attr("_protocol"));
+                        f = (G<"shelve.BytesIO">())();
+                        p = (G<"shelve.Pickler">())(f, self.attr("_protocol"));
                         p.method("dump", { value });
                         self.attr("dict").set_item(key.method("encode", { self.attr("keyencoding") }), f.method("getvalue"));
                         return none();
@@ -453,8 +458,8 @@ namespace neos::python_runtime::detail::shelve_module
                         auto const items9 = unpack(self.attr("dict").method("set_location", { key }), 2);
                         key = items9[0];
                         value = items9[1];
-                        f = (Mod<"io">().attr("BytesIO"))(value);
-                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (Mod<"pickle">().attr("Unpickler"))(f).method("load") });
+                        f = (G<"shelve.BytesIO">())(value);
+                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (G<"shelve.Unpickler">())(f).method("load") });
                     }) },
                 { "next", w.method("BsdDbShelf", "next", {  }, [](arguments a) -> py
                     {
@@ -465,8 +470,8 @@ namespace neos::python_runtime::detail::shelve_module
                         auto const items10 = unpack((B<"next">())(self.attr("dict")), 2);
                         key = items10[0];
                         value = items10[1];
-                        f = (Mod<"io">().attr("BytesIO"))(value);
-                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (Mod<"pickle">().attr("Unpickler"))(f).method("load") });
+                        f = (G<"shelve.BytesIO">())(value);
+                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (G<"shelve.Unpickler">())(f).method("load") });
                     }) },
                 { "previous", w.method("BsdDbShelf", "previous", {  }, [](arguments a) -> py
                     {
@@ -477,8 +482,8 @@ namespace neos::python_runtime::detail::shelve_module
                         auto const items11 = unpack(self.attr("dict").method("previous"), 2);
                         key = items11[0];
                         value = items11[1];
-                        f = (Mod<"io">().attr("BytesIO"))(value);
-                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (Mod<"pickle">().attr("Unpickler"))(f).method("load") });
+                        f = (G<"shelve.BytesIO">())(value);
+                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (G<"shelve.Unpickler">())(f).method("load") });
                     }) },
                 { "first", w.method("BsdDbShelf", "first", {  }, [](arguments a) -> py
                     {
@@ -489,8 +494,8 @@ namespace neos::python_runtime::detail::shelve_module
                         auto const items12 = unpack(self.attr("dict").method("first"), 2);
                         key = items12[0];
                         value = items12[1];
-                        f = (Mod<"io">().attr("BytesIO"))(value);
-                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (Mod<"pickle">().attr("Unpickler"))(f).method("load") });
+                        f = (G<"shelve.BytesIO">())(value);
+                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (G<"shelve.Unpickler">())(f).method("load") });
                     }) },
                 { "last", w.method("BsdDbShelf", "last", {  }, [](arguments a) -> py
                     {
@@ -501,8 +506,8 @@ namespace neos::python_runtime::detail::shelve_module
                         auto const items13 = unpack(self.attr("dict").method("last"), 2);
                         key = items13[0];
                         value = items13[1];
-                        f = (Mod<"io">().attr("BytesIO"))(value);
-                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (Mod<"pickle">().attr("Unpickler"))(f).method("load") });
+                        f = (G<"shelve.BytesIO">())(value);
+                        return py_tuple({ key.method("decode", { self.attr("keyencoding") }), (G<"shelve.Unpickler">())(f).method("load") });
                     }) }, }));
 
             define("shelve", "DbfilenameShelf", w.make_class("DbfilenameShelf", { G<"shelve.Shelf">() }, {
@@ -550,10 +555,6 @@ namespace neos::python_runtime::detail::shelve_module
                 }
                 if (auto const doc = shelve_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("DEFAULT_PROTOCOL", import_attribute("pickle", "DEFAULT_PROTOCOL").release());
-                aAttributes.emplace_back("Pickler", import_attribute("pickle", "Pickler").release());
-                aAttributes.emplace_back("Unpickler", import_attribute("pickle", "Unpickler").release());
-                aAttributes.emplace_back("BytesIO", import_attribute("io", "BytesIO").release());
                 aAttributes.emplace_back("collections", py{ fn_import("collections") }.release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
@@ -563,6 +564,14 @@ namespace neos::python_runtime::detail::shelve_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("shelve", shelve_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("shelve", shelve_module, assigned);
     }
 }

@@ -147,6 +147,8 @@ namespace neos::python_runtime::detail::fileinput_module
         void make_fileinput()
         {
             static module_writer const& w = writer("fileinput");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("fileinput", "GenericAlias", import_attribute("types", "GenericAlias"));
             define("fileinput", "__all__", py_list({ S<"input">(), S<"close">(), S<"nextfile">(), S<"filename">(), S<"lineno">(), S<"filelineno">(), S<"fileno">(), S<"isfirstline">(), S<"isstdin">(), S<"FileInput">(), S<"hook_compressed">(), S<"hook_encoded">() }));
             define("fileinput", "_state", none());
             define("fileinput", "input", w.function("input", "input", { py_positional("files", none()), py_positional("inplace", boolean(false)), py_positional("backup", S<"">()), py_keyword("mode", S<"r">()), py_keyword("openhook", none()), py_keyword("encoding", none()), py_keyword("errors", none()) }, [](arguments a) -> py
@@ -686,7 +688,7 @@ namespace neos::python_runtime::detail::fileinput_module
                         py self = a[0];
                         return self.attr("_isstdin");
                     }) },
-                { "__class_getitem__", (B<"classmethod">())(Mod<"types">().attr("GenericAlias")) }, }));
+                { "__class_getitem__", (B<"classmethod">())(G<"fileinput.GenericAlias">()) }, }));
 
             define("fileinput", "hook_compressed", w.function("hook_compressed", "hook_compressed", { py_positional("filename"), py_positional("mode"), py_keyword("encoding", none()), py_keyword("errors", none()) }, [](arguments a) -> py
                 {
@@ -804,7 +806,6 @@ namespace neos::python_runtime::detail::fileinput_module
                 aAttributes.emplace_back("io", py{ fn_import("io") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
-                aAttributes.emplace_back("GenericAlias", import_attribute("types", "GenericAlias").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -813,6 +814,14 @@ namespace neos::python_runtime::detail::fileinput_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("fileinput", fileinput_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("fileinput", fileinput_module, assigned);
     }
 }

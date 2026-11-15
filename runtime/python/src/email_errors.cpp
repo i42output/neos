@@ -300,6 +300,14 @@ namespace neos::python_runtime::detail::email_errors_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.errors", email_errors_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.errors", email_errors_module, assigned);
     }
 }

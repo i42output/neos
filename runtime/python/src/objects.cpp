@@ -34,7 +34,8 @@
   Objects/longobject.c, Objects/rangeobject.c, Objects/sliceobject.c, Objects/tupleobject.c, Objects/exceptions.c,
   Python/bltinmodule.c, Python/pyhash.c, Python/errors.c (_PyErr_WriteUnraisableMsg), Modules/mathmodule.c and
   Modules/cmathmodule.c; the reductions (pickling) of
-  Objects/listobject.c, Objects/dictobject.c, Objects/unicodeobject.c, Objects/methodobject.c and Objects/typeobject.c),
+  Objects/listobject.c, Objects/dictobject.c, Objects/unicodeobject.c, Objects/methodobject.c, Objects/typeobject.c and
+  Objects/classobject.c (method_reduce); Objects/typeobject.c's object_set_class (__class__ assignment)),
   Copyright (c) 2001-2024 Python
   Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
   runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
@@ -54,8 +55,10 @@
 #include <atomic>
 #include <bit>
 #include <bitset>
+#include <cctype>
 #include <cerrno>
 #include <climits>
+#include <cstdlib>
 #include <charconv>
 #include <cmath>
 #include <complex>
@@ -97,8 +100,12 @@ namespace neos::python_runtime
 
         // --- errors
 
+        void raised_superseded();
+
         std::nullptr_t error(std::string const& aType, std::string const& aMessage)
         {
+            if (!failed())
+                raised_superseded();
             python_runtime::raise(aType, aMessage);
             return nullptr;
         }
@@ -114,6 +121,21 @@ namespace neos::python_runtime
                 return name;
             if (auto const name = instance_class_name(aObject))
                 return name;
+            // (a builtin iterator: CPython's name of its sequence's iterator type)
+            if (aObject->type == &sIteratorType.base)
+                switch (kind_of(as<iterator_object>(aObject)->sequence))
+                {
+                case NEOS_PY_LIST: return "list_iterator";
+                case NEOS_PY_TUPLE: return "tuple_iterator";
+                case NEOS_PY_RANGE: return "range_iterator";
+                case NEOS_PY_DICT: return "dict_keyiterator";
+                case NEOS_PY_STR:
+                    {
+                        auto const& text = as<str_object>(as<iterator_object>(aObject)->sequence)->value;
+                        return std::all_of(text.begin(), text.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80u; }) ? "str_ascii_iterator" : "str_iterator";
+                    }
+                default: return "iterator";
+                }
             if (auto const type = python_type(aObject))
                 return type->name;
             return aObject->type->name;
@@ -1901,6 +1923,15 @@ namespace neos::python_runtime
                 explicit recursive_call(char const* aWhere) : state{ tRecursion }, entered{ enter_recursive_call(state, aWhere) } {}
                 ~recursive_call() { if (entered) --state.depth; }
             };
+        }
+
+        // (a call of a native function that can recurse (e.g. a module's function that py2neos translated): entered (false: RecursionError 
+        // (beyond the limit, or near the end of the stack)); left when it returns (values.cpp))
+        bool native_recursion_enter() { return enter_recursive_call(tRecursion, ""); }
+        void native_recursion_leave() { --tRecursion.depth; }
+
+        namespace
+        {
 
             // (an item of a container whose comparison or repr can recurse (it can contain others, or it has its own))
             bool can_recurse(object* aObject)
@@ -3276,6 +3307,17 @@ namespace neos::python_runtime
         // a sequence index (negative: from the end) in range
         bool normalize_index(object* aKey, std::size_t aSize, std::size_t& aIndex, char const* aWhat)
         {
+            // (a key that is not an integer (nor has __index__): CPython's messages)
+            if (!is_int_like(aKey) && !(python_type(aKey) != nullptr && python_type(aKey)->index != nullptr) && !has_special_method(aKey, "__index__"))
+            {
+                std::string_view const what{ aWhat };
+                if (what == "string")
+                    error("TypeError", std::string{ "string indices must be integers, not '" } + type_name(aKey) + "'");
+                else
+                    error("TypeError", std::string{ what == "range object" ? "range" : what == "list assignment" ? "list" : aWhat } + 
+                        " indices must be integers or slices, not " + type_name(aKey));
+                return false;
+            }
             long long i = 0;
             if (!to_index(aKey, i))
             {
@@ -3300,12 +3342,129 @@ namespace neos::python_runtime
             return true;
         }
 
+        // (whether an int is negative)
+        bool int_negative(object* aInt)
+        {
+            if (!is_big(aInt))
+                return int_value(aInt) < 0;
+            if (limb_view v; limbs_of(aInt, v))
+                return v.negative && v.size != 0u;
+            return big_negative(big_of(aInt));
+        }
+
+        object* call_special(object* aObject, char const* aName, std::vector<object*> aArgs, bool& aFound);
+
+        // (a slice's index as an int (evaluate_slice_index): an int, or the result of an object's __index__)
+        ref slice_index_value(object* aPart)
+        {
+            if (is_int_like(aPart))
+                return ref{ new_reference(aPart) };
+            if (is_instance(aPart))
+            {
+                bool found = false;
+                ref value{ call_special(aPart, "__index__", {}, found) };
+                if (!found && builtin_value(aPart) != aPart && is_int_like(builtin_value(aPart)))
+                    return ref{ new_reference(builtin_value(aPart)) };
+                if (!found)
+                {
+                    error("TypeError", "slice indices must be integers or None or have an __index__ method");
+                    return {};
+                }
+                if (value && !is_int_like(value.get()))
+                {
+                    error("TypeError", std::string{ "__index__ returned non-int (type " } + type_name(value.get()) + ")");
+                    return {};
+                }
+                return value;
+            }
+            if (auto const type = python_type(aPart); type != nullptr && type->index != nullptr)
+            {
+                long long result = 0;
+                return type->index(context(), aPart, &result) == 0 ? ref{ make_int(result) } : ref{};
+            }
+            error("TypeError", "slice indices must be integers or None or have an __index__ method");
+            return {};
+        }
+
+        // (a slice's index (_PyEval_SliceIndex): clamped to [-sys.maxsize - 1, sys.maxsize] (PyNumber_AsSsize_t(v, NULL)))
+        bool slice_index(object* aPart, long long& aResult)
+        {
+            if (is_small_int(aPart))
+                return (aResult = as<int_object>(aPart)->value, true);
+            ref const value{ slice_index_value(aPart) };
+            if (!value)
+                return false;
+            if (is_big(value.get()))
+            {
+                aResult = int_negative(value.get()) ? std::numeric_limits<long long>::min() : std::numeric_limits<long long>::max();
+                return true;
+            }
+            aResult = int_value(value.get());
+            return true;
+        }
+
+        // (_PySlice_GetLongIndices: a slice's start, stop and step for a length, as ints of any size (slice.indices()))
+        bool slice_long_indices(object* aSlice, object* aLength, ref& aStart, ref& aStop, ref& aStep)
+        {
+            auto const& s = *as<slice_object>(aSlice);
+            auto const isNone = [](object* aPart) { return aPart == nullptr || aPart == none() || kind_of(aPart) == NEOS_PY_NONE; };
+            bool stepNegative = false;
+            if (isNone(s.step))
+                aStep = ref{ make_int(1) };
+            else
+            {
+                aStep = slice_index_value(s.step);
+                if (!aStep)
+                    return false;
+                stepNegative = int_negative(aStep.get());
+                if (!is_big(aStep.get()) && int_value(aStep.get()) == 0)
+                {
+                    error("ValueError", "slice step cannot be zero");
+                    return false;
+                }
+            }
+            // (the bounds of start and stop)
+            ref const lower{ make_int(stepNegative ? -1 : 0) };
+            ref const upper{ stepNegative ? binary(NEOS_PY_ADD, aLength, lower.get(), false) : new_reference(aLength) };
+            if (!upper)
+                return false;
+            auto const bound = [&](object* aPart, object* aDefault, ref& aResult) -> bool
+            {
+                if (isNone(aPart))
+                    return (aResult = ref{ new_reference(aDefault) }, true);
+                aResult = slice_index_value(aPart);
+                if (!aResult)
+                    return false;
+                if (int_negative(aResult.get()))
+                {
+                    aResult = ref{ binary(NEOS_PY_ADD, aResult.get(), aLength, false) };
+                    if (!aResult)
+                        return false;
+                    ref const below{ compare(NEOS_PY_LT, aResult.get(), lower.get()) };
+                    if (!below)
+                        return false;
+                    if (truth(below.get()) == 1)
+                        aResult = ref{ new_reference(lower.get()) };
+                }
+                else
+                {
+                    ref const above{ compare(NEOS_PY_GT, aResult.get(), upper.get()) };
+                    if (!above)
+                        return false;
+                    if (truth(above.get()) == 1)
+                        aResult = ref{ new_reference(upper.get()) };
+                }
+                return true;
+            };
+            return bound(s.start, stepNegative ? upper.get() : lower.get(), aStart) && bound(s.stop, stepNegative ? lower.get() : upper.get(), aStop);
+        }
+
         // Python's slice.indices()
         bool slice_unpack(object* aSlice, std::optional<long long>& aStart, std::optional<long long>& aStop, long long& aStep)
         {
             auto const& s = *as<slice_object>(aSlice);
-            // (an index: a small int's value (the commonest), else to_index's)
-            auto const index = [](object* aPart, long long& aResult) { return is_small_int(aPart) ? (aResult = as<int_object>(aPart)->value, true) : to_index(aPart, aResult); };
+            // (an index: a small int's value (the commonest), else clamped (slice_index))
+            auto const index = [](object* aPart, long long& aResult) { return slice_index(aPart, aResult); };
             aStep = 1;
             if (s.step != none() && kind_of(s.step) != NEOS_PY_NONE && !index(s.step, aStep))
                 return false;
@@ -4192,6 +4351,132 @@ namespace neos::python_runtime
                 denominator = denominator << static_cast<std::int64_t>(-e);
             return make_tuple({ make_int(std::move(numerator)), make_int(std::move(denominator)) });
         }
+        // float.hex() (CPython's float_hex: the hexadecimal digits of the normalized significand (subnormals: as if normalized at
+        // DBL_MIN_EXP), 13 after the point, and the binary exponent)
+        object* float_hex(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "float.hex"))
+                return nullptr;
+            auto const x = as<float_object>(aSelf)->value;
+            if (std::isnan(x))
+                return make_str("nan");
+            if (std::isinf(x))
+                return make_str(x < 0.0 ? "-inf" : "inf");
+            if (x == 0.0)
+                return make_str(std::signbit(x) ? "-0x0.0p+0" : "0x0.0p+0");
+            int e = 0;
+            double m = std::frexp(std::fabs(x), &e);
+            int const shift = 1 - std::max(std::numeric_limits<double>::min_exponent - e, 0);
+            m = std::ldexp(m, shift);
+            e -= shift;
+            static char const sDigits[] = "0123456789abcdef";
+            std::string text = x < 0.0 ? "-0x" : "0x";
+            text += sDigits[static_cast<int>(m)];
+            m -= static_cast<int>(m);
+            text += '.';
+            for (int i = 0; i < (std::numeric_limits<double>::digits - 1) / 4; ++i)
+            {
+                m *= 16.0;
+                text += sDigits[static_cast<int>(m)];
+                m -= static_cast<int>(m);
+            }
+            text += 'p';
+            text += e < 0 ? '-' : '+';
+            text += std::to_string(e < 0 ? -e : e);
+            return make_str(text);
+        }
+        // float.conjugate(): the float itself
+        object* float_conjugate(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "float.conjugate"))
+                return nullptr;
+            return make_float(as<float_object>(aSelf)->value);
+        }
+        // (float.fromhex(string): CPython's float_fromhex's syntax ([sign] (inf | infinity | nan | [0x] digits [. digits] [p [sign]
+        // digits]), surrounding whitespace allowed); the value correctly rounded (strtod of the hexadecimal digits as an integer with the
+        // exponent adjusted: no radix character, so no locale))
+        object* float_from_hex_string(object* aString)
+        {
+            if (kind_of(aString) != NEOS_PY_STR)
+                return error("TypeError", std::string{ "must be str, not " } + type_name(aString));
+            auto const& text = as<str_object>(aString)->value;
+            auto const invalid = [&]() { return error("ValueError", "invalid hexadecimal floating-point string"); };
+            auto const space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; };
+            std::size_t i = 0u;
+            std::size_t end = text.size();
+            while (i < end && space(text[i]))
+                ++i;
+            while (end > i && space(text[end - 1u]))
+                --end;
+            bool negative = false;
+            if (i < end && (text[i] == '+' || text[i] == '-'))
+                negative = text[i++] == '-';
+            auto const rest = [&]()
+            {
+                std::string r = text.substr(i, end - i);
+                for (auto& c : r)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return r;
+            }();
+            if (rest == "inf" || rest == "infinity")
+                return make_float(negative ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity());
+            if (rest == "nan")
+                return make_float(negative ? -std::numeric_limits<double>::quiet_NaN() : std::numeric_limits<double>::quiet_NaN());
+            if (i + 1u < end && text[i] == '0' && (text[i + 1u] == 'x' || text[i + 1u] == 'X'))
+                i += 2u;
+            auto const hex = [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; };
+            std::string digits;
+            std::size_t fractionDigits = 0u;
+            while (i < end && hex(text[i]))
+                digits += text[i++];
+            if (i < end && text[i] == '.')
+            {
+                ++i;
+                while (i < end && hex(text[i]))
+                {
+                    digits += text[i++];
+                    ++fractionDigits;
+                }
+            }
+            if (digits.empty())
+                return invalid();
+            long long exponent = 0;
+            if (i < end && (text[i] == 'p' || text[i] == 'P'))
+            {
+                ++i;
+                bool negativeExponent = false;
+                if (i < end && (text[i] == '+' || text[i] == '-'))
+                    negativeExponent = text[i++] == '-';
+                if (i >= end || !std::isdigit(static_cast<unsigned char>(text[i])))
+                    return invalid();
+                // (beyond any double's range: kept at a bound that strtod overflows or underflows at either way)
+                long long const bound = 1000000000000LL;
+                while (i < end && std::isdigit(static_cast<unsigned char>(text[i])))
+                {
+                    exponent = std::min(exponent * 10 + (text[i] - '0'), bound);
+                    ++i;
+                }
+                if (negativeExponent)
+                    exponent = -exponent;
+            }
+            if (i != end)
+                return invalid();
+            auto const first = digits.find_first_not_of('0');
+            if (first == std::string::npos)
+                return make_float(negative ? -0.0 : 0.0);
+            std::string const number = "0x" + digits.substr(first) + "p" + std::to_string(exponent - 4LL * static_cast<long long>(fractionDigits));
+            errno = 0;
+            double const value = std::strtod(number.c_str(), nullptr);
+            if (std::isinf(value))
+                return error("OverflowError", "hexadecimal value too large to represent as a float");
+            return make_float(negative ? -value : value);
+        }
+        object* float_fromhex(object*, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 1u, 1u, "float.fromhex"))
+                return nullptr;
+            return float_from_hex_string(aArgs[0]);
+        }
 
         // int.to_bytes(length=1, byteorder='big', *, signed=False)
         object* int_to_bytes(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs)
@@ -4311,14 +4596,19 @@ namespace neos::python_runtime
                 if (order != "big" && order != "little")
                     return error("ValueError", "byteorder must be either 'little' or 'big'");
             }
-            if (order == "little")
+            // (its two's complement words, from the least significant byte; signed and negative: sign-extended, else with zeros above)
+            if (order == "big")
                 std::reverse(data.begin(), data.end());
-            big_integer value{ 0 };
-            for (unsigned char c : data)
-                value = (value << 8) + big_integer{ static_cast<long long>(c) };
-            if (a[2] != nullptr && truth(a[2]) == 1 && !data.empty() && (static_cast<unsigned char>(data[0]) & 0x80u) != 0u)
-                value = value - (big_integer{ 1 } << static_cast<std::int64_t>(8 * data.size()));
-            return make_int(std::move(value));
+            bool const negative = a[2] != nullptr && truth(a[2]) == 1 && !data.empty() && (static_cast<unsigned char>(data.back()) & 0x80u) != 0u;
+            constexpr std::size_t wordBytes = sizeof(big_integer::word_t);
+            std::vector<big_integer::word_t> words(data.size() / wordBytes + 1u, negative ? ~big_integer::word_t{ 0u } : big_integer::word_t{ 0u });
+            for (std::size_t i = 0u; i < data.size(); ++i)
+            {
+                auto& w = words[i / wordBytes];
+                auto const shift = 8u * (i % wordBytes);
+                w = (w & ~(big_integer::word_t{ 0xFFu } << shift)) | (static_cast<big_integer::word_t>(static_cast<unsigned char>(data[i])) << shift);
+            }
+            return make_int(big_integer{ words.begin(), words.end() });
         }
 
         struct method_entry
@@ -4353,7 +4643,10 @@ namespace neos::python_runtime
             { NEOS_PY_BOOL, "as_integer_ratio", { int_as_integer_ratio } },
             { NEOS_PY_BOOL, "is_integer", { int_is_integer } },
             { NEOS_PY_FLOAT, "is_integer", { float_is_integer } },
-            { NEOS_PY_FLOAT, "as_integer_ratio", { float_as_integer_ratio } }
+            { NEOS_PY_FLOAT, "as_integer_ratio", { float_as_integer_ratio } },
+            { NEOS_PY_FLOAT, "hex", { float_hex } },
+            { NEOS_PY_FLOAT, "conjugate", { float_conjugate } },
+            { NEOS_PY_FLOAT, "fromhex", { float_fromhex } }
         };
 
         object* call_method(neos_py_context*, void* aData, neos_py_object* aArgs, neos_py_object* aKwargs)
@@ -4403,6 +4696,13 @@ namespace neos::python_runtime
             if (type == nullptr)
                 return nullptr;
             std::string_view const name{ aName };
+            // (an iterator of a type that knows its items left (e.g. a dict's): its __length_hint__)
+            if (name == "__length_hint__" && iterator && type->length != nullptr)
+                return make_function("__length_hint__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                    {
+                        auto const n = length(as<tuple_object>(aArgs)->items.at(0u));
+                        return n < 0 ? nullptr : make_int(n);
+                    }, nullptr, aObject);
             if ((name == "__len__" && type->length != nullptr) || (name == "__getitem__" && type->getitem != nullptr) ||
                 (name == "__contains__" && type->contains != nullptr) || (name == "__iter__" && type->iter != nullptr) ||
                 (name == "__repr__" && type->repr != nullptr) || (name == "__hash__" && type->hash != nullptr) ||
@@ -4608,6 +4908,46 @@ namespace neos::python_runtime
             {
                 if (k == NEOS_PY_ITERATOR && aName[0] == '_' && aName[1] == '_')
                 {
+                    // (__length_hint__: the items left (a sequence's length less the position; NotImplemented if the sequence has no length))
+                    if (std::strcmp(aName, "__length_hint__") == 0)
+                        return make_function("__length_hint__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        {
+                            auto const& it = *as<iterator_object>(as<tuple_object>(aArgs)->items.at(0u));
+                            auto const sequence = it.sequence;
+                            long long left = 0;
+                            switch (kind_of(sequence))
+                            {
+                            case NEOS_PY_LIST:
+                            case NEOS_PY_TUPLE:
+                            case NEOS_PY_DICT:
+                                {
+                                    auto const size = kind_of(sequence) == NEOS_PY_LIST ? as<list_object>(sequence)->items.size() :
+                                        kind_of(sequence) == NEOS_PY_TUPLE ? as<tuple_object>(sequence)->items.size() : as<dict_object>(sequence)->items.size();
+                                    left = it.index < size ? static_cast<long long>(size - it.index) : 0;
+                                    break;
+                                }
+                            case NEOS_PY_STR:
+                                {
+                                    auto const& text = as<str_object>(sequence)->value;
+                                    left = it.index < text.size() ? static_cast<long long>(code_point_count(text.substr(it.index))) : 0;
+                                    break;
+                                }
+                            default:
+                                {
+                                    auto const n = length(sequence);
+                                    if (n < 0)
+                                    {
+                                        if (!std::string_view{ error_text() }.starts_with("TypeError"))
+                                            return nullptr;
+                                        clear_error();
+                                        return (retain(not_implemented()), not_implemented());
+                                    }
+                                    left = std::max(n - static_cast<long long>(it.index), 0ll);
+                                    break;
+                                }
+                            }
+                            return make_int(left);
+                        }, nullptr, aObject);
                     if (auto const method = iterator_pickle_method(aObject, aName))
                         return method;
                     if (auto const method = slot_method(aObject, aName))
@@ -4640,7 +4980,31 @@ namespace neos::python_runtime
                                 auto const& c = *as<complex_object>(items[0]);
                                 return make_complex(c.real, -c.imag);
                             }, nullptr, aObject);
+                    // (__complex__: the complex itself (a copy of its value); __getnewargs__: (real, imag))
+                    if (std::strcmp(aName, "__complex__") == 0 || std::strcmp(aName, "__getnewargs__") == 0)
+                        return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
+                            {
+                                auto const& items = as<tuple_object>(aArgs)->items;
+                                bool const complex = aData != nullptr;
+                                if (items.size() != 1u)
+                                    return error("TypeError", std::string{ complex ? "complex.__complex__" : "complex.__getnewargs__" } + "() takes no arguments (" + 
+                                        std::to_string(items.size() - 1u) + " given)");
+                                auto const& c = *as<complex_object>(items[0]);
+                                if (complex)
+                                    return make_complex(c.real, c.imag);
+                                return make_tuple({ make_float(c.real), make_float(c.imag) });
+                            }, std::strcmp(aName, "__complex__") == 0 ? const_cast<char*>("") : nullptr, aObject);
                 }
+                // (a float's and an int's __getnewargs__: (value,))
+                if ((k == NEOS_PY_FLOAT || k == NEOS_PY_INT) && std::strcmp(aName, "__getnewargs__") == 0)
+                    return make_function(aName, [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        {
+                            auto const& items = as<tuple_object>(aArgs)->items;
+                            if (items.size() != 1u)
+                                return error("TypeError", std::string{ kind_of(items[0]) == NEOS_PY_FLOAT ? "float" : "int" } + ".__getnewargs__() takes no arguments (" +
+                                    std::to_string(items.size() - 1u) + " given)");
+                            return make_tuple({ new_reference(items[0]) });
+                        }, nullptr, aObject);
                 if (k == NEOS_PY_SLICE)
                 {
                     auto const& s = *as<slice_object>(aObject);
@@ -4653,15 +5017,23 @@ namespace neos::python_runtime
                                 auto const& items = as<tuple_object>(aArgs)->items;
                                 if (items.size() != 2u)
                                     return error("TypeError", "slice.indices() takes exactly one argument (" + std::to_string(items.size() - 1u) + " given)");
-                                long long length = 0;
-                                if (!to_index(items[1], length))
-                                    return nullptr;
-                                if (length < 0)
+                                // (the length: PyNumber_Index's; the indices: of any size (_PySlice_GetLongIndices))
+                                ref length;
+                                if (is_int_like(items[1]))
+                                    length = ref{ new_reference(items[1]) };
+                                else
+                                {
+                                    long long n = 0;
+                                    if (!to_index(items[1], n))
+                                        return nullptr;
+                                    length = ref{ make_int(n) };
+                                }
+                                if (int_negative(length.get()))
                                     return error("ValueError", "length should not be negative");
-                                long long start = 0, stop = 0, step = 0;
-                                if (!slice_indices(items[0], length, start, stop, step))
+                                ref start, stop, step;
+                                if (!slice_long_indices(items[0], length.get(), start, stop, step))
                                     return nullptr;
-                                return make_tuple({ make_int(start), make_int(stop), make_int(step) });
+                                return make_tuple({ start.release_ownership(), stop.release_ownership(), step.release_ownership() });
                             }, nullptr, aObject);
                 }
                 if ((k == NEOS_PY_INT || k == NEOS_PY_BOOL || k == NEOS_PY_FLOAT) && (std::strcmp(aName, "real") == 0 || std::strcmp(aName, "imag") == 0))
@@ -4802,6 +5174,8 @@ namespace neos::python_runtime
             return error("AttributeError", std::string{ "'" } + type_name(aObject) + "' object has no attribute '" + aName + "'");
         }
 
+        int set_instance_class(object* aSelf, object* aValue);
+
         int setattr(object* aObject, char const* aName, object* aValue)
         {
             // (an instance's own attribute, set before)
@@ -4809,6 +5183,9 @@ namespace neos::python_runtime
                 return 0;
             if (auto const type = python_type(aObject); type != nullptr && type->setattr != nullptr && kind_of(aObject) == NEOS_PY_OTHER)
                 return type->setattr(context(), aObject, aName, aValue);
+            // (an immutable type's object's __class__ (as CPython's object_set_class))
+            if (std::strcmp(aName, "__class__") == 0)
+                return set_instance_class(aObject, aValue);
             error("AttributeError", std::string{ "'" } + type_name(aObject) + "' object has no attribute '" + aName + "'");
             return -1;
         }
@@ -5606,9 +5983,11 @@ namespace neos::python_runtime
                 }
             }
             std::vector<object*> values;
-            bool const mapping = kind_of(aValues) == NEOS_PY_DICT;
-            if (kind_of(aValues) == NEOS_PY_TUPLE)
-                values = as<tuple_object>(aValues)->items;
+            // (a tuple's items, also a subclass's (e.g. a namedtuple); a dict, also a subclass's: the mapping that keys are looked up in)
+            auto const value = aValues != nullptr ? builtin_value(aValues) : aValues;
+            bool const mapping = kind_of(value) == NEOS_PY_DICT;
+            if (kind_of(value) == NEOS_PY_TUPLE)
+                values = as<tuple_object>(value)->items;
             else
                 values.push_back(aValues);
             std::size_t next = 0u;
@@ -6022,6 +6401,7 @@ namespace neos::python_runtime
 
         // (the namespace of a function's module (its __globals__): a new reference)
         object* function_globals(object* aFunction);
+        object* bind_attribute(object* aAttribute, object* aSelf, object* aClass);
 
         object* function_code(object* aFunction);
 
@@ -6153,6 +6533,26 @@ namespace neos::python_runtime
                 return make_tuple();
             if (std::strcmp(aName, "__builtins__") == 0)
                 return getattr(ref{ fn_import("builtins") }.get(), "__dict__");
+            // (__get__(instance, owner=None): a method of the instance (the function itself if the instance is None), as a class's attribute
+            // is bound)
+            if (std::strcmp(aName, "__get__") == 0)
+                return make_function("__get__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    auto const& args = tuple_items(aArgs);
+                    if (args.size() < 2u || args.size() > 3u)
+                        return error("TypeError", "expected 1 or 2 arguments, got " + std::to_string(args.size() - 1u));
+                    bool const noOwner = args.size() < 3u || kind_of(args[2]) == NEOS_PY_NONE;
+                    if (kind_of(args[1]) == NEOS_PY_NONE)
+                    {
+                        if (noOwner)
+                            return error("TypeError", "__get__(None, None) is invalid");
+                        return new_reference(args[0]);
+                    }
+                    ref const owner{ noOwner ? class_of(args[1]) : new_reference(args[2]) };
+                    if (!owner)
+                        return nullptr;
+                    return bind_attribute(args[0], args[1], owner.get());
+                }, nullptr, aSelf);
             return error("AttributeError", "'function' object has no attribute '" + std::string{ aName } + "'");
         }
 
@@ -7069,7 +7469,7 @@ namespace neos::python_runtime
         object* fn_from_bool(bool aValue) { return make_bool(aValue); }
         object* fn_from_int(std::int64_t aValue) { return make_int(aValue); }
         object* fn_from_float(double aValue) { return make_float(aValue); }
-        object* fn_from_str(char const* aText) { return make_str(aText); }
+        object* fn_from_str(char const* aText) { return make_str(std::string{ argument_text(aText) }); }
         object* fn_from_complex(double aReal, double aImag) { return make_complex(aReal, aImag); }
         bool fn_truth(object* aObject) { return truth(aObject) == 1; }
         char const* fn_str(object* aObject)
@@ -7570,7 +7970,7 @@ namespace neos::python_runtime
             if (kind_of(aObject) == NEOS_PY_STR && (op == NEOS_PY_EQ || op == NEOS_PY_NE))
             {
                 auto const& value = as<str_object>(aObject)->value;
-                bool const equal = value.compare(aText) == 0;
+                bool const equal = std::string_view{ value.c_str(), value.size() } == argument_text(aText);
                 aResult = equal == (op == NEOS_PY_EQ) ? 1 : 0;
                 return nullptr;
             }
@@ -7579,7 +7979,7 @@ namespace neos::python_runtime
         object* compare_made_text(std::int32_t aOperation, object* aObject, char const* aText)
         {
             auto const op = aOperation & 0xFF;
-            ref const text{ make_str(aText) };
+            ref const text{ make_str(std::string{ argument_text(aText) }) };
             return (aOperation & 0x100) != 0 ? compare(op, text.get(), aObject) : compare(op, aObject, text.get());
         }
         object* fn_compare_text(std::int32_t aOperation, object* aObject, char const* aText)
@@ -7763,14 +8163,17 @@ namespace neos::python_runtime
         // (builtins.py's stubs whose argument or result is an int)
         std::int64_t fn_int_string(char const* aText)
         {
-            ref const value{ make_str(aText) };
+            ref const value{ make_str(std::string{ argument_text(aText) }) };
             return integer_result(int_from(value.get(), -1));
         }
         std::int64_t fn_abs_integer(std::int64_t aValue) { return fn_integer_unary(NEOS_PY_ABSOLUTE, aValue); }
         std::int64_t fn_len_integer(object* aObject)
         {
             auto const result = length(aObject);
-            return failed() ? 0 : small_integer(result);
+            if (failed())
+                return 0;
+            // (a length beyond a small integer's (e.g. a range's): an int object)
+            return result < sSmallIntegerLimit ? small_integer(result) : integer_result(make_int(result));
         }
         char const* fn_fstring_integer(object* aObject, std::int64_t aConversion, char const* aSpec)
         {
@@ -7781,7 +8184,13 @@ namespace neos::python_runtime
         char const* fn_fstring_value(object* aObject)
         {
             if (aObject != nullptr && aObject->type == &sStrType.base)
-                return as<str_object>(aObject)->value.c_str();
+            {
+                // (a str with NUL characters: a copy, whose size the host is given (see result))
+                auto const& value = as<str_object>(aObject)->value;
+                if (std::memchr(value.c_str(), 0, value.size()) != nullptr)
+                    return result_view(std::string_view{ value.c_str(), value.size() });
+                return value.c_str();
+            }
             if (long long value; small_int(aObject, value))
             {
                 char digits[24];
@@ -7808,6 +8217,9 @@ namespace neos::python_runtime
         // (the item of a list or tuple at a small int (within it): here; otherwise getitem's)
         object* fn_getitem(object* aObject, object* aKey)
         {
+            // (a thread that has waited for the GIL runs: a loop of the program's that reads items and calls nothing (e.g. "while not 
+            // started[0]: pass") would otherwise never let it (CPython's eval loop lets it at each backward jump))
+            gil_check();
             if (aObject != nullptr && (aObject->type == &sListType.base || aObject->type == &sTupleType.base) && is_small_int(aKey))
             {
                 auto const& items = aObject->type == &sListType.base ? as<list_object>(aObject)->items : as<tuple_object>(aObject)->items;
@@ -7828,6 +8240,7 @@ namespace neos::python_runtime
         // object; otherwise getitem's)
         object* fn_getitem_integer(object* aObject, std::int64_t aKey)
         {
+            gil_check();
             auto const k = kind_of(aObject);
             if (!integer_is_object(aKey) && (k == NEOS_PY_LIST || k == NEOS_PY_TUPLE || k == NEOS_PY_STR))
             {
@@ -8018,6 +8431,8 @@ namespace neos::python_runtime
         neos_py_type sTypeType = make_type_type();
 
         bool structseq_type_name(std::string_view aQualifiedName);     // (structseq.cpp)
+        object* structseq_new(std::string_view aQualifiedName, object* aArgs, object* aKwargs, bool& aFound);  // (structseq.cpp)
+        object* structseq_type_attribute(std::string_view aQualifiedName, char const* aName);                // (structseq.cpp)
 
         object* make_type_object(std::string aName, std::string aQualifiedName)
         {
@@ -8157,7 +8572,14 @@ namespace neos::python_runtime
                     return as<type_object>(aSelf)->call(aContext, as<type_object>(aSelf)->data, aArgs, aKwargs);
                 auto const* builtin = find_builtin(as<type_object>(aSelf)->name);
                 if (builtin == nullptr || as<type_object>(aSelf)->name != as<type_object>(aSelf)->qualifiedName)
+                {
+                    // (a struct sequence's type (e.g. time.struct_time): its instance from a sequence)
+                    bool found = false;
+                    ref const empty{ make_tuple() };
+                    if (auto const instance = structseq_new(as<type_object>(aSelf)->qualifiedName, aArgs != nullptr ? aArgs : empty.get(), aKwargs, found); found)
+                        return instance;
                     return error("TypeError", "cannot create '" + as<type_object>(aSelf)->qualifiedName + "' instances");
+                }
                 return call_builtin(aContext, const_cast<builtin_entry*>(builtin), aArgs, aKwargs);
             };
             type.compare = [](neos_py_context*, int aOperation, neos_py_object* aLhs, neos_py_object* aRhs) -> neos_py_object*
@@ -8166,6 +8588,13 @@ namespace neos::python_runtime
                     return not_implemented();
                 bool const equal = as<type_object>(aLhs)->qualifiedName == as<type_object>(aRhs)->qualifiedName;
                 return make_bool(aOperation == NEOS_PY_EQ ? equal : !equal);
+            };
+            // (a builtin type is immutable (CPython's static types): setting or deleting its attributes is a TypeError, e.g. unittest's 
+            // "currentClass._classSetupFailed = False" (except TypeError) of a function's class)
+            type.setattr = [](neos_py_context*, neos_py_object* aSelf, char const* aName, neos_py_object*) -> int
+            {
+                error("TypeError", std::string{ "cannot set '" } + aName + "' attribute of immutable type '" + as<type_object>(aSelf)->qualifiedName + "'");
+                return -1;
             };
             type.getattr = [](neos_py_context*, neos_py_object* aSelf, char const* aName) -> neos_py_object*
             {
@@ -8240,6 +8669,9 @@ namespace neos::python_runtime
                     return new_reference(none());
                 if (std::strcmp(aName, "__dict__") == 0)
                     return builtin_type_dict(aSelf);
+                // (a struct sequence's type: n_fields, n_sequence_fields, n_unnamed_fields, __match_args__)
+                if (auto const attribute = structseq_type_attribute(as<type_object>(aSelf)->qualifiedName, aName))
+                    return attribute;
                 if (std::strcmp(aName, "__subclasses__") == 0)
                     return make_function("__subclasses__", [](neos_py_context*, void*, object*, object*) -> object* { return make_list(); }, nullptr);
                 if (std::strcmp(aName, "__module__") == 0)
@@ -8390,7 +8822,10 @@ namespace neos::python_runtime
             object* cls = nullptr;  ///< (a user exception class)
             attribute_dict attributes;
             object* traceback = nullptr;    ///< (its __traceback__ (null: None))
-            ~exception_object() { for (auto a : args) release(a); release(cls); release(traceback); }
+            // (an OSError's errno, strerror, filename, winerror and filename2 (CPython's PyOSErrorObject members: null if unset (None)))
+            object* osError[5] = {};
+            long long written = -1;         ///< (an OSError's characters_written (-1: unset))
+            ~exception_object() { for (auto a : args) release(a); release(cls); release(traceback); for (auto f : osError) release(f); }
             void set_traceback(object* aTraceback)
             {
                 auto const previous = traceback;
@@ -8626,9 +9061,60 @@ namespace neos::python_runtime
             return as<exception_object>(aObject)->type.c_str();
         }
 
+        // (an OSError's member of the name (errno, strerror, filename, winerror (Windows) or filename2): its index in osError, or -1)
+        int oserror_slot(exception_object const& e, char const* aName)
+        {
+            static char const* const sNames[] = { "errno", "strerror", "filename", "winerror", "filename2" };
+            for (int i = 0; i < 5; ++i)
+                if (std::strcmp(aName, sNames[i]) == 0)
+                {
+#if !defined(_WIN32)
+                    if (i == 3)
+                        return -1;
+#endif
+                    return is_exception_subclass(e.type, "OSError") ? i : -1;
+                }
+            return -1;
+        }
+
+        // (an OSError's arguments (CPython's oserror_parse_args and oserror_init (Objects/exceptions.c)): of 2 to 5 arguments, its errno, 
+        // strerror, filename, winerror and filename2; a filename (not None) leaves only errno and strerror in args (BlockingIOError's number
+        // as the third argument: its characters_written, not a filename))
+        void oserror_init(exception_object& e)
+        {
+            for (auto& f : e.osError)
+            {
+                release(f);
+                f = nullptr;
+            }
+            e.written = -1;
+            if (!is_exception_subclass(e.type, "OSError") || e.args.size() < 2u || e.args.size() > 5u)
+                return;
+            for (std::size_t i = 0u; i < e.args.size(); ++i)
+                if (i != 2u && i != 4u)
+                    e.osError[i] = (retain(e.args[i]), e.args[i]);
+            auto const filename = e.args.size() > 2u ? e.args[2] : nullptr;
+            if (filename == nullptr || filename == none())
+                return;
+            if (e.type == "BlockingIOError" && is_int_like(filename))
+            {
+                if (!to_index(filename, e.written))
+                    clear_error();
+                return;
+            }
+            e.osError[2] = (retain(filename), filename);
+            if (e.args.size() > 4u && e.args[4] != none())
+                e.osError[4] = (retain(e.args[4]), e.args[4]);
+            for (std::size_t i = 2u; i < e.args.size(); ++i)
+                release(e.args[i]);
+            e.args.resize(2u);
+        }
+
         object* make_exception(std::string aType, std::vector<object*> aArgs) // (steals the arguments)
         {
-            return &(new exception_object{ { { &sExceptionType.base } }, std::move(aType), std::move(aArgs) })->h.base;
+            auto* const e = new exception_object{ { { &sExceptionType.base } }, std::move(aType), std::move(aArgs) };
+            oserror_init(*e);
+            return &e->h.base;
         }
 
         object* exception_repr(neos_py_context*, object* aSelf)
@@ -8777,37 +9263,39 @@ namespace neos::python_runtime
                     aResult += " (" + std::to_string(n) + (n == 1u ? " sub-exception)" : " sub-exceptions)");
                     return true;
                 }
-            // (OSError(errno, strerror[, filename[, winerror[, filename2]]]): "[Errno n] strerror: 'filename'" (Windows: a winerror: "[WinError n] ..."))
-            if (e.args.size() >= 2u && kind_of(e.args[0]) == NEOS_PY_INT && is_exception_subclass(e.type, "OSError"))
+            // (an OSError's (CPython's OSError_str): "[Errno n] strerror: 'filename' -> 'filename2'" (Windows: a winerror's "[WinError n] ..."); 
+            // its errno and strerror: "[Errno n] strerror"; otherwise BaseException's)
+            if (is_exception_subclass(e.type, "OSError"))
             {
-                std::string number, message;
-                if (!str_of(e.args[0], number) || !str_of(e.args[1], message))
-                    return false;
-#if defined(_WIN32)
-                if (e.args.size() >= 4u && kind_of(e.args[3]) == NEOS_PY_INT)
+                auto const field = [&](std::size_t aIndex) { return e.osError[aIndex] != nullptr ? e.osError[aIndex] : none(); };
+                auto const text = [&](char const* aPrefix, std::size_t aNumber) -> bool
                 {
-                    if (!str_of(e.args[3], number))
+                    std::string number, message;
+                    if (!str_of(field(aNumber), number) || !str_of(field(1u), message))
                         return false;
-                    aResult = "[WinError " + number + "] " + message;
-                }
-                else
-#endif
-                aResult = "[Errno " + number + "] " + message;
-                if (e.args.size() >= 3u && kind_of(e.args[2]) != NEOS_PY_NONE && e.attributes.find("characters_written") == nullptr)
-                {
-                    std::string filename;
-                    if (!repr_of(e.args[2], filename))
-                        return false;
-                    aResult += ": " + filename;
-                    if (e.args.size() >= 5u && kind_of(e.args[4]) != NEOS_PY_NONE)
+                    aResult = std::string{ aPrefix } + number + "] " + message;
+                    if (e.osError[2] != nullptr)
                     {
-                        std::string filename2;
-                        if (!repr_of(e.args[4], filename2))
+                        std::string filename;
+                        if (!repr_of(e.osError[2], filename))
                             return false;
-                        aResult += " -> " + filename2;
+                        aResult += ": " + filename;
+                        if (e.osError[4] != nullptr)
+                        {
+                            std::string filename2;
+                            if (!repr_of(e.osError[4], filename2))
+                                return false;
+                            aResult += " -> " + filename2;
+                        }
                     }
-                }
-                return true;
+                    return true;
+                };
+#if defined(_WIN32)
+                if (e.osError[3] != nullptr && (e.osError[2] != nullptr || e.osError[1] != nullptr))
+                    return text("[WinError ", 3u);
+#endif
+                if (e.osError[2] != nullptr || (e.osError[0] != nullptr && e.osError[1] != nullptr))
+                    return text("[Errno ", 0u);
             }
             // (a syntax error: "msg (file, line n)" (the file's base name: CPython's SyntaxError_str))
             if (is_exception_subclass(e.type, "SyntaxError"))
@@ -8883,12 +9371,23 @@ namespace neos::python_runtime
                     {
                         auto& ex = *as<exception_object>(aArgs.at(0u));
                         ref const cls{ class_of(aArgs[0]) };
-                        for (auto a : ex.args)
+                        // (an OSError with a filename: its arguments with it (and winerror and filename2), as CPython's OSError_reduce)
+                        std::vector<object*> args = ex.args;
+                        if (args.size() == 2u && ex.osError[2] != nullptr)
+                        {
+                            args.push_back(ex.osError[2]);
+                            if (ex.osError[4] != nullptr)
+                            {
+                                args.push_back(ex.osError[3] != nullptr ? ex.osError[3] : none());
+                                args.push_back(ex.osError[4]);
+                            }
+                        }
+                        for (auto a : args)
                             retain(a);
                         auto const dict = ex.attributes.dict;
                         if (dict != nullptr && !as<dict_object>(dict)->items.empty())
-                            return make_tuple({ new_reference(cls.get()), make_tuple(ex.args), new_reference(dict) });
-                        return make_tuple({ new_reference(cls.get()), make_tuple(ex.args) });
+                            return make_tuple({ new_reference(cls.get()), make_tuple(std::move(args)), new_reference(dict) });
+                        return make_tuple({ new_reference(cls.get()), make_tuple(std::move(args)) });
                     } };
                 static builtin_entry const sSetstate{ "__setstate__", [](std::vector<object*> const& aArgs, object*) -> object*
                     {
@@ -8909,6 +9408,15 @@ namespace neos::python_runtime
                 if (std::strcmp(aName, "__setstate__") == 0)
                     return make_function("__setstate__", call_builtin, const_cast<builtin_entry*>(&sSetstate), aSelf);
                 return reduce_method(aSelf, aName, sReduce);
+            }
+            // (an OSError's members (errno, strerror, filename, ..., characters_written): its type's descriptors, found before a class's
+            // __getattr__ (unless its class has an attribute of the name), as CPython's)
+            if (e.cls == nullptr || (class_lookup(e.cls, aName, nullptr) == nullptr && e.attributes.find(aName) == nullptr))
+            {
+                if (auto const slot = oserror_slot(e, aName); slot >= 0)
+                    return new_reference(e.osError[slot] != nullptr ? e.osError[slot] : none());
+                if (std::strcmp(aName, "characters_written") == 0 && is_exception_subclass(e.type, "OSError") && e.written != -1)
+                    return make_int(e.written);
             }
             if (e.cls != nullptr)
             {
@@ -8975,18 +9483,12 @@ namespace neos::python_runtime
             if ((std::strcmp(aName, "value") == 0 && is_exception_subclass(e.type, "StopIteration")) ||
                 (std::strcmp(aName, "code") == 0 && is_exception_subclass(e.type, "SystemExit")))
                 return argument(0u);
-            if (is_exception_subclass(e.type, "OSError") && (std::strcmp(aName, "errno") == 0 || std::strcmp(aName, "strerror") == 0 || 
-                std::strcmp(aName, "filename") == 0 || std::strcmp(aName, "filename2") == 0))
-            {
-                if (e.args.size() < 2u)
-                    return (retain(none()), none());
-                return argument(aName[0] == 'e' ? 0u : aName[0] == 's' ? 1u : aName[8] == '2' ? 4u : 2u);
-            }
-#if defined(_WIN32)
-            // (Windows: OSError's winerror (its fourth argument))
-            if (is_exception_subclass(e.type, "OSError") && std::strcmp(aName, "winerror") == 0)
-                return e.args.size() >= 4u ? argument(3u) : (retain(none()), none());
-#endif
+            // (an OSError's errno, strerror, filename, filename2 and (Windows) winerror: its members (None if unset))
+            if (auto const slot = oserror_slot(e, aName); slot >= 0)
+                return new_reference(e.osError[slot] != nullptr ? e.osError[slot] : none());
+            // (an OSError's characters_written (BlockingIOError's): AttributeError if unset (as CPython's OSError_written_get))
+            if (std::strcmp(aName, "characters_written") == 0 && is_exception_subclass(e.type, "OSError"))
+                return e.written != -1 ? make_int(e.written) : error("AttributeError", "characters_written");
             if (is_exception_subclass(e.type, "ImportError") && (std::strcmp(aName, "name") == 0 || std::strcmp(aName, "path") == 0 || 
                 std::strcmp(aName, "msg") == 0 || std::strcmp(aName, "name_from") == 0))
                 return std::strcmp(aName, "msg") == 0 && e.args.size() == 1u ? argument(0u) : (retain(none()), none());
@@ -9061,6 +9563,30 @@ namespace neos::python_runtime
                 e.set_traceback(aValue);
                 return 0;
             }
+            if (std::strcmp(aName, "characters_written") == 0 && is_exception_subclass(e.type, "OSError") && (e.cls == nullptr || class_lookup(e.cls, aName, nullptr) == nullptr))
+            {
+                if (aValue == nullptr)
+                {
+                    if (e.written == -1)
+                        return (error("AttributeError", "characters_written"), -1);
+                    e.written = -1;
+                    return 0;
+                }
+                long long written = 0;
+                if (!to_index(aValue, written))
+                    return -1;
+                e.written = written;
+                return 0;
+            }
+            // (an OSError's members (unless its class has an attribute of the name: as an attribute))
+            if (auto const slot = oserror_slot(e, aName); slot >= 0 && (e.cls == nullptr || class_lookup(e.cls, aName, nullptr) == nullptr))
+            {
+                if (aValue != nullptr)
+                    retain(aValue);
+                release(e.osError[slot]);
+                e.osError[slot] = aValue;
+                return 0;
+            }
             return user_setattr(aSelf, e.attributes, aName, aValue);
         }
 
@@ -9126,21 +9652,6 @@ namespace neos::python_runtime
                 }
             if (classTraits.unicode && !unicode_error_init(e.get()))
                 return nullptr;
-            // (BlockingIOError(errno, strerror, characters_written): its third argument is the number of characters written (an integer), not a
-            // filename (as CPython's OSError.__init__ has it (Objects/exceptions.c)))
-            if (name == "BlockingIOError")
-            {
-                auto& x = *as<exception_object>(e.get());
-                long long written = 0;
-                if (x.args.size() == 3u && is_int_like(x.args[2]) && to_index(x.args[2], written))
-                {
-                    ref const characters{ make_int(written) };
-                    x.attributes.set("characters_written", characters.get());
-                    x.attributes.set("filename", none());
-                }
-                else if (failed())
-                    clear_error();
-            }
             if (classTraits.group && !exception_group_init(e.get()))
                 return nullptr;
             return e.release_ownership();
@@ -9488,6 +9999,19 @@ namespace neos::python_runtime
         // (the object whose attribute was not found (an attribute error raised as text: its obj), and that error's text)
         thread_local object* tErrorSubject = nullptr;
         thread_local std::string tErrorSubjectText;
+
+        // (an error raised by its text (native code's, not a raise statement's): the exception last raised, if it has been caught, is not the 
+        // one that a catch of that text finds (it can have the same text: e.g. the same AttributeError raised again))
+        void raised_superseded()
+        {
+            if (tRaised == nullptr || !tRaisedCaught)
+                return;
+            auto const previous = tRaised;
+            tRaised = nullptr;
+            tRaisedText.clear();
+            tRaisedCaught = false;
+            release(previous);
+        }
 
         void note_attribute_error(object* aObject)
         {
@@ -9927,7 +10451,29 @@ namespace neos::python_runtime
             fn_handled();
             if (!r)
                 return false;
-            return truth(r.get()) == 1;
+            bool const suppressed = truth(r.get()) == 1;
+            // (not suppressed: it propagates, as the program's pending error (aText), so that text finds it again, though __exit__ raised it 
+            // or others with texts of their own (e.g. contextlib's __exit__ throws it into its generator: it is raised there with a new 
+            // token, and the one that aText is is no longer kept))
+            if (!suppressed && exception && !(tRaised == exception.get() && tRaisedText == aText) &&
+                std::none_of(tRaisedBefore.begin(), tRaisedBefore.end(), [&](raised_exception const& b) { return b.text == aText; }))
+            {
+                if (tRaised != nullptr && !tRaisedCaught && tRaisedText.find('\x01') != std::string::npos)
+                {
+                    if (tRaisedBefore.size() == RaisedBeforeLimit)
+                    {
+                        release(tRaisedBefore.front().exception);
+                        tRaisedBefore.erase(tRaisedBefore.begin());
+                    }
+                    tRaisedBefore.push_back({ std::move(tRaisedText), tRaised });
+                }
+                else
+                    release(tRaised);
+                tRaised = new_reference(exception.get());
+                tRaisedText = aText != nullptr ? aText : "";
+                tRaisedCaught = true;
+            }
+            return suppressed;
         }
 
         // (an exception as CPython reports it when the program does not handle it: its chain (causes and contexts), then 
@@ -10338,7 +10884,16 @@ namespace neos::python_runtime
                 return base != nullptr ? error("TypeError", "int() missing string argument") : make_int(0);
             long long b = -1;
             if (base != nullptr && !to_index(base, b))
-                return nullptr;
+            {
+                // (beyond 64 bits: out of range (ValueError, as CPython's PyNumber_AsSsize_t(base, NULL) clamps it))
+                ref const e{ take_exception() };
+                if (!exception_is(e.get(), "OverflowError"))
+                {
+                    reraise_exception(e.get());
+                    return nullptr;
+                }
+                b = 37;
+            }
             return int_from(aArgs[0], b);
         }
 
@@ -10361,6 +10916,8 @@ namespace neos::python_runtime
             auto const t = truth(aArgs[0]);
             return t < 0 ? nullptr : make_bool(t == 1);
         }
+
+        object* call_special(object* aObject, char const* aName, std::vector<object*> aArgs, bool& aFound);
 
         object* b_complex(std::vector<object*> const& aArgs, object* aKwargs)
         {
@@ -10445,25 +11002,42 @@ namespace neos::python_runtime
                     return malformed();
                 return make_complex(re, im);
             }
-            auto const parts = [](object* aObject, double& aReal, double& aImag)
+            auto const parts = [](object* aObject, double& aReal, double& aImag, bool aFirst)
             {
-                if (kind_of(aObject) == NEOS_PY_COMPLEX)
+                // (the first argument's __complex__ (CPython's try_complex_special_method): its result, a complex)
+                if (aFirst)
                 {
-                    aReal = as<complex_object>(aObject)->real;
-                    aImag = as<complex_object>(aObject)->imag;
+                    bool found = false;
+                    ref const r{ call_special(aObject, "__complex__", {}, found) };
+                    if (found)
+                    {
+                        if (!r)
+                            return false;
+                        auto const value = builtin_value(r.get());
+                        if (kind_of(value) != NEOS_PY_COMPLEX)
+                            return (error("TypeError", std::string{ "__complex__ returned non-complex (type " } + type_name(r.get()) + ")"), false);
+                        aReal = as<complex_object>(value)->real;
+                        aImag = as<complex_object>(value)->imag;
+                        return true;
+                    }
+                }
+                if (auto const value = builtin_value(aObject); kind_of(value) == NEOS_PY_COMPLEX)
+                {
+                    aReal = as<complex_object>(value)->real;
+                    aImag = as<complex_object>(value)->imag;
                     return true;
                 }
                 aImag = 0.0;
                 return to_double(aObject, aReal);
             };
-            if (!aArgs.empty() && !parts(aArgs[0], re, im))
+            if (!aArgs.empty() && !parts(aArgs[0], re, im, true))
                 return nullptr;
-            if (aArgs.size() > 1u && !parts(aArgs[1], re2, im2))
+            if (aArgs.size() > 1u && !parts(aArgs[1], re2, im2, false))
                 return nullptr;
             // (as CPython: only complex parts are added (so that the signs of zeros are kept))
-            if (aArgs.size() > 1u && kind_of(aArgs[1]) == NEOS_PY_COMPLEX)
+            if (aArgs.size() > 1u && kind_of(builtin_value(aArgs[1])) == NEOS_PY_COMPLEX)
                 re -= im2;
-            if (aArgs.size() > 1u && kind_of(aArgs[0]) == NEOS_PY_COMPLEX)
+            if (aArgs.size() > 1u && (kind_of(builtin_value(aArgs[0])) == NEOS_PY_COMPLEX || has_special_method(aArgs[0], "__complex__")))
                 re2 += im;
             return make_complex(re, aArgs.size() > 1u ? re2 : im);
         }
@@ -10558,19 +11132,23 @@ namespace neos::python_runtime
             std::vector<object*> iterators;     ///< (the iterators of the iterables)
             object* function = nullptr;         ///< (map's and filter's)
             long long count = 0;                ///< (enumerate's)
+            object* bigCount = nullptr;         ///< (enumerate's, beyond 64 bits (an int object): in place of count)
             bool strict = false;                ///< (zip's)
             bool exhausted = false;
-            ~lazy_iterator_object() { for (auto i : iterators) release(i); release(function); }
+            ~lazy_iterator_object() { for (auto i : iterators) release(i); release(function); release(bigCount); }
         };
 
         object* lazy_next(neos_py_context*, object* aSelf);
         object* key_of(object* aKey, object* aItem);
+
+        object* lazy_attribute(object* aSelf, char const* aName);
 
         neos_py_type make_lazy_iterator_type(char const* aName)
         {
             auto type = make_type(aName, aName, retain_object, release_object<lazy_iterator_object>);
             type.iter = [](neos_py_context*, object* aSelf) -> object* { retain(aSelf); return aSelf; };
             type.next = lazy_next;
+            type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object* { return lazy_attribute(aSelf, aName); };
             return type;
         }
 
@@ -10612,6 +11190,19 @@ namespace neos::python_runtime
                 {
                     it.exhausted = !failed();
                     return nullptr;
+                }
+                // (the count: an int object once it is beyond 64 bits)
+                if (it.bigCount == nullptr && it.count == std::numeric_limits<long long>::max())
+                    it.bigCount = make_int(it.count);
+                if (it.bigCount != nullptr)
+                {
+                    ref const one{ make_int(1) };
+                    ref following{ binary(NEOS_PY_ADD, it.bigCount, one.get(), false) };
+                    if (!following)
+                        return nullptr;
+                    auto const count = it.bigCount;
+                    it.bigCount = following.release_ownership();
+                    return make_tuple({ count, item.release_ownership() });
                 }
                 return make_tuple({ make_int(it.count++), item.release_ownership() });
             }
@@ -10670,18 +11261,94 @@ namespace neos::python_runtime
 
         object* b_enumerate(std::vector<object*> const& aArgs, object* aKwargs)
         {
+            // (enumerate(iterable, start=0): iterable by keyword only if there are no positional arguments)
+            object* iterable = nullptr;
             object* start = nullptr;
-            if (!keywords(aKwargs, { { "start", &start } }, "enumerate") || !arity(aArgs, 1u, 2u, "enumerate"))
-                return nullptr;
-            if (aArgs.size() > 1u)
-                start = aArgs[1];
+            if (aArgs.empty())
+            {
+                if (!keywords(aKwargs, { { "iterable", &iterable }, { "start", &start } }, "enumerate"))
+                    return nullptr;
+                if (iterable == nullptr)
+                    return error("TypeError", "enumerate() missing required argument 'iterable'");
+            }
+            else
+            {
+                if (!keywords(aKwargs, { { "start", &start } }, "enumerate"))
+                    return nullptr;
+                if (aArgs.size() > 2u)
+                    return error("TypeError", "enumerate() takes at most 2 arguments (" + std::to_string(aArgs.size()) + " given)");
+                iterable = aArgs[0];
+                if (aArgs.size() > 1u)
+                    start = aArgs[1];
+            }
+            // (the start: beyond 64 bits, an int object)
             long long first = 0;
+            ref bigStart;
             if (start != nullptr && !to_index(start, first))
-                return nullptr;
-            auto const result = lazy_iterator(sEnumerateType, { aArgs[0] }, nullptr);
+            {
+                auto const k = kind_of(start);
+                if (k != NEOS_PY_INT && k != NEOS_PY_BOOL && !has_special_method(start, "__index__"))
+                    return nullptr;
+                clear_error();
+                bigStart = ref{ k == NEOS_PY_INT ? new_reference(start) : b_int({ start }, nullptr) };
+                if (!bigStart)
+                    return nullptr;
+            }
+            auto const result = lazy_iterator(sEnumerateType, { iterable }, nullptr);
             if (result != nullptr)
+            {
                 as<lazy_iterator_object>(result)->count = first;
+                as<lazy_iterator_object>(result)->bigCount = bigStart.release_ownership();
+            }
             return result;
+        }
+
+        // (map's, filter's, zip's and enumerate's __reduce__ (as CPython's), and zip's __setstate__ (its strict flag))
+        object* lazy_attribute(object* aSelf, char const* aName)
+        {
+            // (__reduce_ex__(protocol): __reduce__)
+            if (std::strcmp(aName, "__reduce_ex__") == 0)
+                return make_function("__reduce_ex__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    auto const& args = tuple_items(aArgs);
+                    if (args.size() != 2u)
+                        return error("TypeError", "__reduce_ex__() takes exactly one argument (" + std::to_string(args.size() - 1u) + " given)");
+                    ref const reduce{ lazy_attribute(args[0], "__reduce__") };
+                    if (!reduce)
+                        return nullptr;
+                    ref const empty{ make_tuple() };
+                    return call(reduce.get(), empty.get(), nullptr);
+                }, nullptr, aSelf);
+            if (std::strcmp(aName, "__reduce__") == 0)
+                return make_function("__reduce__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    auto const self = tuple_items(aArgs).at(0u);
+                    auto const& it = *as<lazy_iterator_object>(self);
+                    ref const type{ class_of(self) };
+                    std::vector<object*> arguments;
+                    if (self->type == &sMapType.base || self->type == &sFilterType.base)
+                        arguments.push_back(new_reference(it.function != nullptr ? it.function : none()));
+                    for (auto i : it.iterators)
+                        arguments.push_back(new_reference(i));
+                    if (self->type == &sEnumerateType.base)
+                        arguments.push_back(it.bigCount != nullptr ? new_reference(it.bigCount) : make_int(it.count));
+                    if (self->type == &sZipType.base && it.strict)
+                        return make_tuple({ new_reference(type.get()), make_tuple(std::move(arguments)), make_bool(true) });
+                    return make_tuple({ new_reference(type.get()), make_tuple(std::move(arguments)) });
+                }, nullptr, aSelf);
+            if (std::strcmp(aName, "__setstate__") == 0 && aSelf->type == &sZipType.base)
+                return make_function("__setstate__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    auto const& args = tuple_items(aArgs);
+                    if (args.size() != 2u)
+                        return error("TypeError", "__setstate__() takes exactly one argument (" + std::to_string(args.size() - 1u) + " given)");
+                    auto const t = truth(args[1]);
+                    if (t < 0)
+                        return nullptr;
+                    as<lazy_iterator_object>(args[0])->strict = t == 1;
+                    return new_reference(none());
+                }, nullptr, aSelf);
+            return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
         }
 
         object* b_zip(std::vector<object*> const& aArgs, object* aKwargs)
@@ -10705,17 +11372,150 @@ namespace neos::python_runtime
             return result;
         }
 
+        // --- reversed(sequence) (CPython's): a sequence's items by __getitem__ from its last index down (reversed), or a list's from its 
+        // last item down while the index is within the list (list_reverseiterator)
+
+        struct reversed_object
+        {
+            header h;
+            object* sequence = nullptr;     ///< (null: exhausted)
+            long long index = -1;           ///< (the next item's)
+            ~reversed_object() { release(sequence); }
+        };
+
+        object* reversed_next(neos_py_context*, object* aSelf);
+        object* reversed_attribute(object* aSelf, char const* aName);
+
+        neos_py_type make_reversed_type(char const* aName)
+        {
+            auto type = make_type(aName, aName, retain_object, release_object<reversed_object>);
+            type.iter = [](neos_py_context*, object* aSelf) -> object* { retain(aSelf); return aSelf; };
+            type.next = reversed_next;
+            type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object* { return reversed_attribute(aSelf, aName); };
+            return type;
+        }
+
+        neos_py_type sReversedType = make_reversed_type("reversed");
+        neos_py_type sListReverseIteratorType = make_reversed_type("list_reverseiterator");
+
+        object* make_reversed(object* aSequence, long long aIndex, bool aList)
+        {
+            auto const result = new reversed_object{ { { aList ? &sListReverseIteratorType.base : &sReversedType.base } }, (retain(aSequence), aSequence), aIndex };
+            return &result->h.base;
+        }
+
+        object* reversed_next(neos_py_context*, object* aSelf)
+        {
+            auto& r = *as<reversed_object>(aSelf);
+            if (r.sequence == nullptr)
+                return nullptr;
+            if (aSelf->type == &sListReverseIteratorType.base)
+            {
+                auto const& items = as<list_object>(r.sequence)->items;
+                if (r.index >= 0 && r.index < static_cast<long long>(items.size()))
+                {
+                    auto const item = items[static_cast<std::size_t>(r.index--)];
+                    retain(item);
+                    return item;
+                }
+            }
+            else if (r.index >= 0)
+            {
+                ref const index{ make_int(r.index--) };
+                if (auto const item = getitem(r.sequence, index.get()))
+                    return item;
+                // (IndexError or StopIteration: exhausted; another exception is raised)
+                if (!failed() || error_text() == nullptr || !(std::string_view{ error_text() }.starts_with("IndexError") || std::string_view{ error_text() }.starts_with("StopIteration")))
+                    return nullptr;
+                clear_error();
+            }
+            r.index = -1;
+            auto const sequence = r.sequence;
+            r.sequence = nullptr;
+            release(sequence);
+            return nullptr;
+        }
+
+        object* reversed_attribute(object* aSelf, char const* aName)
+        {
+            // (__reduce_ex__(protocol): __reduce__)
+            if (std::strcmp(aName, "__reduce_ex__") == 0)
+                return make_function("__reduce_ex__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    auto const& args = tuple_items(aArgs);
+                    if (args.size() != 2u)
+                        return error("TypeError", "__reduce_ex__() takes exactly one argument (" + std::to_string(args.size() - 1u) + " given)");
+                    ref const reduce{ reversed_attribute(args[0], "__reduce__") };
+                    if (!reduce)
+                        return nullptr;
+                    ref const empty{ make_tuple() };
+                    return call(reduce.get(), empty.get(), nullptr);
+                }, nullptr, aSelf);
+            if (std::strcmp(aName, "__length_hint__") == 0)
+                return make_function("__length_hint__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    auto const self = tuple_items(aArgs).at(0u);
+                    auto const& r = *as<reversed_object>(self);
+                    if (r.sequence == nullptr)
+                        return make_int(0);
+                    auto const n = self->type == &sListReverseIteratorType.base ? static_cast<long long>(as<list_object>(r.sequence)->items.size()) : length(r.sequence);
+                    if (n < 0)
+                        return nullptr;
+                    if (self->type == &sListReverseIteratorType.base)
+                        return make_int(r.index >= 0 && r.index < n ? r.index + 1 : 0);
+                    return make_int(n < r.index + 1 ? 0 : r.index + 1);
+                }, nullptr, aSelf);
+            if (std::strcmp(aName, "__reduce__") == 0)
+                return make_function("__reduce__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    // ((reversed, (sequence,), index); exhausted: (reversed, (an empty sequence,)))
+                    auto const self = tuple_items(aArgs).at(0u);
+                    auto const& r = *as<reversed_object>(self);
+                    ref const type{ type_object_for("reversed", "reversed") };
+                    if (r.sequence == nullptr)
+                        return make_tuple({ new_reference(type.get()), make_tuple({ self->type == &sListReverseIteratorType.base ? make_list() : make_tuple() }) });
+                    return make_tuple({ new_reference(type.get()), make_tuple({ new_reference(r.sequence) }), make_int(r.index) });
+                }, nullptr, aSelf);
+            if (std::strcmp(aName, "__setstate__") == 0)
+                return make_function("__setstate__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                {
+                    // (the index (within the sequence: -1 to its last))
+                    auto const& args = tuple_items(aArgs);
+                    if (args.size() != 2u)
+                        return error("TypeError", "__setstate__() takes exactly one argument (" + std::to_string(args.size() - 1u) + " given)");
+                    auto& r = *as<reversed_object>(args[0]);
+                    long long index = 0;
+                    if (!to_index(args[1], index))
+                        return nullptr;
+                    if (r.sequence != nullptr)
+                    {
+                        auto const n = args[0]->type == &sListReverseIteratorType.base ? static_cast<long long>(as<list_object>(r.sequence)->items.size()) : length(r.sequence);
+                        if (n < 0)
+                            return nullptr;
+                        r.index = index < -1 ? -1 : index > n - 1 ? n - 1 : index;
+                    }
+                    return new_reference(none());
+                }, nullptr, aSelf);
+            return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
+        }
+
         object* b_reversed(std::vector<object*> const& aArgs, object* aKwargs)
         {
             if (!no_keywords(aKwargs, "reversed") || !arity(aArgs, 1u, 1u, "reversed"))
                 return nullptr;
-            // (__reversed__: of a user class, or of a type of a module (e.g. collections.deque))
+            auto const not_reversible = [&]() { return error("TypeError", std::string{ "'" } + type_name(aArgs[0]) + "' object is not reversible"); };
+            // (__reversed__: of a user class (None: not reversible), or of a type of a module (e.g. collections.deque))
             if (is_instance(aArgs[0]))
             {
-                if (ref const method{ special_method(aArgs[0], "__reversed__") })
+                if (auto const method = class_lookup(user_class_of(aArgs[0]), "__reversed__", nullptr); method != nullptr)
                 {
+                    if (kind_of(method) == NEOS_PY_NONE)
+                        return not_reversible();
+                    ref const bound{ special_method(aArgs[0], "__reversed__") };
+                    if (!bound)
+                        return nullptr;
                     ref const empty{ make_tuple() };
-                    return call(method.get(), empty.get(), nullptr);
+                    return call(bound.get(), empty.get(), nullptr);
                 }
             }
             else if (kind_of(aArgs[0]) == NEOS_PY_OTHER && python_type(aArgs[0]) != nullptr && python_type(aArgs[0])->getattr != nullptr)
@@ -10730,19 +11530,41 @@ namespace neos::python_runtime
             }
             auto const value = builtin_value(aArgs[0]);
             auto const k = kind_of(value);
-            if (k != NEOS_PY_LIST && k != NEOS_PY_TUPLE && k != NEOS_PY_STR && k != NEOS_PY_RANGE && k != NEOS_PY_DICT && 
-                !(k == NEOS_PY_OTHER && python_type(value) != nullptr && python_type(value)->getitem != nullptr))
-                return error("TypeError", std::string{ "'" } + type_name(aArgs[0]) + "' object is not reversible");
-            std::vector<ref> items;
-            if (!items_of(value, items))
-                return nullptr;
-            std::vector<object*> result;
-            for (auto i = items.rbegin(); i != items.rend(); ++i)
+            // (a range: the range's iterator of the range that is its reverse)
+            if (k == NEOS_PY_RANGE)
             {
-                retain(i->get());
-                result.push_back(i->get());
+                auto const& r = *as<range_object>(value);
+                auto const n = length(value);
+                if (n < 0)
+                    return nullptr;
+                ref const reverse{ n == 0 ? make_range(0, 0, 1) : make_range(r.start + (n - 1) * r.step, r.start - r.step, -r.step) };
+                return make_iterator(reverse.get());
             }
-            return iterator_over(std::move(result));
+            if (k == NEOS_PY_LIST)
+                return make_reversed(value, static_cast<long long>(as<list_object>(value)->items.size()) - 1, true);
+            if (k == NEOS_PY_DICT)
+            {
+                // (a dict's keys, last first)
+                std::vector<ref> items;
+                if (!items_of(value, items))
+                    return nullptr;
+                std::vector<object*> result;
+                for (auto i = items.rbegin(); i != items.rend(); ++i)
+                    result.push_back(new_reference(i->get()));
+                return iterator_over(std::move(result));
+            }
+            // (a sequence: __len__ and __getitem__)
+            // (an instance: its class's __getitem__, or its value's (a subclass of a type of a module, e.g. array.array))
+            bool const nativeSequence = k == NEOS_PY_OTHER && python_type(value) != nullptr && python_type(value)->getitem != nullptr && python_type(value)->length != nullptr;
+            bool const sequence = k == NEOS_PY_TUPLE || k == NEOS_PY_STR ||
+                (is_instance(aArgs[0]) && (has_special_method(aArgs[0], "__getitem__") || (value != aArgs[0] && nativeSequence))) ||
+                (!is_instance(aArgs[0]) && nativeSequence);
+            if (!sequence)
+                return not_reversible();
+            auto const n = length(aArgs[0]);
+            if (n < 0)
+                return nullptr;
+            return make_reversed(aArgs[0], n - 1, false);
         }
 
         object* b_iter(std::vector<object*> const& aArgs, object* aKwargs)
@@ -11489,6 +12311,9 @@ namespace neos::python_runtime
                     object* const args[] = { aSelf != nullptr ? aSelf : none(), aClass };
                     return arguments_call(get.get(), args, nullptr, nullptr);
                 }
+            // (an instance of a subclass of classmethod, staticmethod or property without a __get__ of its own: as its value)
+            if (is_instance(aAttribute) && as<instance_object>(aAttribute)->value != nullptr && as<instance_object>(aAttribute)->value->type == &sWrapperType.base)
+                return bind_attribute(as<instance_object>(aAttribute)->value, aSelf, aClass);
             if (aAttribute->type == &sWrapperType.base)
             {
                 auto const& w = *as<wrapper_object>(aAttribute);
@@ -11911,6 +12736,7 @@ namespace neos::python_runtime
             return user_getitem(aContext, args[0], args[1]);
         }
 
+        std::map<std::string, object* (*)(char const*), std::less<>>& type_attribute_providers();
         object* user_getattr_default(object* aSelf, attribute_dict& aAttributes, char const* aName)
         {
             std::string_view const name{ aName };
@@ -11943,6 +12769,12 @@ namespace neos::python_runtime
             }
             if (attribute != nullptr)
                 return bind_attribute(attribute, aSelf, cls);
+            // (a type of a module's own pickling method (e.g. array.array.__reduce_ex__): bound to the instance (as CPython's method descriptor))
+            if (auto const value = builtin_value(aSelf); value != aSelf && (name == "__reduce_ex__" || name == "__reduce__" || name == "__getstate__"))
+                if (auto const type = python_type(value); type != nullptr)
+                    if (auto const provider = type_attribute_providers().find(std::string_view{ type->base.name }); provider != type_attribute_providers().end())
+                        if (ref const method{ provider->second(aName) })
+                            return bind_attribute(method.get(), aSelf, cls);
             // (the builtin type's methods: of the value (object's pickling methods are the instance's))
             if (auto const value = builtin_value(aSelf); value != aSelf && name != "__reduce_ex__" && name != "__reduce__" && name != "__getstate__")
             {
@@ -11951,6 +12783,28 @@ namespace neos::python_runtime
                     return make_function("__getitem__", call_missing_getitem, nullptr, aSelf);
                 if (auto const method = protocol_method(value, kind_of(value), aName))
                     return method;
+                // (a subclass of property's getter(f), setter(f) and deleter(f): a copy that is of the subclass: type(self)(fget, fset, fdel, 
+                // doc), as CPython's property_copy makes it)
+                if (value->type == &sWrapperType.base && as<wrapper_object>(value)->kind == Property && (name == "getter" || name == "setter" || name == "deleter"))
+                {
+                    static int const sWhich[] = { 0, 1, 2 };
+                    int const* which = aName[0] == 'g' ? &sWhich[0] : aName[0] == 's' ? &sWhich[1] : &sWhich[2];
+                    return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
+                    {
+                        auto const& args = tuple_items(aArgs);
+                        if (args.size() != 2u)
+                            return error("TypeError", "expected one argument");
+                        auto const& p = *as<wrapper_object>(builtin_value(args[0]));
+                        auto const which = *static_cast<int const*>(aData);
+                        object* const functions[] = { which == 0 ? args[1] : p.function, which == 1 ? args[1] : p.setter, which == 2 ? args[1] : p.deleter, p.doc };
+                        std::vector<object*> items;
+                        for (auto f : functions)
+                            items.push_back(new_reference(f != nullptr ? f : none()));
+                        ref const callArgs{ make_tuple(std::move(items)) };
+                        ref const type{ class_of(args[0]) };
+                        return call(type.get(), callArgs.get(), nullptr);
+                    }, const_cast<int*>(which), aSelf);
+                }
                 if (ref r{ getattr(value, aName) })
                     return r.release_ownership();
                 clear_error();
@@ -11995,10 +12849,52 @@ namespace neos::python_runtime
         }
 
         // (object.__setattr__ and object.__delattr__)
+        // (object.__class__ = cls (or del): as CPython's object_set_class (typeobject.c): an instance's (an exception's) class becomes another 
+        // whose instances are alike (compatible_for_assignment: the same builtin, native and exception base, and the same __slots__))
+        int set_instance_class(object* aSelf, object* aValue)
+        {
+            if (aValue == nullptr)
+            {
+                error("TypeError", "can't delete __class__ attribute");
+                return -1;
+            }
+            if (!is_class(aValue) && !is_type_object(aValue))
+            {
+                error("TypeError", std::string{ "__class__ must be set to a class, not '" } + type_name(aValue) + "' object");
+                return -1;
+            }
+            object** const slot = is_instance(aSelf) ? &as<instance_object>(aSelf)->cls :
+                aSelf->type == &sExceptionType.base ? &as<exception_object>(aSelf)->cls : nullptr;
+            if (slot == nullptr || *slot == nullptr || !is_class(*slot) || !is_class(aValue))
+            {
+                error("TypeError", "__class__ assignment only supported for mutable types or ModuleType subclasses");
+                return -1;
+            }
+            auto const& from = *as<class_object>(*slot);
+            auto const& to = *as<class_object>(aValue);
+            if (from.builtinBase != to.builtinBase || from.nativeBase != to.nativeBase || from.exceptionBase != to.exceptionBase || from.slots != to.slots)
+            {
+                error("TypeError", "__class__ assignment: '" + to.name + "' object layout differs from '" + from.name + "'");
+                return -1;
+            }
+            retain(aValue);
+            release(*slot);
+            *slot = aValue;
+            return 0;
+        }
+
         int user_setattr_default(object* aSelf, attribute_dict& aAttributes, char const* aName, object* aValue)
         {
             auto const cls = user_class_of(aSelf);
-            auto const classAttribute = class_lookup(cls, aName);
+            auto classAttribute = class_lookup(cls, aName);
+            // (its class (unless its class defines __class__ (e.g. a property): that, as any attribute))
+            if (classAttribute == nullptr && std::strcmp(aName, "__class__") == 0)
+                return set_instance_class(aSelf, aValue);
+            // (an instance of a subclass of property without a __set__ (or __delete__) of its own: its value)
+            if (classAttribute != nullptr && is_instance(classAttribute) && as<instance_object>(classAttribute)->value != nullptr &&
+                as<instance_object>(classAttribute)->value->type == &sWrapperType.base && as<wrapper_object>(as<instance_object>(classAttribute)->value)->kind == Property &&
+                class_lookup(as<instance_object>(classAttribute)->cls, aValue != nullptr ? "__set__" : "__delete__") == nullptr)
+                classAttribute = as<instance_object>(classAttribute)->value;
             if (auto const attribute = classAttribute; attribute != nullptr && attribute->type == &sWrapperType.base &&
                 as<wrapper_object>(attribute)->kind == Property)
             {
@@ -12094,7 +12990,19 @@ namespace neos::python_runtime
             if (auto const value = builtin_value(aSelf); value != aSelf)
             {
                 std::string text;
-                return repr_of(value, text) ? make_str(text) : nullptr;
+                if (!repr_of(value, text))
+                    return nullptr;
+                // (a subclass of a type of a module (e.g. datetime.datetime, collections.deque): its type's name is the class's (as CPython's 
+                // reprs of them name the object's type))
+                auto const& cls = *as<class_object>(user_class_of(aSelf));
+                if (cls.nativeBase != nullptr && is_type_object(cls.nativeBase))
+                    for (auto const& prefix : { as<type_object>(cls.nativeBase)->qualifiedName, as<type_object>(cls.nativeBase)->name })
+                        if (text.starts_with(prefix + "("))
+                        {
+                            text = cls.name + text.substr(prefix.size());
+                            break;
+                        }
+                return make_str(text);
             }
             return make_str(default_repr_of(aSelf));
         }
@@ -13002,7 +13910,16 @@ namespace neos::python_runtime
             bool found = false;
             auto const r = call_special(aSelf, "__iter__", {}, found);
             if (!found && builtin_value(aSelf) != aSelf)
-                return iter(builtin_value(aSelf));
+            {
+                // (its value's iterator; the instance itself if that is its value (an iterator's, e.g. a subclass of enumerate's))
+                auto const it = iter(builtin_value(aSelf));
+                if (it != nullptr && it == builtin_value(aSelf))
+                {
+                    release(it);
+                    return new_reference(aSelf);
+                }
+                return it;
+            }
             if (!found)
             {
                 // (a sequence: __getitem__ with 0, 1, ...)
@@ -13011,6 +13928,24 @@ namespace neos::python_runtime
                 // (lazily, as CPython's iterator of a sequence: next() calls __getitem__ (an unbounded sequence is not made a list))
                 return make_iterator(aSelf);
             }
+            // (__iter__'s result must be an iterator (CPython's PyObject_GetIter))
+            if (r != nullptr && kind_of(r) != NEOS_PY_ITERATOR && (user_class_of(r) != nullptr || !(python_type(r) != nullptr && python_type(r)->next != nullptr)))
+            {
+                bool iterator = false;
+                if (auto const cls = user_class_of(r))
+                    iterator = class_lookup(cls, "__next__") != nullptr || (builtin_value(r) != r && (kind_of(builtin_value(r)) == NEOS_PY_ITERATOR || 
+                        (python_type(builtin_value(r)) != nullptr && python_type(builtin_value(r))->next != nullptr)));
+                else if (ref const next{ getattr(r, "__next__") })
+                    iterator = true;
+                else
+                    clear_error();
+                if (!iterator)
+                {
+                    auto const message = std::string{ "iter() returned non-iterator of type '" } + type_name(r) + "'";
+                    release(r);
+                    return error("TypeError", message);
+                }
+            }
             return r;
         }
 
@@ -13018,6 +13953,10 @@ namespace neos::python_runtime
         {
             bool found = false;
             auto const r = call_special(aSelf, "__next__", {}, found);
+            // (its value's next item: a subclass of a builtin iterator type (e.g. enumerate))
+            if (!found && builtin_value(aSelf) != aSelf)
+                if (auto const type = python_type(builtin_value(aSelf)); (type != nullptr && type->next != nullptr) || kind_of(builtin_value(aSelf)) == NEOS_PY_ITERATOR)
+                    return next(builtin_value(aSelf));
             if (!found)
                 return error("TypeError", "'" + std::string{ type_name(aSelf) } + "' object is not an iterator");
             if (r == nullptr && failed() && std::string_view{ error_text() }.starts_with("StopIteration"))
@@ -13384,6 +14323,23 @@ namespace neos::python_runtime
             {
                 auto& instance = *as<instance_object>(args[0]);
                 auto const& base = as<class_object>(instance.cls)->builtinBase;
+                auto const nativeHooks = [&]() -> native_base_hooks const*
+                {
+                    auto const native = as<class_object>(instance.cls)->nativeBase;
+                    if (native == nullptr || !is_type_object(native))
+                        return nullptr;
+                    auto const found = native_bases().find(as<type_object>(native)->qualifiedName);
+                    return found != native_bases().end() ? &found->second : nullptr;
+                }();
+                if (nativeHooks != nullptr && nativeHooks->objectInit)
+                {
+                    // (a type whose __init__ is object's (object_init): its value is __new__'s; arguments only if the class's __init__ is 
+                    // object's)
+                    bool const excess = args.size() > 1u || (aKwargs != nullptr && length(aKwargs) > 0);
+                    if (excess && has_special_method(args[0], "__init__"))
+                        return error("TypeError", "object.__init__() takes exactly one argument (the instance to initialize)");
+                    return new_reference(none());
+                }
                 if (auto const native = as<class_object>(instance.cls)->nativeBase)
                 {
                     // (a subclass of a type of a module: its value, of the arguments)
@@ -13641,6 +14597,8 @@ namespace neos::python_runtime
 
         int class_setattr_raw(object* aSelf, char const* aName, object* aValue);
 
+        object* datetime_subclass_attribute(object* aClass, std::string const& aBase, char const* aName);  // (datetime.cpp)
+
         object* class_getattr(neos_py_context*, object* aSelf, char const* aName)
         {
             auto const& cls = *as<class_object>(aSelf);
@@ -13743,6 +14701,13 @@ namespace neos::python_runtime
             if (!cls.builtinBase.empty())
                 if (auto const function = class_function(cls.builtinBase, aName))
                     return function;
+            // (the attributes of the type of a module that it derives from (e.g. datetime.datetime's fromisoformat: its own, of the class))
+            if (cls.nativeBase != nullptr && is_type_object(cls.nativeBase))
+            {
+                auto const& base = as<type_object>(cls.nativeBase)->qualifiedName;
+                if (auto const attribute = base.starts_with("datetime.") ? datetime_subclass_attribute(aSelf, base, aName) : class_function(base, aName))
+                    return attribute;
+            }
             // (object's methods, unbound)
             if (auto const function = class_function("object", aName))
                 return function;
@@ -14263,10 +15228,28 @@ namespace neos::python_runtime
             return sModules;
         }
 
-        bool register_module(char const* aName, module_initializer aInitializer)
+        namespace
+        {
+            std::map<std::string, module_assigner, std::less<>>& assigners()
+            {
+                static std::map<std::string, module_assigner, std::less<>> sAssigners;
+                return sAssigners;
+            }
+        }
+
+        bool register_module(char const* aName, module_initializer aInitializer, module_assigner aAssigner)
         {
             modules()[aName] = aInitializer;
+            if (aAssigner != nullptr)
+                assigners()[aName] = aAssigner;
             return true;
+        }
+
+        module_assigner assigner_of(std::string_view aModule)
+        {
+            auto const& a = assigners();
+            auto const found = a.find(aModule);
+            return found != a.end() ? found->second : nullptr;
         }
 
         object* fn_class(char const* aName, object* aBases, object* aNamespace)
@@ -14322,9 +15305,14 @@ namespace neos::python_runtime
                         cls->exceptionBase = as<type_object>(b)->qualifiedName;
                     exceptionBases.push_back(as<type_object>(b)->qualifiedName);
                 }
-                else if (is_type_object(b) && as<type_object>(b)->call != nullptr)
+                else if (is_type_object(b) && as<type_object>(b)->name == as<type_object>(b)->qualifiedName &&
+                    (as<type_object>(b)->name == "range" || as<type_object>(b)->name == "slice" || as<type_object>(b)->name == "memoryview" || as<type_object>(b)->name == "bool"))
+                    return error("TypeError", "type '" + as<type_object>(b)->name + "' is not an acceptable base type");
+                else if (is_type_object(b) && (as<type_object>(b)->call != nullptr || (as<type_object>(b)->name == as<type_object>(b)->qualifiedName &&
+                    std::set<std::string_view>{ "enumerate", "zip", "map", "filter", "reversed", "property", "classmethod", "staticmethod" }.contains(as<type_object>(b)->name))))
                 {
-                    // (a type of a module (e.g. collections.deque))
+                    // (a type of a module (e.g. collections.deque), or a builtin type whose instances are not values (e.g. enumerate, property): 
+                    // its instances' values are the type's)
                     if (final_types().contains(as<type_object>(b)->qualifiedName))
                         return error("TypeError", "type '" + as<type_object>(b)->qualifiedName + "' is not an acceptable base type");
                     if ((cls->nativeBase != nullptr && cls->nativeBase != b) || !cls->builtinBase.empty())
@@ -14406,8 +15394,9 @@ namespace neos::python_runtime
                     continue;
                 }
                 auto const& key = as<str_object>(item.first)->value;
-                // (__init_subclass__ and __class_getitem__ are class methods; __new__ is a static method)
-                if ((key == "__init_subclass__" || key == "__class_getitem__") && item.second->type == &sScriptFunctionType.base)
+                // (__init_subclass__ and __class_getitem__ are class methods (a function's: the program's, or a translated module's (a
+                // native function that binds its arguments)); __new__ is a static method)
+                if ((key == "__init_subclass__" || key == "__class_getitem__") && (item.second->type == &sScriptFunctionType.base || is_bound_function(item.second)))
                 {
                     retain(item.second);
                     cls->attributes.emplace_back(key, &(new wrapper_object{ { { &sWrapperType.base } }, ClassMethod, item.second, nullptr })->h.base);
@@ -14837,6 +15826,26 @@ namespace neos::python_runtime
                     return (retain(m.self), m.self);
                 if (std::strcmp(aName, "__func__") == 0)
                     return (retain(m.function), m.function);
+                // (pickling and copying: (getattr, (self, its function's __name__)), as CPython's method_reduce)
+                if (std::strcmp(aName, "__reduce__") == 0 || std::strcmp(aName, "__reduce_ex__") == 0)
+                {
+                    return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
+                    {
+                        auto const& args = tuple_items(aArgs);
+                        bool const ex = aData != nullptr;
+                        if (args.size() != (ex ? 2u : 1u))
+                            return error("TypeError", ex ? "__reduce_ex__() takes exactly one argument (" + std::to_string(args.size() - 1u) + " given)" :
+                                "__reduce__() takes no arguments (" + std::to_string(args.size() - 1u) + " given)");
+                        auto const& method = *as<bound_method_object>(args[0]);
+                        ref name{ getattr(method.function, "__name__") };
+                        if (!name)
+                            return nullptr;
+                        ref getattrFunction{ fn_builtin("getattr") };
+                        if (!getattrFunction)
+                            return nullptr;
+                        return make_tuple({ getattrFunction.release_ownership(), make_tuple({ (retain(method.self), method.self), name.release_ownership() }) });
+                    }, std::strcmp(aName, "__reduce_ex__") == 0 ? aSelf : nullptr, aSelf);
+                }
                 return getattr(m.function, aName);
             };
             return type;
@@ -15042,6 +16051,8 @@ namespace neos::python_runtime
                             e.args.assign(args.begin() + 1, args.end());
                             for (auto a : e.args)
                                 retain(a);
+                            // (OSError.__init__: its members, of these arguments (as CPython's OSError_init))
+                            oserror_init(e);
                         }
                         return none();
                     }, nullptr, s.self);
@@ -15826,11 +16837,11 @@ namespace neos::python_runtime
         builtin_entry const sBuiltinFunctions[] =
         {
             { "abs", b_abs }, { "all", b_all }, { "any", b_any }, { "bin", b_bin }, { "callable", b_callable }, { "chr", b_chr },
-            { "divmod", b_divmod }, { "enumerate", b_enumerate }, { "filter", b_filter }, { "format", b_format }, { "getattr", b_getattr }, { "hasattr", b_hasattr }, 
-            { "hex", b_hex }, { "input", b_input }, { "isinstance", b_isinstance }, { "iter", b_iter }, { "len", b_len }, { "map", b_map },
+            { "divmod", b_divmod }, { "format", b_format }, { "getattr", b_getattr }, { "hasattr", b_hasattr }, 
+            { "hex", b_hex }, { "input", b_input }, { "isinstance", b_isinstance }, { "iter", b_iter }, { "len", b_len },
             { "max", b_max }, { "min", b_min }, { "next", b_next }, { "aiter", b_aiter }, { "anext", b_anext }, { "oct", b_oct }, { "ord", b_ord }, { "pow", b_pow }, { "print", b_print },
-            { "repr", b_repr }, { "reversed", b_reversed }, { "round", b_round_of }, { "setattr", b_setattr }, { "delattr", b_delattr }, { "vars", b_vars }, { "dir", b_dir }, { "ascii", b_ascii }, { "sorted", b_sorted }, { "sum", b_sum },
-            { "zip", b_zip }, { "__class", b_class }, { "__build_class", b_build_class }, { "__ns_bind", b_ns_bind },
+            { "repr", b_repr }, { "round", b_round_of }, { "setattr", b_setattr }, { "delattr", b_delattr }, { "vars", b_vars }, { "dir", b_dir }, { "ascii", b_ascii }, { "sorted", b_sorted }, { "sum", b_sum },
+            { "__class", b_class }, { "__build_class", b_build_class }, { "__ns_bind", b_ns_bind },
             { "super", b_super }, { "issubclass", b_issubclass }, { "hash", b_hash }, { "id", b_id }, { "__bytes", b_bytes_literal }, { "__cell", b_cell },
             { "__closure", b_closure }, { "__generator", b_generator }, { "open", b_open }, { "__yield", b_yield }, { "__yield_from", b_yield_from },
             { "__with_items", b_with_items }, { "__match", b_match },
@@ -15844,7 +16855,9 @@ namespace neos::python_runtime
             { "int", b_int }, { "float", b_float }, { "str", b_str }, { "bool", b_bool }, { "complex", b_complex }, { "list", b_list },
             { "tuple", b_tuple }, { "dict", b_dict }, { "range", b_range }, { "type", b_type }, { "slice", b_slice }, { "object", b_object },
             { "set", b_set }, { "frozenset", b_frozenset }, { "bytes", b_bytes }, { "bytearray", b_bytearray },
-            { "memoryview", b_memoryview }, { "staticmethod", b_staticmethod }, { "classmethod", b_classmethod }, { "property", b_property }
+            { "memoryview", b_memoryview }, { "staticmethod", b_staticmethod }, { "classmethod", b_classmethod }, { "property", b_property },
+            // (the iterators' types: enumerate([]) is an enumerate)
+            { "enumerate", b_enumerate }, { "filter", b_filter }, { "map", b_map }, { "reversed", b_reversed }, { "zip", b_zip }
         };
 
         // (the functions of the builtin classes (e.g. bytes.fromhex): "class.name")
@@ -15854,6 +16867,10 @@ namespace neos::python_runtime
                 { std::vector<object*> a; return parse_arguments("bytes.fromhex", aArgs, aKwargs, { "string" }, 1u, 1u, a) ? bytes_fromhex(a[0], false) : nullptr; } },
             { "bytearray.fromhex", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                 { std::vector<object*> a; return parse_arguments("bytearray.fromhex", aArgs, aKwargs, { "string" }, 1u, 1u, a) ? bytes_fromhex(a[0], true) : nullptr; } },
+            { "bytes.maketrans", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                { std::vector<object*> a; return parse_arguments("maketrans", aArgs, aKwargs, { "frm", "to" }, 2u, 2u, a) ? bytes_maketrans(a[0], a[1]) : nullptr; } },
+            { "bytearray.maketrans", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                { std::vector<object*> a; return parse_arguments("maketrans", aArgs, aKwargs, { "frm", "to" }, 2u, 2u, a) ? bytes_maketrans(a[0], a[1]) : nullptr; } },
             // (float.__getformat__('double' or 'float'): the format of C's double and float, as CPython's)
             { "float.__getformat__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                 {
@@ -16226,6 +17243,54 @@ namespace neos::python_runtime
             final_types().insert(aQualifiedName);
         }
 
+        // (a method that a builtin type's instances have, unbound (as CPython's method descriptor): its first argument an instance of the
+        // type (the type's own, or a subclass's: isinstance), the method called of it)
+        object* unbound_method(std::string const& aType, char const* aName)
+        {
+            struct unbound
+            {
+                std::string type;
+                std::string name;
+            };
+            auto* const data = new unbound{ aType, aName };     // (made once a name: class_function keeps the function)
+            return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
+            {
+                auto const& u = *static_cast<unbound const*>(aData);
+                auto const& args = tuple_items(aArgs);
+                auto const shortName = u.type.substr(u.type.rfind('.') + 1u);
+                if (args.empty())
+                    return error("TypeError", "unbound method " + shortName + "." + u.name + "() needs an argument");
+                auto const value = builtin_value(args[0]);
+                if (python_type(value) == nullptr || u.type != python_type(value)->base.name)
+                {
+                    ref const type{ type_object_for(shortName, u.type) };
+                    ref const isinstanceFunction{ fn_builtin("isinstance") };
+                    if (!type || !isinstanceFunction)
+                        return nullptr;
+                    ref const checkArgs{ make_tuple({ new_reference(args[0]), new_reference(type.get()) }) };
+                    ref const instance{ call(isinstanceFunction.get(), checkArgs.get(), nullptr) };
+                    if (!instance)
+                        return nullptr;
+                    // (the types' names as CPython's tp_name (a builtin type's qualified name; the core types' are their names))
+                    if (instance.get() != make_bool(true))
+                    {
+                        std::string given = python_type(args[0]) != nullptr ? std::string{ python_type(args[0])->base.name } : std::string{ type_name(args[0]) };
+                        if (given.starts_with("python."))
+                            given = type_name(args[0]);
+                        return error("TypeError", "descriptor '" + u.name + "' for '" + u.type + "' objects doesn't apply to a '" + given + "' object");
+                    }
+                }
+                ref const method{ getattr(args[0], u.name.c_str()) };
+                if (!method)
+                    return nullptr;
+                std::vector<object*> rest;
+                for (std::size_t i = 1u; i < args.size(); ++i)
+                    rest.push_back(new_reference(args[i]));
+                ref const restArgs{ make_tuple(std::move(rest)) };
+                return call(method.get(), restArgs.get(), aKwargs);
+            }, data);
+        }
+
         object* class_function_of(std::string const& aClass, char const* aName)
         {
             auto const qualified = aClass + "." + aName;
@@ -16313,6 +17378,17 @@ namespace neos::python_runtime
             if (is_builtin_base(aClass))
                 if (auto const method = protocol_method(nullptr, -1, aName))
                     return method;
+            // (float.fromhex: a class method)
+            if (aClass == "float" && std::strcmp(aName, "fromhex") == 0)
+                return make_function("fromhex", [](neos_py_context*, void*, object* aArgs, object* aKwargs) -> object*
+                {
+                    auto const& args = tuple_items(aArgs);
+                    if (aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty())
+                        return error("TypeError", "float.fromhex() takes no keyword arguments");
+                    if (args.size() != 1u)
+                        return error("TypeError", "float.fromhex() takes exactly one argument (" + std::to_string(args.size()) + " given)");
+                    return float_from_hex_string(args[0]);
+                }, nullptr);
             // (the methods of the builtin types, unbound (e.g. list.append))
             static std::pair<char const*, int> const sKinds[] = { { "list", NEOS_PY_LIST }, { "tuple", NEOS_PY_TUPLE }, { "dict", NEOS_PY_DICT }, 
                 { "int", NEOS_PY_INT }, { "float", NEOS_PY_FLOAT } };
@@ -16325,7 +17401,17 @@ namespace neos::python_runtime
                         if (method.kind == kind.second && std::strcmp(method.name, aName) == 0)
                             return make_function(method.name, call_method, const_cast<method_entry*>(&method));
                 }
-            return slot_function(aClass, aName);
+            if (auto const function = slot_function(aClass, aName))
+                return function;
+            if (failed())
+                return nullptr;
+            // (a method of a builtin type that its instances have (e.g. set.union, bytes.upper; vars(T) in CPython 3.13): unbound (as
+            // CPython's method descriptor: its first argument an instance of the type, the method called of it); not the static and class
+            // methods, which are their types' own)
+            static std::set<std::string_view> const sNotMethods = { "maketrans", "fromhex", "fromkeys", "from_bytes", "mro" };
+            if (std::string_view{ aName }.substr(0u, 2u) != "__" && !sNotMethods.contains(aName) && builtin_defines(aClass, aName))
+                return unbound_method(aClass, aName);
+            return nullptr;
         }
 
         builtin_entry const* find_builtin(std::string_view aName)
@@ -16800,8 +17886,13 @@ namespace neos::python_runtime
                         }
                     if (std::strcmp(aName, "__file__") == 0)
                         return make_str(m.file);
+                    // (a package's (its source is an __init__.py): __path__ is its directory, and __package__ its name)
+                    auto const slash = m.file.find_last_of("/\\");
+                    bool const package = m.file.substr(slash == std::string::npos ? 0u : slash + 1u) == "__init__.py";
                     if (std::strcmp(aName, "__package__") == 0)
-                        return make_str(m.name.find('.') == std::string::npos ? std::string{} : m.name.substr(0u, m.name.rfind('.')));
+                        return make_str(package ? m.name : m.name.find('.') == std::string::npos ? std::string{} : m.name.substr(0u, m.name.rfind('.')));
+                    if (std::strcmp(aName, "__path__") == 0 && package)
+                        return make_list({ make_str(slash == std::string::npos ? std::string{ "." } : m.file.substr(0u, slash)) });
                     if (std::strcmp(aName, "__doc__") == 0 || std::strcmp(aName, "__spec__") == 0 || std::strcmp(aName, "__loader__") == 0)
                         return (retain(none()), none());
                 }
@@ -16899,6 +17990,37 @@ namespace neos::python_runtime
                                 return bound > 0 ? 0 : -1;
                             break;
                         }
+                // (a source module's attribute that is not one of its names (e.g. unittest.mock.patch's of a builtin that it uses: 
+                // patch("m.open", create=True)): in its namespace too (its __dict__), where its code finds the builtins that it uses (see 
+                // python::global_lookup))
+                if (m.getter != nullptr)
+                {
+                    ref const ns{ fn_module_namespace(m.name.c_str(), m.getter) };
+                    if (!ns)
+                        return -1;
+                    ref const key{ make_str(aName) };
+                    if (aValue != nullptr)
+                    {
+                        if (dict_set(ns.get(), key.get(), aValue) != 0)
+                            return -1;
+                    }
+                    else if (auto const position = dict_find(ns.get(), key.get()); position >= 0)
+                        dict_erase(*as<dict_object>(ns.get()), static_cast<std::size_t>(position));
+                    else if (position == -2)
+                        return -1;
+                }
+                // (a translated module's: its functions read the value (see module_assigner))
+                auto const assigned = [&]() -> int
+                {
+                    if (m.getter == nullptr)
+                        if (auto const assigner = assigner_of(m.name))
+                        {
+                            assigner(m.name.c_str(), aName, aValue);
+                            if (failed())
+                                return -1;
+                        }
+                    return 0;
+                };
                 for (auto a = m.attributes.begin(); a != m.attributes.end(); ++a)
                     if (a->first == aName)
                     {
@@ -16911,7 +18033,7 @@ namespace neos::python_runtime
                             a->second = aValue;
                         }
                         release(old);
-                        return 0;
+                        return assigned();
                     }
                 if (aValue == nullptr)
                 {
@@ -16920,7 +18042,7 @@ namespace neos::python_runtime
                 }
                 retain(aValue);
                 m.attributes.emplace_back(aName, aValue);
-                return 0;
+                return assigned();
             };
             return type;
         }
@@ -19077,6 +20199,30 @@ namespace neos::python_runtime
                 if (m == nullptr)
                 {
                     imported().erase(aName);
+                    // (a submodule that is not one of the runtime's: its package's attribute, if that is a module (e.g. os.path); else 
+                    // ModuleNotFoundError, which says if its parent is not a package, as CPython's _find_and_load_unlocked's)
+                    if (parent)
+                    {
+                        ref const e{ take_exception() };
+                        if (!exception_is(e.get(), "ModuleNotFoundError"))
+                        {
+                            reraise_exception(e.get());
+                            return nullptr;
+                        }
+                        if (ref attribute{ getattr(parent.get(), child.c_str()) }; attribute && attribute.get()->type == &sModuleType.base)
+                            return attribute.release_ownership();
+                        clear_error();
+                        std::string const parentName{ name.substr(0u, name.rfind('.')) };
+                        bool package = false;
+                        if (ref const path{ getattr(parent.get(), "__path__") })
+                            package = true;
+                        else
+                            clear_error();
+                        auto const sub = modules().lower_bound(parentName + ".");
+                        package = package || (sub != modules().end() && sub->first.starts_with(parentName + "."));
+                        return error("ModuleNotFoundError", "No module named '" + std::string{ name } + "'" + (package ? std::string{} : "; '" + parentName +
+                            "' is not a package"));
+                    }
                     return nullptr;
                 }
                 ref const modules{ imported_modules() };
@@ -19285,6 +20431,8 @@ namespace neos::python_runtime
 
         thread_local bool tObjectDir = false;
 
+        bool structseq_dir(object* aObject, std::vector<std::string>& aNames);   // (structseq.cpp)
+
         object* b_dir(std::vector<object*> const& aArgs, object* aKwargs)
         {
             if (!no_keywords(aKwargs, "dir") || !arity(aArgs, 0u, 1u, "dir"))
@@ -19409,6 +20557,13 @@ namespace neos::python_runtime
                 std::string kind = is_type_object(target) ? as<type_object>(target)->qualifiedName : type_name(target);
                 if (target->type == &sScriptFunctionType.base)
                     kind = "function";
+                // (a struct sequence (or its type): tuple's names and its own)
+                std::vector<std::string> structseqNames;
+                if (structseq_dir(target, structseqNames))
+                {
+                    kind = "tuple";
+                    names.insert(structseqNames.begin(), structseqNames.end());
+                }
                 if (auto const builtin = sBuiltinNames.find(kind); builtin != sBuiltinNames.end())
                     add_words(builtin->second);
                 else
@@ -19423,10 +20578,35 @@ namespace neos::python_runtime
         void fn_kwargs_update(object* aDict, object* aMapping)
         {
             aMapping = builtin_value(aMapping);
+            ref mapping;
             if (kind_of(aMapping) != NEOS_PY_DICT)
             {
-                error("TypeError", std::string{ "argument after ** must be a mapping, not " } + type_name(aMapping));
-                return;
+                // (any mapping (an object with keys() and __getitem__: CPython's PyMapping_Keys and PyObject_GetItem): a dict of its items)
+                ref const keysMethod{ getattr(aMapping, "keys") };
+                if (!keysMethod)
+                {
+                    clear_error();
+                    error("TypeError", std::string{ "argument after ** must be a mapping, not " } + type_name(aMapping));
+                    return;
+                }
+                ref const keys{ invoke(keysMethod.get(), {}) };
+                std::vector<object*> items;
+                if (!keys || !collect(keys.get(), items))
+                    return;
+                mapping = ref{ make_dict() };
+                bool ok = true;
+                for (auto key : items)
+                {
+                    if (ok)
+                    {
+                        ref const value{ getitem(aMapping, key) };
+                        ok = value && dict_set(mapping.get(), key, value.get()) == 0;
+                    }
+                    release(key);
+                }
+                if (!ok)
+                    return;
+                aMapping = mapping.get();
             }
             for (auto const& item : as<dict_object>(aMapping)->items)
             {
@@ -19542,6 +20722,8 @@ namespace neos::python_runtime
         constexpr auto BOOL = NEOS_RT_BOOL;
         constexpr auto VOID = NEOS_RT_VOID;
         constexpr auto INT = NEOS_RT_INTEGER;
+
+        object* fn_global_read(char const* aModule, char const* aName, object* aValue);    // (exec.cpp)
     }
 
     using namespace detail;
@@ -19665,7 +20847,7 @@ namespace neos::python_runtime
             { "propagate", NEOS_RT_FUNCTION(fn_raise), VOID, 1u, { OBJ }, 0u },
             { "unhandled", NEOS_RT_FUNCTION(fn_unhandled), I32, 1u, { STR }, 0u },
             { "finish", NEOS_RT_FUNCTION(fn_finish), VOID, 0u, {}, 0u },
-            { "depth_check", NEOS_RT_FUNCTION(fn_depth_check), VOID, 1u, { I32 }, 0u },
+            { "depth_check", NEOS_RT_FUNCTION(fn_depth_check), I32, 1u, { I32 }, 0u },
             { "zero_division", NEOS_RT_FUNCTION(fn_zero_division), VOID, 1u, { I32 }, 0u },
             { "import", NEOS_RT_FUNCTION(fn_import), OBJ, 1u, { STR }, 0u },
             { "import_module", NEOS_RT_FUNCTION(fn_import_module), OBJ, 5u, { STR, I32, OBJ, OBJ, STR }, 0u },
@@ -19678,6 +20860,7 @@ namespace neos::python_runtime
             { "exec_lookup", NEOS_RT_FUNCTION(fn_exec_lookup), OBJ, 1u, { STR }, 0u },
             { "exec_globals", NEOS_RT_FUNCTION(fn_exec_globals), OBJ, 0u, {}, 0u },
             { "exec_read", NEOS_RT_FUNCTION(fn_exec_read), OBJ, 2u, { STR, OBJ }, 0u },
+            { "global_read", NEOS_RT_FUNCTION(fn_global_read), OBJ, 3u, { STR, STR, OBJ }, 0u },
             { "exec_store", NEOS_RT_FUNCTION(fn_exec_store), VOID, 2u, { STR, OBJ }, 0u },
             { "sorted_keys", NEOS_RT_FUNCTION(fn_sorted_keys), OBJ, 1u, { OBJ }, 0u },
             { "raise_import_error", NEOS_RT_FUNCTION(fn_raise_import_error), VOID, 1u, { STR }, 0u },

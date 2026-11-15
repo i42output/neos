@@ -149,6 +149,9 @@ namespace neos::python_runtime::detail::unittest_loader_module
         void make_unittest_loader()
         {
             static module_writer const& w = writer("unittest.loader");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.loader", "fnmatch", import_attribute("fnmatch", "fnmatch"));
+            define("unittest.loader", "fnmatchcase", import_attribute("fnmatch", "fnmatchcase"));
             define("unittest.loader", "__unittest", boolean(true));
             // what about .pyc (etc)
             // we would need to avoid loading the same tests multiple times
@@ -500,7 +503,7 @@ namespace neos::python_runtime::detail::unittest_loader_module
             return boolean(false);
         }
         fullName = S("%s.%s.%s") % py_tuple({ (*testCaseClass).attr("__module__"), (*testCaseClass).attr("__qualname__"), attrname });
-        return [&]() -> py { py const t = boolean((*self).attr("testNamePatterns").is_none()); return t.truthy() ? t : (B<"any">())([&]() -> py { py const comprehension13 = py_list(); py pattern; for (py const& item : iterate{ (*self).attr("testNamePatterns") }) { pattern = item; comprehension13.method("append", { (Mod<"fnmatch">().attr("fnmatchcase"))(fullName, pattern) }); } return comprehension13; }()); }();
+        return [&]() -> py { py const t = boolean((*self).attr("testNamePatterns").is_none()); return t.truthy() ? t : (B<"any">())([&]() -> py { py const comprehension13 = py_list(); py pattern; for (py const& item : iterate{ (*self).attr("testNamePatterns") }) { pattern = item; comprehension13.method("append", { (G<"unittest.loader.fnmatchcase">())(fullName, pattern) }); } return comprehension13; }()); }();
     });
                         testFnNames = (B<"list">())((B<"filter">())(shouldIncludeMethod, (B<"dir">())((*testCaseClass))));
                         if ((*self).attr("sortTestMethodsUsing").truthy())
@@ -669,7 +672,7 @@ namespace neos::python_runtime::detail::unittest_loader_module
                         py path = a[1];
                         py full_path = a[2];
                         py pattern = a[3];
-                        return (Mod<"fnmatch">().attr("fnmatch"))(path, pattern);
+                        return (G<"unittest.loader.fnmatch">())(path, pattern);
                     }) },
                 { "_find_tests", w.method("TestLoader", "_find_tests", { py_positional("start_dir"), py_positional("pattern") }, [](arguments a) -> py
                     {
@@ -927,8 +930,6 @@ namespace neos::python_runtime::detail::unittest_loader_module
                 aAttributes.emplace_back("traceback", py{ fn_import("traceback") }.release());
                 aAttributes.emplace_back("types", py{ fn_import("types") }.release());
                 aAttributes.emplace_back("functools", py{ fn_import("functools") }.release());
-                aAttributes.emplace_back("fnmatch", import_attribute("fnmatch", "fnmatch").release());
-                aAttributes.emplace_back("fnmatchcase", import_attribute("fnmatch", "fnmatchcase").release());
                 aAttributes.emplace_back("case", py{ fn_import("unittest.case") }.release());
                 aAttributes.emplace_back("suite", py{ fn_import("unittest.suite") }.release());
                 aAttributes.emplace_back("util", py{ fn_import("unittest.util") }.release());
@@ -940,6 +941,14 @@ namespace neos::python_runtime::detail::unittest_loader_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.loader", unittest_loader_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.loader", unittest_loader_module, assigned);
     }
 }

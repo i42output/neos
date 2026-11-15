@@ -160,10 +160,16 @@ namespace neos::python_runtime::detail::wsgiref_types_module
         void make_wsgiref_types()
         {
             static module_writer const& w = writer("wsgiref.types");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("wsgiref.types", "Callable", import_attribute("collections.abc", "Callable"));
+            define("wsgiref.types", "Iterable", import_attribute("collections.abc", "Iterable"));
+            define("wsgiref.types", "TracebackType", import_attribute("types", "TracebackType"));
+            define("wsgiref.types", "Any", import_attribute("typing", "Any"));
+            define("wsgiref.types", "Protocol", import_attribute("typing", "Protocol"));
             define("wsgiref.types", "__all__", py_list({ S<"StartResponse">(), S<"WSGIEnvironment">(), S<"WSGIApplication">(), S<"InputStream">(), S<"ErrorStream">(), S<"FileWrapper">() }));
-            define("wsgiref.types", "_ExcInfo", (B<"tuple">())[py_tuple({ (B<"type">())[B<"BaseException">()], B<"BaseException">(), Mod<"types">().attr("TracebackType") })]);
+            define("wsgiref.types", "_ExcInfo", (B<"tuple">())[py_tuple({ (B<"type">())[B<"BaseException">()], B<"BaseException">(), G<"wsgiref.types.TracebackType">() })]);
             define("wsgiref.types", "_OptExcInfo", (G<"wsgiref.types._ExcInfo">()) | (B<"tuple">())[py_tuple({ none(), none(), none() })]);
-            define("wsgiref.types", "StartResponse", w.make_class("StartResponse", { Mod<"typing">().attr("Protocol") }, {
+            define("wsgiref.types", "StartResponse", w.make_class("StartResponse", { G<"wsgiref.types.Protocol">() }, {
                 { "__call__", w.method("StartResponse", "__call__", { py_positional_only("status"), py_positional_only("headers"), py_positional_only("exc_info", B<"Ellipsis">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -173,9 +179,9 @@ namespace neos::python_runtime::detail::wsgiref_types_module
                         return none();
                     }) }, }));
 
-            define("wsgiref.types", "WSGIEnvironment", (B<"dict">())[py_tuple({ B<"str">(), Mod<"typing">().attr("Any") })]);
-            define("wsgiref.types", "WSGIApplication", (Mod<"collections.abc">().attr("Callable"))[py_tuple({ py_list({ G<"wsgiref.types.WSGIEnvironment">(), G<"wsgiref.types.StartResponse">() }), (Mod<"collections.abc">().attr("Iterable"))[B<"bytes">()] })]);
-            define("wsgiref.types", "InputStream", w.make_class("InputStream", { Mod<"typing">().attr("Protocol") }, {
+            define("wsgiref.types", "WSGIEnvironment", (B<"dict">())[py_tuple({ B<"str">(), G<"wsgiref.types.Any">() })]);
+            define("wsgiref.types", "WSGIApplication", (G<"wsgiref.types.Callable">())[py_tuple({ py_list({ G<"wsgiref.types.WSGIEnvironment">(), G<"wsgiref.types.StartResponse">() }), (G<"wsgiref.types.Iterable">())[B<"bytes">()] })]);
+            define("wsgiref.types", "InputStream", w.make_class("InputStream", { G<"wsgiref.types.Protocol">() }, {
                 { "read", w.method("InputStream", "read", { py_positional_only("size", B<"Ellipsis">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -200,7 +206,7 @@ namespace neos::python_runtime::detail::wsgiref_types_module
                         return none();
                     }) }, }));
 
-            define("wsgiref.types", "ErrorStream", w.make_class("ErrorStream", { Mod<"typing">().attr("Protocol") }, {
+            define("wsgiref.types", "ErrorStream", w.make_class("ErrorStream", { G<"wsgiref.types.Protocol">() }, {
                 { "flush", w.method("ErrorStream", "flush", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -219,7 +225,7 @@ namespace neos::python_runtime::detail::wsgiref_types_module
                         return none();
                     }) }, }));
 
-            define("wsgiref.types", "_Readable", w.make_class("_Readable", { Mod<"typing">().attr("Protocol") }, {
+            define("wsgiref.types", "_Readable", w.make_class("_Readable", { G<"wsgiref.types.Protocol">() }, {
                 { "read", w.method("_Readable", "read", { py_positional_only("size", B<"Ellipsis">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -228,7 +234,7 @@ namespace neos::python_runtime::detail::wsgiref_types_module
                     }) }, }));
 
             // Optional: def close(self) -> object: ...
-            define("wsgiref.types", "FileWrapper", w.make_class("FileWrapper", { Mod<"typing">().attr("Protocol") }, {
+            define("wsgiref.types", "FileWrapper", w.make_class("FileWrapper", { G<"wsgiref.types.Protocol">() }, {
                 { "__call__", w.method("FileWrapper", "__call__", { py_positional_only("file"), py_positional_only("block_size", B<"Ellipsis">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -250,12 +256,7 @@ namespace neos::python_runtime::detail::wsgiref_types_module
                 }
                 if (auto const doc = wsgiref_types_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("Callable", import_attribute("collections.abc", "Callable").release());
-                aAttributes.emplace_back("Iterable", import_attribute("collections.abc", "Iterable").release());
                 aAttributes.emplace_back("Iterator", import_attribute("collections.abc", "Iterator").release());
-                aAttributes.emplace_back("TracebackType", import_attribute("types", "TracebackType").release());
-                aAttributes.emplace_back("Any", import_attribute("typing", "Any").release());
-                aAttributes.emplace_back("Protocol", import_attribute("typing", "Protocol").release());
                 aAttributes.emplace_back("TypeAlias", import_attribute("typing", "TypeAlias").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
@@ -265,6 +266,14 @@ namespace neos::python_runtime::detail::wsgiref_types_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("wsgiref.types", wsgiref_types_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("wsgiref.types", wsgiref_types_module, assigned);
     }
 }

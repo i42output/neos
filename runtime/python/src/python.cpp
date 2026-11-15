@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
@@ -94,19 +95,47 @@ namespace neos::python_runtime
         set_flags(tFailed, true);
     }
 
+    namespace
+    {
+        thread_local bool tResultSized; // (the host was given the size of the result last made: see sized_result)
+
+        // (a result that contains NUL characters: its size, for the host (neos_rt_host::string_result); one that does not, after one 
+        // that did: the size withdrawn)
+        char const* sized_result(std::string const& aResult)
+        {
+            bool const nul = std::memchr(aResult.data(), 0, aResult.size()) != nullptr;
+            if (nul || tResultSized)
+                if (auto const* h = host(); h != nullptr && h->version >= 21u && h->string_result != nullptr)
+                {
+                    h->string_result(nul ? aResult.c_str() : nullptr, aResult.size());
+                    tResultSized = nul;
+                }
+            return aResult.c_str();
+        }
+    }
+
     char const* result(std::string aValue)
     {
         // (a thread_local's address: found once)
         auto& r = tResult;
         r = std::move(aValue);
-        return r.c_str();
+        return sized_result(r);
     }
 
     char const* result_view(std::string_view aValue)
     {
         auto& r = tResult;
         r.assign(aValue);
-        return r.c_str();
+        return sized_result(r);
+    }
+
+    std::string_view argument_text(char const* aText)
+    {
+        if (aText == nullptr)
+            return {};
+        if (auto const* h = host(); h != nullptr && h->version >= 21u && h->string_size != nullptr)
+            return std::string_view{ aText, h->string_size(aText) };
+        return std::string_view{ aText };
     }
 
     void raise(std::string const& aType, std::string const& aMessage, bool aThrown)
@@ -314,6 +343,7 @@ NEOS_RUNTIME_PLUGIN_END
 {
     neos::python_runtime::detail::threads_end();
     neos::python_runtime::detail::generators_end();
+    neos::python_runtime::detail::signals_end();
 }
 
 NEOS_RUNTIME_PLUGIN_ENTRY

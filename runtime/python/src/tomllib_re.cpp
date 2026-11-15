@@ -148,6 +148,11 @@ namespace neos::python_runtime::detail::tomllib__re_module
         void make_tomllib__re()
         {
             static module_writer const& w = writer("tomllib._re");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("tomllib._re", "time", import_attribute("datetime", "time"));
+            define("tomllib._re", "timedelta", import_attribute("datetime", "timedelta"));
+            define("tomllib._re", "timezone", import_attribute("datetime", "timezone"));
+            define("tomllib._re", "lru_cache", import_attribute("functools", "lru_cache"));
             // SPDX-License-Identifier: MIT
             // SPDX-FileCopyrightText: 2021 Taneli Hukkinen
             // Licensed to PSF under a Contributor Agreement.
@@ -211,7 +216,7 @@ namespace neos::python_runtime::detail::tomllib__re_module
                     }
                     else if (zulu_time.truthy())
                     {
-                        tz = (Mod<"datetime">().attr("timezone")).attr("utc");
+                        tz = (G<"tomllib._re.timezone">()).attr("utc");
                     }
                     else
                     {
@@ -220,14 +225,14 @@ namespace neos::python_runtime::detail::tomllib__re_module
                     return (Mod<"datetime">().attr("datetime")).call({ year, month, day, hour, minute, sec, micros }, { { "tzinfo", tz } });
                 }));
 
-            define("tomllib._re", "cached_tz", (Mod<"functools">().attr("lru_cache")).call({  }, { { "maxsize", none() } })(w.function("cached_tz", "cached_tz", { py_positional("hour_str"), py_positional("minute_str"), py_positional("sign_str") }, [](arguments a) -> py
+            define("tomllib._re", "cached_tz", (G<"tomllib._re.lru_cache">()).call({  }, { { "maxsize", none() } })(w.function("cached_tz", "cached_tz", { py_positional("hour_str"), py_positional("minute_str"), py_positional("sign_str") }, [](arguments a) -> py
                 {
                     py hour_str = a[0];
                     py minute_str = a[1];
                     py sign_str = a[2];
                     py sign;
                     sign = (sign_str == (S<"+">()) ? I<1>() : I<-1>());
-                    return (Mod<"datetime">().attr("timezone"))((Mod<"datetime">().attr("timedelta")).call({  }, { { "hours", sign * (B<"int">())(hour_str) }, { "minutes", sign * (B<"int">())(minute_str) } }));
+                    return (G<"tomllib._re.timezone">())((G<"tomllib._re.timedelta">()).call({  }, { { "hours", sign * (B<"int">())(hour_str) }, { "minutes", sign * (B<"int">())(minute_str) } }));
                 })));
 
             define("tomllib._re", "match_to_localtime", w.function("match_to_localtime", "match_to_localtime", { py_positional("match") }, [](arguments a) -> py
@@ -244,7 +249,7 @@ namespace neos::python_runtime::detail::tomllib__re_module
                     sec_str = items4[2];
                     micros_str = items4[3];
                     micros = (micros_str.truthy() ? (B<"int">())(micros_str.method("ljust", { I<6>(), S<"0">() })) : I<0>());
-                    return (Mod<"datetime">().attr("time"))((B<"int">())(hour_str), (B<"int">())(minute_str), (B<"int">())(sec_str), micros);
+                    return (G<"tomllib._re.time">())((B<"int">())(hour_str), (B<"int">())(minute_str), (B<"int">())(sec_str), micros);
                 }));
 
             define("tomllib._re", "match_to_number", w.function("match_to_number", "match_to_number", { py_positional("match"), py_positional("parse_float") }, [](arguments a) -> py
@@ -273,11 +278,7 @@ namespace neos::python_runtime::detail::tomllib__re_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("date", import_attribute("datetime", "date").release());
                 aAttributes.emplace_back("datetime", import_attribute("datetime", "datetime").release());
-                aAttributes.emplace_back("time", import_attribute("datetime", "time").release());
-                aAttributes.emplace_back("timedelta", import_attribute("datetime", "timedelta").release());
-                aAttributes.emplace_back("timezone", import_attribute("datetime", "timezone").release());
                 aAttributes.emplace_back("tzinfo", import_attribute("datetime", "tzinfo").release());
-                aAttributes.emplace_back("lru_cache", import_attribute("functools", "lru_cache").release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("Any", import_attribute("typing", "Any").release());
                 aAttributes.emplace_back("ParseFloat", import_attribute("tomllib._types", "ParseFloat").release());
@@ -289,6 +290,14 @@ namespace neos::python_runtime::detail::tomllib__re_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("tomllib._re", tomllib__re_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("tomllib._re", tomllib__re_module, assigned);
     }
 }

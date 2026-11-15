@@ -333,22 +333,18 @@ namespace neos::python_runtime
                     value |= static_cast<std::uint64_t>(high) << 32;
                     return make_int(static_cast<long long>(value));
                 }
-                // (words from least significant)
-                ref result{ make_int(0) };
-                long long shift = 0;
-                for (auto remaining = k; remaining > 0; remaining -= 32, shift += 32)
+                // (32-bit words from least significant, as CPython's: an int's (two's complement) words, with a zero word above them (it is
+                // not negative))
+                std::vector<big_integer::word_t> words(static_cast<std::size_t>((k + 63) / 64) + 1u, 0u);
+                std::size_t i = 0u;
+                for (auto remaining = k; remaining > 0; remaining -= 32, ++i)
                 {
                     auto word = r.state.next();
                     if (remaining < 32)
                         word >>= (32 - remaining);
-                    ref const w{ make_int(word) };
-                    ref const s{ make_int(shift) };
-                    ref const shifted{ binary(NEOS_PY_LSHIFT, w.get(), s.get(), false) };
-                    result = ref{ binary(NEOS_PY_OR, result.get(), shifted.get(), false) };
-                    if (!result)
-                        return nullptr;
+                    words[i / 2u] |= static_cast<big_integer::word_t>(word) << (32u * (i % 2u));
                 }
-                return result.release_ownership();
+                return make_int(big_integer{ words.begin(), words.end() });
             }
 
             long long bit_length(unsigned long long n) { return n == 0u ? 0 : 64 - std::countl_zero(n); }

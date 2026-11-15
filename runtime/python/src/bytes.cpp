@@ -2432,6 +2432,23 @@ namespace neos::python_runtime
             return aMutable ? make_bytearray(std::move(data)) : make_bytes(std::move(data));
         }
 
+        // (bytes.maketrans(frm, to) and bytearray.maketrans(frm, to): a translation table (bytes of 256), frm's bytes mapped to to's)
+        object* bytes_maketrans(object* aFrom, object* aTo)
+        {
+            std::string_view from, to;
+            for (auto [argument, data] : { std::pair<object*, std::string_view*>{ aFrom, &from }, std::pair<object*, std::string_view*>{ aTo, &to } })
+                if (!bytes_like(argument, *data))
+                    return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(argument) + "'");
+            if (from.size() != to.size())
+                return error("ValueError", "maketrans arguments must have same length");
+            std::string table(256u, '\0');
+            for (std::size_t i = 0u; i < 256u; ++i)
+                table[i] = static_cast<char>(i);
+            for (std::size_t i = 0u; i < from.size(); ++i)
+                table[static_cast<unsigned char>(from[i])] = to[i];
+            return make_bytes(std::move(table));
+        }
+
         // str.encode(encoding='utf-8', errors='strict')
         object* str_encode(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs)
         {

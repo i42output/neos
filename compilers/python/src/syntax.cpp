@@ -353,7 +353,7 @@ namespace neos::compilers::python
                         if (aSource[j] == '\\')
                         {
                             if (j + 1u < n)
-                                ++j;
+                                j = tokens::escape_last(aSource, j);
                             (void)raw;
                         }
                         else if (aSource[j] == q && (!triple || (j + 2u < n && aSource[j + 1u] == q && aSource[j + 2u] == q)))
@@ -589,7 +589,14 @@ namespace neos::compilers::python
             auto const lines = tokens::tokenize(aSource);
             // (the enclosing blocks: their indentation and kind)
             enum kind_t { Function, AsyncFunction, Class, Loop, Other, Try };
-            struct block { std::size_t indent; kind_t kind; std::size_t lastLine; };
+            struct block 
+            { 
+                std::size_t indent; 
+                kind_t kind; 
+                std::size_t lastLine; 
+                bool yields = false;                                        ///< (a function's: it is a generator)
+                std::optional<std::pair<std::size_t, std::size_t>> returned;  ///< (an async function's first return with a value: its span)
+            };
             std::vector<block> blocks;
             auto const add = [&](syntax_issue::stage_t aStage, std::string aMessage, std::size_t aBegin, std::size_t aEnd)
             {
@@ -621,6 +628,12 @@ namespace neos::compilers::python
                         return true;
                 return false;
             };
+            // (an async function that ended: a return with a value, if it is an async generator (the symbol table's, as CPython's))
+            auto const finish_block = [&](block const& aBlock)
+            {
+                if (aBlock.kind == AsyncFunction && aBlock.yields && aBlock.returned)
+                    add(syntax_issue::Compiler, "'return' with value in async generator", aBlock.returned->first, aBlock.returned->second);
+            };
             // (a try block that ended: its except or finally clause)
             auto const close_blocks = [&](std::size_t aIndent, std::optional<std::size_t> aNext)
             {
@@ -628,6 +641,7 @@ namespace neos::compilers::python
                 {
                     auto const b = blocks.back();
                     blocks.pop_back();
+                    finish_block(b);
                     if (b.kind == Try)
                     {
                         bool handled = false;
@@ -757,6 +771,43 @@ namespace neos::compilers::python
                             lambda = true;
                     auto const* const enclosing = scope();
                     bool const function = enclosing != nullptr && enclosing->kind != Class;
+                    // (an async function's yields (not a lambda's, or a generator expression's): it is an async generator; yield from: an error;
+                    // and its first return with a value)
+                    if (function && !lambda && enclosing->kind == AsyncFunction)
+                    {
+                        auto& f = const_cast<block&>(*enclosing);
+                        for (std::size_t i = s.begin; i < s.end; ++i)
+                            if (is_name(aSource, t[i], "yield"))
+                            {
+                                bool inBrackets = false;
+                                for (std::size_t j = i; j-- > s.begin && !inBrackets;)
+                                    if (d[j] < d[i] && is_op(aSource, t[j], "("))
+                                    {
+                                        // (a generator expression's: its brackets have a for)
+                                        auto const close = std::min(matching(aSource, t, j), s.end);
+                                        for (auto k = j + 1u; k < close; ++k)
+                                            if (d[k] == d[j] + 1 && is_name(aSource, t[k], "for"))
+                                                inBrackets = true;
+                                        break;
+                                    }
+                                if (inBrackets)
+                                    continue;
+                                f.yields = true;
+                                if (i + 1u < s.end && is_name(aSource, t[i + 1u], "from"))
+                                {
+                                    auto e = s.end;
+                                    for (std::size_t j = i + 1u; j < s.end; ++j)
+                                        if (d[j] < d[i] || (d[j] == d[i] && closing(aSource, t[j])))
+                                        {
+                                            e = j;
+                                            break;
+                                        }
+                                    add(syntax_issue::Compiler, "'yield from' inside async function", t[i].begin, t[e - 1u].end);
+                                }
+                            }
+                        if (is_name(aSource, first, "return") && s.end - s.begin > 1u && !f.returned)
+                            f.returned = std::make_pair(first.begin, end);
+                    }
                     if (is_name(aSource, first, "return") && !function)
                         add(syntax_issue::Compiler, "'return' outside function", first.begin, end);
                     else if (is_name(aSource, first, "break") && !in_loop())
@@ -780,9 +831,27 @@ namespace neos::compilers::python
                                 add(syntax_issue::Compiler, is_name(aSource, t[i], "yield") ? "'yield' outside function" : "'await' outside function", t[i].begin, t[e - 1u].end);
                                 break;
                             }
+                    // (an await within a generator expression (in a function that is not async): an asynchronous generator expression)
+                    auto const in_generator_expression = [&](std::size_t aAt)
+                    {
+                        auto level = d[aAt];
+                        for (std::size_t j = aAt; j-- > s.begin && level > 0;)
+                            if (opening(aSource, t[j]) && d[j] == level - 1)
+                            {
+                                if (is_op(aSource, t[j], "("))
+                                {
+                                    auto const close = std::min(matching(aSource, t, j), s.end);
+                                    for (auto k = j + 1u; k < close; ++k)
+                                        if (d[k] == d[j] + 1 && is_name(aSource, t[k], "for"))
+                                            return true;
+                                }
+                                --level;
+                            }
+                        return false;
+                    };
                     if (!lambda && function && enclosing->kind == Function)
                         for (std::size_t i = s.begin; i < s.end; ++i)
-                            if (is_name(aSource, t[i], "await"))
+                            if (is_name(aSource, t[i], "await") && !in_generator_expression(i))
                             {
                                 auto e = s.end;
                                 for (std::size_t j = i + 1u; j < s.end; ++j)
@@ -798,9 +867,17 @@ namespace neos::compilers::python
                     for (std::size_t i = s.begin; i < s.end; ++i)
                         if (is_name(aSource, t[i], "lambda"))
                         {
+                            // (its colon: not that of a lambda in a parameter's default ("lambda x = lambda: 1: x()"))
                             auto j = i + 1u;
-                            while (j < s.end && !(d[j] == d[i] && is_op(aSource, t[j], ":")))
-                                ++j;
+                            for (int lambdas = 0; j < s.end; ++j)
+                                if (d[j] == d[i] && is_name(aSource, t[j], "lambda"))
+                                    ++lambdas;
+                                else if (d[j] == d[i] && is_op(aSource, t[j], ":"))
+                                {
+                                    if (lambdas == 0)
+                                        break;
+                                    --lambdas;
+                                }
                             if (j < s.end)
                             {
                                 // (as a def's: aOpen is the lambda)
@@ -834,6 +911,30 @@ namespace neos::compilers::python
                     // (the parser's: x := v as a statement; an assignment to (or del of) what is not a target)
                     if (s.end - s.begin >= 2u && first.kind == token::Name && is_op(aSource, t[s.begin + 1u], ":="))
                         add(syntax_issue::Parser, "invalid syntax", t[s.begin + 1u].begin, t[s.begin + 1u].end);
+                    // (the parser's: an augmented assignment to several targets (a, b += 1): a tuple)
+                    {
+                        static char const* const sAugmented[] = { "+=", "-=", "*=", "/=", "//=", "%=", "**=", ">>=", "<<=", "&=", "|=", "^=", "@=" };
+                        bool comma = false;
+                        for (std::size_t i = s.begin; i < s.end; ++i)
+                        {
+                            if (d[i] != 0)
+                                continue;
+                            // (not after an assignment's "=", or a compound statement's header (for a, b in x: c += 1))
+                            if (is_op(aSource, t[i], "=") || is_op(aSource, t[i], ":"))
+                                break;
+                            if (is_op(aSource, t[i], ","))
+                            {
+                                comma = true;
+                                continue;
+                            }
+                            if (std::any_of(std::begin(sAugmented), std::end(sAugmented), [&](char const* aOp) { return is_op(aSource, t[i], aOp); }))
+                            {
+                                if (comma && i > s.begin)
+                                    add(syntax_issue::Parser, "'tuple' is an illegal expression for augmented assignment", t[s.begin].begin, t[i - 1u].end);
+                                break;
+                            }
+                        }
+                    }
                     if (is_name(aSource, first, "del"))
                     {
                         std::size_t targetStart = s.begin + 1u;
@@ -871,7 +972,12 @@ namespace neos::compilers::python
                     }
                 }
                 if (opened && blocks.empty() == false && blocks.back().indent == line.indent + 1u && blocks.back().lastLine == l && !statements.empty())
-                    blocks.pop_back();  // (a body on its header's line: the block ends with it)
+                {
+                    // (a body on its header's line: the block ends with it)
+                    auto const b = blocks.back();
+                    blocks.pop_back();
+                    finish_block(b);
+                }
                 else if (opened)
                     blocks.push_back({ line.indent, *opened, l });
             }
@@ -976,7 +1082,7 @@ namespace neos::compilers::python
                 for (; j < n; ++j)
                 {
                     if (result[j] == '\\')
-                        ++j;
+                        j = tokens::escape_last(result, j);
                     else if (result[j] == c && (!triple || (j + 2u < n && result[j + 1u] == c && result[j + 2u] == c)))
                     {
                         j += triple ? 2u : 0u;

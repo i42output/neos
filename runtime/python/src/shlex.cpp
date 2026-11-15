@@ -147,6 +147,9 @@ namespace neos::python_runtime::detail::shlex_module
         void make_shlex()
         {
             static module_writer const& w = writer("shlex");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("shlex", "deque", import_attribute("collections", "deque"));
+            define("shlex", "StringIO", import_attribute("io", "StringIO"));
             // Module and documentation by Eric S. Raymond, 21 Dec 1998
             // Input stacking and error message cleanup added by ESR, March 2000
             // push_source() and pop_source() made explicit by ESR, January 2001.
@@ -165,7 +168,7 @@ namespace neos::python_runtime::detail::shlex_module
                         py t;
                         if (isinstance(instream, B<"str">()))
                         {
-                            instream = (Mod<"io">().attr("StringIO"))(instream);
+                            instream = (G<"shlex.StringIO">())(instream);
                         }
                         if (!instream.is_none())
                         {
@@ -201,11 +204,11 @@ namespace neos::python_runtime::detail::shlex_module
                         self.set_attr("escape", S<"\\">());
                         self.set_attr("escapedquotes", S<"\"">());
                         self.set_attr("state", S<" ">());
-                        self.set_attr("pushback", (Mod<"collections">().attr("deque"))());
+                        self.set_attr("pushback", (G<"shlex.deque">())());
                         self.set_attr("lineno", I<1>());
                         self.set_attr("debug", I<0>());
                         self.set_attr("token", S<"">());
-                        self.set_attr("filestack", (Mod<"collections">().attr("deque"))());
+                        self.set_attr("filestack", (G<"shlex.deque">())());
                         self.set_attr("source", none());
                         if (!punctuation_chars.truthy())
                         {
@@ -219,7 +222,7 @@ namespace neos::python_runtime::detail::shlex_module
                         if (punctuation_chars.truthy())
                         {
                             // _pushback_chars is a push back queue used by lookahead logic
-                            self.set_attr("_pushback_chars", (Mod<"collections">().attr("deque"))());
+                            self.set_attr("_pushback_chars", (G<"shlex.deque">())());
                             // these chars added because allowed in file names, args, wildcards
                             {
                                 py const target2 = self;
@@ -254,7 +257,7 @@ namespace neos::python_runtime::detail::shlex_module
                         py newfile = a[2];
                         if (isinstance(newstream, B<"str">()))
                         {
-                            newstream = (Mod<"io">().attr("StringIO"))(newstream);
+                            newstream = (G<"shlex.StringIO">())(newstream);
                         }
                         self.attr("filestack").method("appendleft", { py_tuple({ self.attr("infile"), self.attr("instream"), self.attr("lineno") }) });
                         self.set_attr("infile", newfile);
@@ -764,8 +767,6 @@ namespace neos::python_runtime::detail::shlex_module
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
-                aAttributes.emplace_back("deque", import_attribute("collections", "deque").release());
-                aAttributes.emplace_back("StringIO", import_attribute("io", "StringIO").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -774,6 +775,14 @@ namespace neos::python_runtime::detail::shlex_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("shlex", shlex_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("shlex", shlex_module, assigned);
     }
 }

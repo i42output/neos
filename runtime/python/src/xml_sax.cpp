@@ -160,7 +160,11 @@ namespace neos::python_runtime::detail::xml_sax_module
         void make_xml_sax()
         {
             static module_writer const& w = writer("xml.sax");
-            define("xml.sax", "parse", w.function("parse", "parse", { py_positional("source"), py_positional("handler"), py_positional("errorHandler", (Mod<"xml.sax.handler">().attr("ErrorHandler"))()) }, [](arguments a) -> py
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xml.sax", "InputSource", import_attribute("xml.sax.xmlreader", "InputSource"));
+            define("xml.sax", "ErrorHandler", import_attribute("xml.sax.handler", "ErrorHandler"));
+            define("xml.sax", "SAXReaderNotAvailable", import_attribute("xml.sax._exceptions", "SAXReaderNotAvailable"));
+            define("xml.sax", "parse", w.function("parse", "parse", { py_positional("source"), py_positional("handler"), py_positional("errorHandler", (G<"xml.sax.ErrorHandler">())()) }, [](arguments a) -> py
                 {
                     py source = a[0];
                     py handler = a[1];
@@ -173,7 +177,7 @@ namespace neos::python_runtime::detail::xml_sax_module
                     return none();
                 }));
 
-            define("xml.sax", "parseString", w.function("parseString", "parseString", { py_positional("string"), py_positional("handler"), py_positional("errorHandler", (Mod<"xml.sax.handler">().attr("ErrorHandler"))()) }, [](arguments a) -> py
+            define("xml.sax", "parseString", w.function("parseString", "parseString", { py_positional("string"), py_positional("handler"), py_positional("errorHandler", (G<"xml.sax.ErrorHandler">())()) }, [](arguments a) -> py
                 {
                     py string = a[0];
                     py handler = a[1];
@@ -184,12 +188,12 @@ namespace neos::python_runtime::detail::xml_sax_module
                     io = module_of("io");
                     if (errorHandler.is_none())
                     {
-                        errorHandler = (Mod<"xml.sax.handler">().attr("ErrorHandler"))();
+                        errorHandler = (G<"xml.sax.ErrorHandler">())();
                     }
                     parser = (G<"xml.sax.make_parser">())();
                     parser.method("setContentHandler", { handler });
                     parser.method("setErrorHandler", { errorHandler });
-                    inpsrc = (Mod<"xml.sax.xmlreader">().attr("InputSource"))();
+                    inpsrc = (G<"xml.sax.InputSource">())();
                     if (isinstance(string, B<"str">()))
                     {
                         inpsrc.method("setCharacterStream", { io.method("StringIO", { string }) });
@@ -241,7 +245,7 @@ namespace neos::python_runtime::detail::xml_sax_module
                                     py_reraise(handler2.exception);
                                 }
                             }
-                            else if (matches(handler2.exception, Mod<"xml.sax._exceptions">().attr("SAXReaderNotAvailable")))
+                            else if (matches(handler2.exception, G<"xml.sax.SAXReaderNotAvailable">()))
                             {
                                 // The parser module detected that it won't work properly,
                                 // so try the next one
@@ -250,7 +254,7 @@ namespace neos::python_runtime::detail::xml_sax_module
                                 py_reraise(handler2.exception);
                         }
                     }
-                    py_raise((Mod<"xml.sax._exceptions">().attr("SAXReaderNotAvailable"))(S<"No parsers found">(), none()));
+                    py_raise((G<"xml.sax.SAXReaderNotAvailable">())(S<"No parsers found">(), none()));
                 }));
 
             // --- Internal utility methods used by make_parser
@@ -275,14 +279,11 @@ namespace neos::python_runtime::detail::xml_sax_module
                 }
                 if (auto const doc = xml_sax_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("InputSource", import_attribute("xml.sax.xmlreader", "InputSource").release());
                 aAttributes.emplace_back("ContentHandler", import_attribute("xml.sax.handler", "ContentHandler").release());
-                aAttributes.emplace_back("ErrorHandler", import_attribute("xml.sax.handler", "ErrorHandler").release());
                 aAttributes.emplace_back("SAXException", import_attribute("xml.sax._exceptions", "SAXException").release());
                 aAttributes.emplace_back("SAXNotRecognizedException", import_attribute("xml.sax._exceptions", "SAXNotRecognizedException").release());
                 aAttributes.emplace_back("SAXParseException", import_attribute("xml.sax._exceptions", "SAXParseException").release());
                 aAttributes.emplace_back("SAXNotSupportedException", import_attribute("xml.sax._exceptions", "SAXNotSupportedException").release());
-                aAttributes.emplace_back("SAXReaderNotAvailable", import_attribute("xml.sax._exceptions", "SAXReaderNotAvailable").release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 for (auto const& [name, value] : s.attributes)
@@ -293,6 +294,14 @@ namespace neos::python_runtime::detail::xml_sax_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.sax", xml_sax_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.sax", xml_sax_module, assigned);
     }
 }

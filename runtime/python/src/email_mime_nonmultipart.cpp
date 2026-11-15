@@ -160,11 +160,13 @@ namespace neos::python_runtime::detail::email_mime_nonmultipart_module
         void make_email_mime_nonmultipart()
         {
             static module_writer const& w = writer("email.mime.nonmultipart");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.mime.nonmultipart", "MIMEBase", import_attribute("email.mime.base", "MIMEBase"));
             // Copyright (C) 2002-2006 Python Software Foundation
             // Author: Barry Warsaw
             // Contact: email-sig@python.org
             define("email.mime.nonmultipart", "__all__", py_list({ S<"MIMENonMultipart">() }));
-            define("email.mime.nonmultipart", "MIMENonMultipart", w.make_class("MIMENonMultipart", { Mod<"email.mime.base">().attr("MIMEBase") }, {
+            define("email.mime.nonmultipart", "MIMENonMultipart", w.make_class("MIMENonMultipart", { G<"email.mime.nonmultipart.MIMEBase">() }, {
                 { "attach", w.method("MIMENonMultipart", "attach", { py_positional("payload") }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -186,7 +188,6 @@ namespace neos::python_runtime::detail::email_mime_nonmultipart_module
                 if (auto const doc = email_mime_nonmultipart_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("errors", import_attribute("email", "errors").release());
-                aAttributes.emplace_back("MIMEBase", import_attribute("email.mime.base", "MIMEBase").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -195,6 +196,14 @@ namespace neos::python_runtime::detail::email_mime_nonmultipart_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.mime.nonmultipart", email_mime_nonmultipart_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.mime.nonmultipart", email_mime_nonmultipart_module, assigned);
     }
 }

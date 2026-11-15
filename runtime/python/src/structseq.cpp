@@ -42,7 +42,9 @@
 #include <algorithm>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
+#include <set>
 #include <string_view>
 #include <string>
 #include <vector>
@@ -52,6 +54,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        object* structseq_type_attribute(std::string_view aQualifiedName, char const* aName);
+
         namespace
         {
             struct structseq_object
@@ -75,6 +79,72 @@ namespace neos::python_runtime
             }
 
             bool is_structseq(object* aObject);
+            bool has_constructor(structseq_descriptor const& aDescriptor);
+
+            // (__reduce__: (its type, (its items, {its other fields}) (CPython's structseq_reduce)), or (its type, its items) if its type's 
+            // constructor takes its items (e.g. os.sched_param's))
+            object* structseq_reduce(object* aSelf)
+            {
+                auto const& s = as_structseq(aSelf);
+                ref const type{ class_of(aSelf) };
+                ref const items{ items_of(aSelf) };
+                if (!type || !items)
+                    return nullptr;
+                if (has_constructor(*s.descriptor))
+                    return make_tuple({ new_reference(type.get()), new_reference(items.get()) });
+                ref const others{ make_dict() };
+                for (auto f = s.descriptor->visible; f < s.descriptor->fields.size() && f < s.values.size(); ++f)
+                {
+                    ref const key{ make_str(s.descriptor->fields[f]) };
+                    if (dict_set(others.get(), key.get(), s.values[f]) != 0)
+                        return nullptr;
+                }
+                return make_tuple({ new_reference(type.get()), make_tuple({ new_reference(items.get()), new_reference(others.get()) }) });
+            }
+
+            // (__replace__(**fields): a copy with those fields' values (CPython's structseq_replace); not of a struct sequence with unnamed 
+            // fields (fields named as later ones: e.g. os.stat_result's integer times))
+            object* structseq_replace(object* aSelf, object* aArgs, object* aKwargs)
+            {
+                auto const& s = as_structseq(aSelf);
+                if (tuple_items(aArgs).size() > 1u)
+                    return error("TypeError", "__replace__() takes no positional arguments");
+                auto const& fields = s.descriptor->fields;
+                for (std::size_t i = 0u; i < fields.size(); ++i)
+                    if (std::find(fields.begin() + static_cast<std::ptrdiff_t>(i) + 1, fields.end(), fields[i]) != fields.end())
+                        return error("TypeError", "__replace__() is not supported for " + s.descriptor->qualifiedName + " because it has unnamed field(s)");
+                std::vector<object*> values;
+                std::vector<bool> used(aKwargs != nullptr && kind_of(aKwargs) == NEOS_PY_DICT ? as<dict_object>(aKwargs)->items.size() : 0u, false);
+                for (std::size_t f = 0u; f < fields.size(); ++f)
+                {
+                    object* value = f < s.values.size() ? s.values[f] : none();
+                    for (std::size_t k = 0u; k < used.size(); ++k)
+                    {
+                        auto const& [key, v] = as<dict_object>(aKwargs)->items[k];
+                        if (key != nullptr && kind_of(key) == NEOS_PY_STR && as<str_object>(key)->value == fields[f])
+                        {
+                            value = v;
+                            used[k] = true;
+                        }
+                    }
+                    values.push_back(new_reference(value));
+                }
+                std::vector<object*> unexpected;
+                for (std::size_t k = 0u; k < used.size(); ++k)
+                    if (!used[k] && as<dict_object>(aKwargs)->items[k].first != nullptr)
+                        unexpected.push_back(new_reference(as<dict_object>(aKwargs)->items[k].first));
+                if (!unexpected.empty())
+                {
+                    for (auto v : values)
+                        release(v);
+                    ref const names{ make_list(std::move(unexpected)) };
+                    std::string text;
+                    if (!repr_of(names.get(), text))
+                        return nullptr;
+                    return error("TypeError", "Got unexpected field name(s): " + text);
+                }
+                return make_structseq(*s.descriptor, std::move(values));
+            }
         }
 
         namespace
@@ -130,10 +200,22 @@ namespace neos::python_runtime
                         retain(s.values[i]);
                         return s.values[i];
                     }
-                if (std::strcmp(aName, "n_sequence_fields") == 0)
-                    return make_int(static_cast<long long>(s.descriptor->visible));
-                if (std::strcmp(aName, "n_fields") == 0)
-                    return make_int(static_cast<long long>(s.descriptor->fields.size()));
+                if (auto const attribute = structseq_type_attribute(s.descriptor->qualifiedName, aName))
+                    return attribute;
+                if (std::strcmp(aName, "__reduce__") == 0)
+                    return make_function("__reduce__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        { return structseq_reduce(tuple_items(aArgs).at(0u)); }, nullptr, aSelf);
+                // (object.__reduce_ex__: __reduce__ (which a struct sequence overrides), whatever the protocol)
+                if (std::strcmp(aName, "__reduce_ex__") == 0)
+                    return make_function("__reduce_ex__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                    {
+                        if (tuple_items(aArgs).size() != 2u)
+                            return error("TypeError", "__reduce_ex__() takes exactly one argument (" + std::to_string(tuple_items(aArgs).size() - 1u) + " given)");
+                        return structseq_reduce(tuple_items(aArgs).at(0u));
+                    }, nullptr, aSelf);
+                if (std::strcmp(aName, "__replace__") == 0)
+                    return make_function("__replace__", [](neos_py_context*, void*, object* aArgs, object* aKwargs) -> object*
+                        { return structseq_replace(tuple_items(aArgs).at(0u), aArgs, aKwargs); }, nullptr, aSelf);
                 // (a tuple's methods)
                 ref const tuple{ items_of(aSelf) };
                 return getattr(tuple.get(), aName);
@@ -190,6 +272,219 @@ namespace neos::python_runtime
             while (aValues.size() < aDescriptor.fields.size())
                 aValues.push_back((retain(none()), none()));
             return &(new structseq_object{ { { &aDescriptor.type.base } }, &aDescriptor, std::move(aValues) })->h.base;
+        }
+
+        // (a struct sequence type's own constructor (e.g. os.sched_param's): its type called (aArgs: a tuple))
+        using structseq_constructor = object* (*)(structseq_descriptor const& aDescriptor, object* aArgs, object* aKwargs);
+        namespace
+        {
+            std::map<std::string, structseq_constructor, std::less<>>& structseq_constructors() { static std::map<std::string, structseq_constructor, std::less<>> sConstructors; return sConstructors; }
+        }
+        // (aItemArguments: its arguments are its items (e.g. os.sched_param(sched_priority)): its __reduce__ is (type, items))
+        namespace
+        {
+            std::set<std::string, std::less<>>& item_argument_types() { static std::set<std::string, std::less<>> sTypes; return sTypes; }
+        }
+        void set_structseq_constructor(structseq_descriptor const& aDescriptor, structseq_constructor aConstructor, bool aItemArguments)
+        {
+            std::lock_guard<std::mutex> lock{ structseq_mutex() };
+            structseq_constructors()[aDescriptor.qualifiedName] = aConstructor;
+            if (aItemArguments)
+                item_argument_types().insert(aDescriptor.qualifiedName);
+        }
+        // (a struct sequence type that cannot be called to make one (e.g. sys.flags): "cannot create ... instances")
+        namespace
+        {
+            std::set<std::string, std::less<>>& not_instantiable_types() { static std::set<std::string, std::less<>> sTypes; return sTypes; }
+        }
+        void set_structseq_not_instantiable(structseq_descriptor const& aDescriptor)
+        {
+            std::lock_guard<std::mutex> lock{ structseq_mutex() };
+            not_instantiable_types().insert(aDescriptor.qualifiedName);
+        }
+
+        namespace
+        {
+            bool has_constructor(structseq_descriptor const& aDescriptor)
+            {
+                std::lock_guard<std::mutex> lock{ structseq_mutex() };
+                return item_argument_types().contains(aDescriptor.qualifiedName);
+            }
+        }
+
+        object* structseq_construct(structseq_descriptor const& aDescriptor, object* aArgs, object* aKwargs);
+
+        // (a struct sequence's type called (aArgs: a tuple): its constructor, or structseq_construct; aFound: false if aQualifiedName is 
+        // not a struct sequence's type's)
+        object* structseq_new(std::string_view aQualifiedName, object* aArgs, object* aKwargs, bool& aFound)
+        {
+            structseq_descriptor const* descriptor = nullptr;
+            structseq_constructor constructor = nullptr;
+            bool instantiable = true;
+            {
+                std::lock_guard<std::mutex> lock{ structseq_mutex() };
+                for (auto const& d : structseq_descriptors())
+                    if (d.qualifiedName == aQualifiedName)
+                        descriptor = &d;
+                if (auto const c = structseq_constructors().find(aQualifiedName); c != structseq_constructors().end())
+                    constructor = c->second;
+                instantiable = !not_instantiable_types().contains(aQualifiedName);
+            }
+            aFound = descriptor != nullptr;
+            if (descriptor == nullptr)
+                return nullptr;
+            if (!instantiable)
+                return error("TypeError", "cannot create '" + descriptor->qualifiedName + "' instances");
+            if (constructor != nullptr)
+                return constructor(*descriptor, aArgs, aKwargs);
+            return structseq_construct(*descriptor, aArgs, aKwargs);
+        }
+
+        // (CPython's structseq_new: (sequence, dict=None): the sequence's items, then the other fields' from the dict (None if it has none))
+        object* structseq_construct(structseq_descriptor const& aDescriptor, object* aArgs, object* aKwargs)
+        {
+            auto const* const descriptor = &aDescriptor;
+            std::vector<object*> a;
+            if (!parse_arguments("structseq", tuple_items(aArgs), aKwargs, { "sequence", "dict" }, 1u, 0u, a))
+                return nullptr;
+            ref const it{ iter(a[0]) };
+            if (!it)
+            {
+                clear_error();
+                return error("TypeError", "constructor requires a sequence");
+            }
+            ref const sequence{ fn_tuple_of(it.get()) };
+            if (!sequence)
+                return nullptr;
+            auto const& items = tuple_items(sequence.get());
+            auto const n = items.size();
+            auto const visible = descriptor->visible;
+            auto const fields = descriptor->fields.size();
+            auto const given = "-sequence (" + std::to_string(n) + "-sequence given)";
+            if (n < visible)
+                return error("TypeError", descriptor->qualifiedName + "() takes " + (visible == fields ? "a " : "an at least ") + std::to_string(visible) + given);
+            if (n > fields)
+                return error("TypeError", descriptor->qualifiedName + "() takes " + (visible == fields ? "a " : "an at most ") + std::to_string(fields) + given);
+            object* const dict = a.size() > 1u ? a[1] : nullptr;
+            if (dict != nullptr && kind_of(dict) != NEOS_PY_DICT)
+                return error("TypeError", descriptor->qualifiedName + "() takes a dict as second arg, if any");
+            std::vector<object*> values;
+            for (auto i : items)
+                values.push_back(new_reference(i));
+            // (the fields that the sequence does not give: the dict's (its keys only those fields' names), else None)
+            std::size_t foundKeys = 0u;
+            for (auto f = n; f < fields; ++f)
+            {
+                object* value = nullptr;
+                if (dict != nullptr && !as<dict_object>(dict)->items.empty())
+                {
+                    ref const key{ make_str(descriptor->fields[f]) };
+                    auto const found = dict_find(dict, key.get());
+                    if (found == -2)
+                    {
+                        for (auto v : values)
+                            release(v);
+                        return nullptr;
+                    }
+                    if (found >= 0)
+                    {
+                        value = as<dict_object>(dict)->items[static_cast<std::size_t>(found)].second;
+                        ++foundKeys;
+                    }
+                }
+                values.push_back(new_reference(value != nullptr ? value : none()));
+            }
+            if (dict != nullptr && as<dict_object>(dict)->items.size() > foundKeys)
+            {
+                for (auto v : values)
+                    release(v);
+                return error("TypeError", descriptor->qualifiedName + "() got duplicate or unexpected field name(s)");
+            }
+            return make_structseq(*descriptor, std::move(values));
+        }
+
+        // (a struct sequence type's attributes (n_fields, n_sequence_fields, n_unnamed_fields, __match_args__): null (no exception) if 
+        // aName is none of them or aQualifiedName no struct sequence's type)
+        object* structseq_type_attribute(std::string_view aQualifiedName, char const* aName)
+        {
+            structseq_descriptor const* descriptor = nullptr;
+            {
+                std::lock_guard<std::mutex> lock{ structseq_mutex() };
+                for (auto const& d : structseq_descriptors())
+                    if (d.qualifiedName == aQualifiedName)
+                        descriptor = &d;
+            }
+            if (descriptor == nullptr)
+                return nullptr;
+            // (an unnamed field: a visible field whose name is a later field's (e.g. os.stat_result's integer st_atime))
+            auto const& fields = descriptor->fields;
+            auto const unnamed = [&](std::size_t aField)
+            {
+                return std::find(fields.begin() + static_cast<std::ptrdiff_t>(aField) + 1, fields.end(), fields[aField]) != fields.end();
+            };
+            if (std::strcmp(aName, "n_fields") == 0)
+                return make_int(static_cast<long long>(fields.size()));
+            if (std::strcmp(aName, "n_sequence_fields") == 0)
+                return make_int(static_cast<long long>(descriptor->visible));
+            if (std::strcmp(aName, "n_unnamed_fields") == 0)
+            {
+                long long count = 0;
+                for (std::size_t f = 0u; f < descriptor->visible && f < fields.size(); ++f)
+                    if (unnamed(f))
+                        ++count;
+                return make_int(count);
+            }
+            if (std::strcmp(aName, "__match_args__") == 0)
+            {
+                std::vector<object*> names;
+                for (std::size_t f = 0u; f < descriptor->visible && f < fields.size(); ++f)
+                    if (!unnamed(f))
+                        names.push_back(make_str(fields[f]));
+                return make_tuple(std::move(names));
+            }
+            return nullptr;
+        }
+
+        // (a field of a struct sequence (any, visible or not): borrowed (null: none); its field set (steals the value))
+        object* structseq_field(object* aObject, std::size_t aField)
+        {
+            if (!is_structseq(aObject) || aField >= as_structseq(aObject).values.size())
+                return nullptr;
+            return as_structseq(aObject).values[aField];
+        }
+        void structseq_set_field(object* aObject, std::size_t aField, object* aValue)
+        {
+            if (!is_structseq(aObject) || aField >= as_structseq(aObject).values.size())
+            {
+                release(aValue);
+                return;
+            }
+            auto& v = as_structseq(aObject).values[aField];
+            auto const previous = v;
+            v = aValue;
+            release(previous);
+        }
+
+        // (dir() of a struct sequence or of its type: CPython 3.13's names besides tuple's (its fields, n_fields, n_sequence_fields, 
+        // n_unnamed_fields, __match_args__, __module__ and __replace__); false if it is neither)
+        bool structseq_dir(object* aObject, std::vector<std::string>& aNames)
+        {
+            structseq_descriptor const* descriptor = nullptr;
+            if (is_structseq(aObject))
+                descriptor = as_structseq(aObject).descriptor;
+            else if (is_type_object(aObject))
+            {
+                std::lock_guard<std::mutex> lock{ structseq_mutex() };
+                for (auto const& d : structseq_descriptors())
+                    if (d.qualifiedName == type_qualified_name(aObject))
+                        descriptor = &d;
+            }
+            if (descriptor == nullptr)
+                return false;
+            aNames = descriptor->fields;
+            for (auto name : { "n_fields", "n_sequence_fields", "n_unnamed_fields", "__match_args__", "__module__", "__replace__" })
+                aNames.emplace_back(name);
+            return true;
         }
 
         bool structseq_items(object* aObject, std::vector<object*>& aItems)

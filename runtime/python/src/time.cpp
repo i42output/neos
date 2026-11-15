@@ -30,7 +30,8 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Modules/timemodule.c), Copyright (c) 2001-2024 Python Software
+  Portions of this file are derived from CPython 3.13 (Modules/timemodule.c and Lib/_strptime.py (the warning of a day of month
+  without a year)), Copyright (c) 2001-2024 Python Software
   Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
   runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
   object model (see runtime/python/NOTICE).
@@ -183,6 +184,34 @@ namespace neos::python_runtime
                 return true;
             }
 
+            // (Modules/timemodule.c's checktm: a time tuple's fields within struct tm's ranges (so that strftime and asctime cannot index
+            // their tables out of range); a zero month, day of the month or day of the year: its lowest value)
+            bool check_tm(std::tm& aTm)
+            {
+                auto const fail = [](char const* aMessage) { error("ValueError", aMessage); return false; };
+                if (aTm.tm_mon == -1)
+                    aTm.tm_mon = 0;
+                else if (aTm.tm_mon < 0 || aTm.tm_mon > 11)
+                    return fail("month out of range");
+                if (aTm.tm_mday == 0)
+                    aTm.tm_mday = 1;
+                else if (aTm.tm_mday < 0 || aTm.tm_mday > 31)
+                    return fail("day of month out of range");
+                if (aTm.tm_hour < 0 || aTm.tm_hour > 23)
+                    return fail("hour out of range");
+                if (aTm.tm_min < 0 || aTm.tm_min > 59)
+                    return fail("minute out of range");
+                if (aTm.tm_sec < 0 || aTm.tm_sec > 61)
+                    return fail("seconds out of range");
+                if (aTm.tm_wday < 0)
+                    return fail("day of week out of range");
+                if (aTm.tm_yday == -1)
+                    aTm.tm_yday = 0;
+                else if (aTm.tm_yday < 0 || aTm.tm_yday > 365)
+                    return fail("day of year out of range");
+                return true;
+            }
+
             bool now_tm(object* aValue, std::tm& aResult, char const* aFunction)
             {
                 if (aValue == nullptr)
@@ -229,9 +258,46 @@ namespace neos::python_runtime
                 return era * 146097 + static_cast<long long>(doe) - 719468;
             }
 
+            // (_strptime's GH-70647 warning: a format with a day of month (%d) and no year (%Y, %y or %G) (a DeprecationWarning; false: 
+            // raised (an error)))
+            bool day_without_year(std::string const& aFormat)
+            {
+                bool year = false, dayOfMonth = false;
+                for (std::size_t i = 0u; i < aFormat.size(); ++i)
+                    if (aFormat[i] == '%')
+                    {
+                        // (the directive: after its flags and width (and an O or E modifier))
+                        std::size_t j = i + 1u;
+                        while (j < aFormat.size() && std::strchr("-_0^#", aFormat[j]) != nullptr)
+                            ++j;
+                        while (j < aFormat.size() && aFormat[j] >= '0' && aFormat[j] <= '9')
+                            ++j;
+                        if (j < aFormat.size() && (aFormat[j] == 'O' || aFormat[j] == 'E'))
+                            ++j;
+                        if (j < aFormat.size())
+                        {
+                            year = year || aFormat[j] == 'Y' || aFormat[j] == 'y' || aFormat[j] == 'G';
+                            dayOfMonth = dayOfMonth || aFormat[j] == 'd';
+                        }
+                        i = j;
+                    }
+                if (!dayOfMonth || year)
+                    return true;
+                ref const warn{ module_attribute("warnings", "warn") };
+                if (!warn)
+                    return false;
+                return static_cast<bool>(ref{ invoke(warn.get(), { make_str("Parsing dates involving a day of month without a year specified is ambiguious\n"
+                    "and fails to parse leap day. The default behavior will change in Python 3.15\n"
+                    "to either always raise an exception or to use a different default year (TBD).\n"
+                    "To avoid trouble, add a specific year to the input & format.\n"
+                    "See https://github.com/python/cpython/issues/70647."), exception_class("DeprecationWarning") }) });
+            }
+
             // strptime (the common directives)
             object* strptime(std::string const& aText, std::string const& aFormat)
             {
+                if (!day_without_year(aFormat))
+                    return nullptr;
                 static char const* const sDays[] = { "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday" };
                 static char const* const sMonths[] = { "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december" };
                 int year = 1900, month = 1, day = 1, hour = 0, minute = 0, second = 0, weekday = -1, yearday = -1;
@@ -480,7 +546,7 @@ namespace neos::python_runtime
                         if (!parse_arguments("asctime", aArgs, aKwargs, { "t" }, 0u, 1u, a))
                             return nullptr;
                         std::tm tm{};
-                        if (!now_tm(a[0], tm, "asctime"))
+                        if (!now_tm(a[0], tm, "asctime") || (a[0] != nullptr && !check_tm(tm)))
                             return nullptr;
                         return make_str(asctime(tm));
                     } },
@@ -505,12 +571,10 @@ namespace neos::python_runtime
                         if (kind_of(a[0]) != NEOS_PY_STR)
                             return error("TypeError", std::string{ "strftime() argument 1 must be str, not " } + type_name(a[0]));
                         std::tm tm{};
-                        if (!now_tm(a[1], tm, "strftime"))
+                        if (!now_tm(a[1], tm, "strftime") || (a[1] != nullptr && !check_tm(tm)))
                             return nullptr;
-                        if (tm.tm_mon < 0 || tm.tm_mon > 11)
-                            return error("ValueError", "month out of range");
-                        if (tm.tm_mday < 0 || tm.tm_mday > 31)
-                            return error("ValueError", "day of month out of range");
+                        // (tm_isdst within [-1, 1], in case %Z assumes it)
+                        tm.tm_isdst = std::clamp(tm.tm_isdst, -1, 1);
                         return make_str(strftime(as<str_object>(a[0])->value, tm));
                     } },
                 { "strptime", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -524,12 +588,9 @@ namespace neos::python_runtime
                     } }
             };
 
-            bool time_module(std::vector<std::pair<std::string, object*>>& aAttributes)
+            // (the local time zone's attributes (timezone, altzone, daylight and tzname): new references)
+            void zone_attributes(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
-                for (auto const& f : sTimeFunctions)
-                    aAttributes.emplace_back(f.name, make_builtin(f));
-                aAttributes.emplace_back("struct_time", type_object_for("struct_time", "time.struct_time"));
-                // (the local time zone)
                 auto const t = std::time(nullptr);
                 std::tm local{};
                 to_tm(t, true, local);
@@ -554,6 +615,45 @@ namespace neos::python_runtime
                 auto const standardZone = zone(janOffset <= julOffset ? jtm : ltm, true);
                 auto const summerZone = zone(janOffset <= julOffset ? ltm : jtm, true);
                 aAttributes.emplace_back("tzname", make_tuple({ make_str(standardZone), make_str(summerZone) }));
+            }
+
+#if !defined(_WIN32)
+            // (time.tzset (POSIX, as CPython's: Windows has none): the C library's time zone reset from the environment's TZ, and the module's
+            // time zone attributes with it)
+            object* fn_tzset(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!parse_arguments("tzset", aArgs, aKwargs, {}, 0u, 0u, a))
+                    return nullptr;
+                ::tzset();
+                ref const module{ fn_import("time") };
+                if (!module)
+                    return nullptr;
+                std::vector<std::pair<std::string, object*>> attributes;
+                zone_attributes(attributes);
+                bool ok = true;
+                for (auto& attribute : attributes)
+                {
+                    if (ok && setattr(module.get(), attribute.first.c_str(), attribute.second) < 0)
+                        ok = false;
+                    release(attribute.second);
+                }
+                return ok ? none() : nullptr;
+            }
+#endif
+
+            bool time_module(std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                for (auto const& f : sTimeFunctions)
+                    aAttributes.emplace_back(f.name, make_builtin(f));
+#if !defined(_WIN32)
+                static builtin_entry const sTzset{ "tzset", fn_tzset };
+                aAttributes.emplace_back("tzset", make_builtin(sTzset));
+#endif
+                aAttributes.emplace_back("struct_time", type_object_for("struct_time", "time.struct_time"));
+                // (struct_time's fields (its tm_zone and tm_gmtoff included))
+                aAttributes.emplace_back("_STRUCT_TM_ITEMS", make_int(static_cast<long long>(struct_time_type().fields.size())));
+                zone_attributes(aAttributes);
                 return true;
             }
 

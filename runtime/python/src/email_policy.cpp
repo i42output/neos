@@ -160,6 +160,12 @@ namespace neos::python_runtime::detail::email_policy_module
         void make_email_policy()
         {
             static module_writer const& w = writer("email.policy");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.policy", "Policy", import_attribute("email._policybase", "Policy"));
+            define("email.policy", "_extend_docstrings", import_attribute("email._policybase", "_extend_docstrings"));
+            define("email.policy", "_has_surrogates", import_attribute("email.utils", "_has_surrogates"));
+            define("email.policy", "HeaderRegistry", import_attribute("email.headerregistry", "HeaderRegistry"));
+            define("email.policy", "EmailMessage", import_attribute("email.message", "EmailMessage"));
             define("email.policy", "__all__", py_list({ S<"Compat32">(), S<"compat32">(), S<"Policy">(), S<"EmailPolicy">(), S<"default">(), S<"strict">(), S<"SMTP">(), S<"HTTP">() }));
             define("email.policy", "linesep_splitter", (Mod<"re">()).method("compile", { S<"\\n|\\r\\n?">() }));
                 // The logic of the next three methods is chosen such that it is possible to
@@ -171,11 +177,11 @@ namespace neos::python_runtime::detail::email_policy_module
                 // also chosen because it postpones the relatively expensive full rfc5322
                 // parse until as late as possible when parsing from source, since in many
                 // applications only a few headers will actually be inspected.
-            define("email.policy", "EmailPolicy", (Mod<"email._policybase">().attr("_extend_docstrings"))(w.make_class("EmailPolicy", { Mod<"email._policybase">().attr("Policy") }, {
-                { "message_factory", Mod<"email.message">().attr("EmailMessage") },
+            define("email.policy", "EmailPolicy", (G<"email.policy._extend_docstrings">())(w.make_class("EmailPolicy", { G<"email.policy.Policy">() }, {
+                { "message_factory", G<"email.policy.EmailMessage">() },
                 { "utf8", boolean(false) },
                 { "refold_source", S<"long">() },
-                { "header_factory", (Mod<"email.headerregistry">().attr("HeaderRegistry"))() },
+                { "header_factory", (G<"email.policy.HeaderRegistry">())() },
                 { "content_manager", Mod<"email.contentmanager">().attr("raw_data_manager") },
                 { "__init__", w.method("EmailPolicy", "__init__", {  }, [](arguments a) -> py
                     {
@@ -183,7 +189,7 @@ namespace neos::python_runtime::detail::email_policy_module
                         py kw = a[1];
                         if (!kw.contains((S<"header_factory">())))
                         {
-                            (B<"object">()).method("__setattr__", { self, S<"header_factory">(), (Mod<"email.headerregistry">().attr("HeaderRegistry"))() });
+                            (B<"object">()).method("__setattr__", { self, S<"header_factory">(), (G<"email.policy.HeaderRegistry">())() });
                         }
                         call_ex((B<"super">()(G<"email.policy.EmailPolicy">(), self)).attr("__init__"), {  }, py{}, kw);
                         return none();
@@ -279,7 +285,7 @@ namespace neos::python_runtime::detail::email_policy_module
                             }
                             else if (refold_binary.truthy())
                             {
-                                refold = (Mod<"email.utils">().attr("_has_surrogates"))(value);
+                                refold = (G<"email.policy._has_surrogates">())(value);
                             }
                         }
                         if (refold.truthy())
@@ -316,14 +322,9 @@ namespace neos::python_runtime::detail::email_policy_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
-                aAttributes.emplace_back("Policy", import_attribute("email._policybase", "Policy").release());
                 aAttributes.emplace_back("Compat32", import_attribute("email._policybase", "Compat32").release());
                 aAttributes.emplace_back("compat32", import_attribute("email._policybase", "compat32").release());
-                aAttributes.emplace_back("_extend_docstrings", import_attribute("email._policybase", "_extend_docstrings").release());
-                aAttributes.emplace_back("_has_surrogates", import_attribute("email.utils", "_has_surrogates").release());
-                aAttributes.emplace_back("HeaderRegistry", import_attribute("email.headerregistry", "HeaderRegistry").release());
                 aAttributes.emplace_back("raw_data_manager", import_attribute("email.contentmanager", "raw_data_manager").release());
-                aAttributes.emplace_back("EmailMessage", import_attribute("email.message", "EmailMessage").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -332,6 +333,14 @@ namespace neos::python_runtime::detail::email_policy_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.policy", email_policy_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.policy", email_policy_module, assigned);
     }
 }

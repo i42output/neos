@@ -161,6 +161,8 @@ namespace neos::python_runtime::detail::tarfile_module
         void make_tarfile()
         {
             static module_writer const& w = writer("tarfile");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("tarfile", "bltn_open", import_attribute("builtins", "open"));
             // !/usr/bin/env python3
             // -------------------------------------------------------------------
             // tarfile.py
@@ -1344,6 +1346,14 @@ namespace neos::python_runtime::detail::tarfile_module
                     }
                     target_path = (Mod<"os">().attr("path")).method("realpath", { (Mod<"os">().attr("path")).method("join", { dest_path, name }) }, { { "strict", (Mod<"os">().attr("path")).attr("ALLOW_MISSING") } });
                     if ((Mod<"os">().attr("path")).method("commonpath", { py_list({ target_path, dest_path }) }) != dest_path)
+                    {
+                        py_raise((G<"tarfile.OutsideDestinationError">())(member, target_path));
+                    }
+                    // A link member named after the destination directory itself
+                    // would replace it with a (sym)link, redirecting the destination
+                    // for all subsequent members.
+                    if (((member.method("islnk").truthy() || member.method("issym").truthy())) && 
+                        (Mod<"os">().attr("path")).method("normpath", { name }) == (Mod<"os">().attr("curdir")))
                     {
                         py_raise((G<"tarfile.OutsideDestinationError">())(member, target_path));
                     }
@@ -2788,7 +2798,7 @@ namespace neos::python_runtime::detail::tarfile_module
                                 self.set_attr("mode", S<"w">());
                                 self.set_attr("_mode", S<"wb">());
                             }
-                            fileobj = (Mod<"builtins">().attr("open"))(name, self.attr("_mode"));
+                            fileobj = (G<"tarfile.bltn_open">())(name, self.attr("_mode"));
                             self.set_attr("_extfileobj", boolean(false));
                         }
                         else
@@ -3587,7 +3597,7 @@ namespace neos::python_runtime::detail::tarfile_module
                         if (tarinfo.method("isreg").truthy())
                         {
                             {
-                                py const manager102 = (Mod<"builtins">().attr("open"))(name, S<"rb">());
+                                py const manager102 = (G<"tarfile.bltn_open">())(name, S<"rb">());
                                 py const exit102 = pyclass::special_method(manager102, "__exit__");
                                 py const value102 = pyclass::special_method(manager102, "__enter__")(manager102);
                                 f = value102;
@@ -4141,7 +4151,7 @@ namespace neos::python_runtime::detail::tarfile_module
                         source.method("seek", { tarinfo.attr("offset_data") });
                         bufsize = self.attr("copybufsize");
                         {
-                            py const manager118 = (Mod<"builtins">().attr("open"))(targetpath, S<"wb">());
+                            py const manager118 = (G<"tarfile.bltn_open">())(targetpath, S<"wb">());
                             py const exit118 = pyclass::special_method(manager118, "__exit__");
                             py const value118 = pyclass::special_method(manager118, "__enter__")(manager118);
                             target = value118;
@@ -5129,7 +5139,6 @@ namespace neos::python_runtime::detail::tarfile_module
                 }
                 if (auto const doc = tarfile_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("bltn_open", import_attribute("builtins", "open").release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("io", py{ fn_import("io") }.release());
@@ -5147,6 +5156,14 @@ namespace neos::python_runtime::detail::tarfile_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("tarfile", tarfile_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("tarfile", tarfile_module, assigned);
     }
 }

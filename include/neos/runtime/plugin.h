@@ -59,6 +59,8 @@
   - NEOS_RT_BOOL is C bool, NEOS_RT_CHAR is char, NEOS_RT_SIZE is size_t; the others are as named.
   - NEOS_RT_STRING is a NUL terminated "char const*": an argument is valid for the duration of the call; a
     result is copied by the VM (a null result is the empty string) so it may point to static or thread local storage.
+    (version 21) A string can contain NUL characters (e.g. a language's strings): neos_rt_host::string_size gives an 
+    argument's size, and neos_rt_host::string_result gives a result's.
   - NEOS_RT_OBJECT is a "neos_rt_object*", an object that a plugin implements (the VM only retains and releases it):
     an argument is borrowed for the duration of the call (a plugin that keeps it retains it); a result is a new
     reference that the VM takes over (a null result is no object). Scripts see objects as handles (i32; 0 is no
@@ -80,7 +82,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 20
+#define NEOS_RUNTIME_PLUGIN_VERSION 21
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -367,6 +369,14 @@ typedef struct neos_rt_host
        headroom left for host functions (generated code's stack limit), e.g. for a plugin whose functions recurse (a language runtime's 
        repr or comparison of objects that contain others) to raise its language's error before its stack overflows; 0 if not known */
     unsigned long long (*stack_limit)(void);
+    /* (version 21) strings that contain NUL characters (e.g. a language's strings): string_size: the size in bytes of a NEOS_RT_STRING
+       argument (aString: as the plugin's function received it): the size of the program's string that it is (which may contain NULs), 
+       else (a string that is not the program's) strlen's; string_result: the size of the NEOS_RT_STRING result that the plugin's 
+       function that the calling thread is in will return (aString: that result; aSize: its size in bytes), which the VM then copies 
+       (rather than up to its first NUL); aString NULL withdraws a size given before. A result that is not the aString given last is 
+       copied up to its first NUL */
+    size_t (*string_size)(char const* aString);
+    void (*string_result)(char const* aString, size_t aSize);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

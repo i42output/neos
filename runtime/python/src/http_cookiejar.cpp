@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::http_cookiejar_module
         void make_http_cookiejar()
         {
             static module_writer const& w = writer("http.cookiejar");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("http.cookiejar", "timegm", import_attribute("calendar", "timegm"));
             define("http.cookiejar", "__all__", py_list({ S<"Cookie">(), S<"CookieJar">(), S<"CookiePolicy">(), S<"DefaultCookiePolicy">(), S<"FileCookieJar">(), S<"LWPCookieJar">(), S<"LoadError">(), S<"MozillaCookieJar">() }));
             define("http.cookiejar", "debug", boolean(false));
             define("http.cookiejar", "logger", none());
@@ -223,7 +225,7 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                     sec = items1[5];
                     if (((year >= (G<"http.cookiejar.EPOCH_YEAR">())) && (((I<1>()) <= month) && (month <= (I<12>()))) && (((I<1>()) <= mday) && (mday <= (I<31>()))) && (((I<0>()) <= hour) && (hour <= (I<24>()))) && (((I<0>()) <= min_) && (min_ <= (I<59>()))) && (((I<0>()) <= sec) && (sec <= (I<61>())))))
                     {
-                        return (Mod<"calendar">().attr("timegm"))(tt);
+                        return (G<"http.cookiejar.timegm">())(tt);
                     }
                     else
                     {
@@ -3307,7 +3309,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
                 aAttributes.emplace_back("_threading", py{ fn_import("threading") }.release());
                 aAttributes.emplace_back("http", py{ fn_import("http") }.release());
-                aAttributes.emplace_back("timegm", import_attribute("calendar", "timegm").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -3316,6 +3317,14 @@ namespace neos::python_runtime::detail::http_cookiejar_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("http.cookiejar", http_cookiejar_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("http.cookiejar", http_cookiejar_module, assigned);
     }
 }

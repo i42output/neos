@@ -164,15 +164,22 @@ namespace neos::python_runtime
             struct decode_errors
             {
                 char const* encoding;
-                std::string_view data;
+                std::string_view data;          ///< (the input: the exception's object's, if a handler replaced it (see failure))
                 std::string_view errors;
                 ref exception;
+                ref input;                      ///< (the exception's object that data is)
+                std::string replaced;           ///< (the bytes of the object that a handler made the exception's: data's)
 
                 object* make_exception_object(std::size_t aStart, std::size_t aEnd, char const* aReason)
                 {
                     if (!exception)
+                    {
                         exception = ref{ make_exception("UnicodeDecodeError", { make_str(encoding), make_bytes(std::string{ data }),
                             make_int(static_cast<long long>(aStart)), make_int(static_cast<long long>(aEnd)), make_str(aReason) }) };
+                        input = ref{ getattr(exception.get(), "object") };
+                        if (!input)
+                            clear_error();
+                    }
                     else
                     {
                         ref const start{ make_int(static_cast<long long>(aStart)) };
@@ -278,6 +285,20 @@ namespace neos::python_runtime
                     long long position = 0;
                     if (!to_index(as<tuple_object>(result.get())->items[1], position))
                         return false;
+                    // (the handler may have replaced the exception's object: the input is its bytes from here on, the position within them (as 
+                    // CPython's unicode_decode_call_errorhandler_writer copies the input back); the decoder reads data again)
+                    ref const object{ getattr(e, "object") };
+                    if (!object)
+                        return false;
+                    if (object.get() != input.get())
+                    {
+                        std::string_view bytes;
+                        if (std::string_view{ type_name(builtin_value(object.get())) } != "bytes" || !bytes_like(object.get(), bytes))
+                            return (error("TypeError", "object attribute must be bytes"), false);
+                        replaced = std::string{ bytes };
+                        data = replaced;
+                        input = ref{ new_reference(object.get()) };
+                    }
                     auto const size = static_cast<long long>(data.size());
                     if (position < 0)
                         position += size;
@@ -575,6 +596,7 @@ namespace neos::python_runtime
                             append_char(aOutput, 0xDC00u + static_cast<unsigned char>(aData[k]));
                     else if (!errors.failure(start, end, reason, aOutput, next))
                         return false;
+                    aData = errors.data;    // (a handler's replacement of the input (see decode_errors::failure))
                     i = next;
                 }
                 aConsumed = i;
@@ -632,9 +654,9 @@ namespace neos::python_runtime
 
             bool decode_utf16(std::string_view aData, std::string_view aErrors, int& aByteOrder, bool aFinal, std::string& aOutput, std::size_t& aConsumed)
             {
-                auto const q0 = reinterpret_cast<unsigned char const*>(aData.data());
+                auto q0 = reinterpret_cast<unsigned char const*>(aData.data());
                 std::size_t q = 0u;
-                auto const size = aData.size();
+                auto size = aData.size();
                 int bo = aByteOrder;
                 if (bo == 0 && size >= 2u)
                 {
@@ -732,15 +754,18 @@ namespace neos::python_runtime
                     std::size_t next = end;
                     if (!errors.failure(start, end, reason, aOutput, next))
                         return false;
+                    // (a handler's replacement of the input (see decode_errors::failure))
+                    q0 = reinterpret_cast<unsigned char const*>(errors.data.data());
+                    size = errors.data.size();
                     q = next;
                 }
             }
 
             bool decode_utf32(std::string_view aData, std::string_view aErrors, int& aByteOrder, bool aFinal, std::string& aOutput, std::size_t& aConsumed)
             {
-                auto const q0 = reinterpret_cast<unsigned char const*>(aData.data());
+                auto q0 = reinterpret_cast<unsigned char const*>(aData.data());
                 std::size_t q = 0u;
-                auto const size = aData.size();
+                auto size = aData.size();
                 int bo = aByteOrder;
                 if (bo == 0 && size >= 4u)
                 {
@@ -773,6 +798,8 @@ namespace neos::python_runtime
                         std::size_t next = size;
                         if (!errors.failure(q, size, "truncated data", aOutput, next))
                             return false;
+                        q0 = reinterpret_cast<unsigned char const*>(errors.data.data());
+                        size = errors.data.size();
                         q = next;
                         continue;
                     }
@@ -792,6 +819,8 @@ namespace neos::python_runtime
                     std::size_t next = q + 4u;
                     if (!errors.failure(q, q + 4u, reason, aOutput, next))
                         return false;
+                    q0 = reinterpret_cast<unsigned char const*>(errors.data.data());
+                    size = errors.data.size();
                     q = next;
                 }
                 aConsumed = q;
@@ -875,6 +904,7 @@ namespace neos::python_runtime
                     std::size_t next = i + 1u;
                     if (!errors.failure(i, i + 1u, "ordinal not in range(128)", aOutput, next))
                         return false;
+                    aData = errors.data;
                     i = next;
                 }
                 return true;
@@ -1007,6 +1037,7 @@ namespace neos::python_runtime
                     std::size_t next = i + 1u;
                     if (!errors.failure(i, i + 1u, "character maps to <undefined>", aOutput, next))
                         return false;
+                    aData = errors.data;
                     i = next;
                 }
                 return true;
@@ -1152,13 +1183,15 @@ namespace neos::python_runtime
                 unsigned long base64buffer = 0u;
                 char32_t surrogate = 0u;
                 std::size_t s = 0u;
-                auto const e = aData.size();
+                auto e = aData.size();
                 auto const fail = [&](char const* aReason, std::size_t aEnd) -> bool
                 {
                     std::string replacement;
                     std::size_t next = aEnd;
                     if (!errors.failure(startinpos, aEnd, aReason, replacement, next))
                         return false;
+                    aData = errors.data;
+                    e = aData.size();
                     out += to_code_points(replacement);
                     s = next;
                     return true;
@@ -1359,7 +1392,7 @@ namespace neos::python_runtime
             bool decode_unicode_escape(std::string_view aData, std::string_view aErrors, bool aFinal, bool aRaw, std::string& aOutput, std::size_t& aConsumed)
             {
                 decode_errors errors{ aRaw ? "rawunicodeescape" : "unicodeescape", aData, aErrors };
-                auto const end = aData.size();
+                auto end = aData.size();
                 std::size_t s = 0u;
                 auto const hex = [](unsigned char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
                 while (s < end)
@@ -1497,6 +1530,8 @@ namespace neos::python_runtime
                     std::size_t next = s;
                     if (!errors.failure(startinpos, s, message, aOutput, next))
                         return false;
+                    aData = errors.data;
+                    end = aData.size();
                     s = next;
                 }
                 aConsumed = end;
@@ -4479,7 +4514,33 @@ namespace neos::python_runtime
                             return nullptr;
                         if (!make_codecs_classes())
                             return nullptr;
-                        return builtin_search(normalized_encoding(encoding));
+                        // (Lib/encodings/__init__.py's _cache: the entries found (None: no codec) by the encoding's name, cleared when it
+                        // has _MAXCACHE of them)
+                        ref const cache{ module_attribute("encodings", "_cache") };
+                        if (!cache)
+                            clear_error();
+                        bool const cached = cache && kind_of(builtin_value(cache.get())) == NEOS_PY_DICT;
+                        if (cached)
+                        {
+                            auto const position = dict_find(builtin_value(cache.get()), a[0]);
+                            if (position < -1)
+                                return nullptr;
+                            if (position >= 0)
+                                return new_reference(as<dict_object>(builtin_value(cache.get()))->items[static_cast<std::size_t>(position)].second);
+                        }
+                        ref result{ builtin_search(normalized_encoding(encoding)) };
+                        if (!result)
+                            return nullptr;
+                        if (cached)
+                        {
+                            auto& d = *as<dict_object>(builtin_value(cache.get()));
+                            if (d.items.size() >= 500u)
+                                while (!d.items.empty())
+                                    dict_erase(d, d.items.size() - 1u);
+                            if (dict_set(&d.h.base, a[0], result.get()) != 0)
+                                return nullptr;
+                        }
+                        return result.release_ownership();
                     } }
             };
 
@@ -4491,6 +4552,9 @@ namespace neos::python_runtime
                 if (!registryError)
                     return false;
                 aAttributes.emplace_back("CodecRegistryError", new_reference(registryError.get()));
+                aAttributes.emplace_back("_cache", make_dict());
+                aAttributes.emplace_back("_MAXCACHE", make_int(500));
+                aAttributes.emplace_back("_unknown", make_str("--unknown--"));
                 ref const aliases{ fn_import("encodings.aliases") };
                 if (!aliases)
                     return false;

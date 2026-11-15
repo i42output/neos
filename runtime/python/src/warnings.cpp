@@ -449,7 +449,8 @@ namespace neos::python_runtime
                 if (kind_of(filters.get()) != NEOS_PY_LIST)
                     return error("ValueError", "_warnings.filters must be a list");
                 ref action, item;
-                std::vector<object*> const filterItems = as<list_object>(filters.get())->items;
+                // (the list as it is now at each step, as CPython's: a filter's match can change it; the filter held while it is tried)
+                auto const& filterItems = as<list_object>(filters.get())->items;
                 for (std::size_t i = 0u; i < filterItems.size() && !action; ++i)
                 {
                     ref const f{ new_reference(filterItems[i]) };
@@ -1478,6 +1479,24 @@ namespace neos::python_runtime
             }
 
             inline bool const sWarnings = register_module("warnings", warnings_module);
+            // (CPython's C module _warnings: the objects that warnings takes from it (filters, _defaultaction, _onceregistry, warn, warn_explicit,
+            // _filters_mutated): warnings's)
+            inline bool const sWarningsC = register_module("_warnings", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                ref const m{ fn_import("warnings") };
+                if (!m)
+                    return false;
+                for (auto const& [name, from] : { std::pair{ "filters", "filters" }, std::pair{ "_defaultaction", "defaultaction" }, 
+                    std::pair{ "_onceregistry", "onceregistry" }, std::pair{ "warn", "warn" }, std::pair{ "warn_explicit", "warn_explicit" }, 
+                    std::pair{ "_filters_mutated", "_filters_mutated" } })
+                {
+                    auto const value = getattr(m.get(), from);
+                    if (value == nullptr)
+                        return false;
+                    aAttributes.emplace_back(name, value);
+                }
+                return true;
+            });
         }
     }
 }

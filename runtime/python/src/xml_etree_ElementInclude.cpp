@@ -162,6 +162,8 @@ namespace neos::python_runtime::detail::xml_etree_ElementInclude_module
         void make_xml_etree_ElementInclude()
         {
             static module_writer const& w = writer("xml.etree.ElementInclude");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xml.etree.ElementInclude", "urljoin", import_attribute("urllib.parse", "urljoin"));
             // 
             // ElementTree
             // $Id: ElementInclude.py 3375 2008-02-13 08:05:08Z fredrik $
@@ -370,7 +372,7 @@ namespace neos::python_runtime::detail::xml_etree_ElementInclude_module
                             href = e.method("get", { S<"href">() });
                             if (base_url.truthy())
                             {
-                                href = (Mod<"urllib.parse">().attr("urljoin"))(base_url, href);
+                                href = (G<"xml.etree.ElementInclude.urljoin">())(base_url, href);
                             }
                             parse = e.method("get", { S<"parse">(), S<"xml">() });
                             if (parse == (S<"xml">()))
@@ -454,7 +456,6 @@ namespace neos::python_runtime::detail::xml_etree_ElementInclude_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("copy", py{ fn_import("copy") }.release());
                 aAttributes.emplace_back("ElementTree", py{ fn_import("xml.etree.ElementTree") }.release());
-                aAttributes.emplace_back("urljoin", import_attribute("urllib.parse", "urljoin").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -463,6 +464,14 @@ namespace neos::python_runtime::detail::xml_etree_ElementInclude_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.etree.ElementInclude", xml_etree_ElementInclude_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.etree.ElementInclude", xml_etree_ElementInclude_module, assigned);
     }
 }

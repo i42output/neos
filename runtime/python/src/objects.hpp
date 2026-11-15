@@ -410,7 +410,12 @@ namespace neos::python_runtime
         // (new references); a static "inline bool sRegistered = register_module(name, initializer);" registers it)
         using module_initializer = bool (*)(std::vector<std::pair<std::string, object*>>& aAttributes);
         std::map<std::string, module_initializer, std::less<>>& modules();
-        bool register_module(char const* aName, module_initializer aInitializer);
+        // (and its assigner, if its functions read its globals as objects of their own (a module that py2neos translated): an attribute of the 
+        // module (aModule: its name) assigned from outside its code (aValue: borrowed; null: deleted), e.g. by unittest.mock.patch, which its 
+        // functions then read (as CPython's read their module's __dict__))
+        using module_assigner = void (*)(char const* aModule, char const* aName, object* aValue);
+        bool register_module(char const* aName, module_initializer aInitializer, module_assigner aAssigner = nullptr);
+        module_assigner assigner_of(std::string_view aModule);
         // (a class of a module (e.g. threading.Thread): its namespace's functions (builtin functions) are its methods)
         object* make_class(std::string const& aModule, std::string const& aName, std::vector<object*> const& aBases,
             std::vector<std::pair<std::string, object*>> const& aNamespace);
@@ -539,6 +544,9 @@ namespace neos::python_runtime
         object* b_memoryview(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_bytes_literal(std::vector<object*> const& aArgs, object* aKwargs);
         object* bytes_fromhex(object* aString, bool aMutable);
+        object* bytes_maketrans(object* aFrom, object* aTo);
+        // (a method that a builtin type's instances have (aType: its qualified name), unbound: its first argument the instance)
+        object* unbound_method(std::string const& aType, char const* aName);
         object* str_encode(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs);
 
         object* call(object* aCallable, object* aArgs, object* aKwargs);
@@ -591,6 +599,7 @@ namespace neos::python_runtime
         {
             object* (*construct)(object* aArgs, object* aKwargs, object* aOwner) = nullptr;
             void (*disown)(object* aValue) = nullptr;
+            bool objectInit = false;    ///< (the type has no __init__ of its own (its value is made by __new__): its __init__ is object's)
         };
         std::map<std::string, native_base_hooks, std::less<>>& native_bases();
         void write_unraisable(object* aObject);         // (the pending exception: "Exception ignored in: <aObject>" and its report)
@@ -726,6 +735,17 @@ namespace neos::python_runtime
         object* exec_globals_of(void* aProgram);        // (the globals of the innermost exec running a program (borrowed): null if none)
         void exec_enter(object* aGlobals);              // (a function of code that exec ran: its globals)
         void exec_leave();
+        // (a generator's body runs on a coroutine of its own, on the thread of the code that resumes it: the program that runs and the 
+        // exec namespaces entered since aDepth (exec_depth's) are the body's while it is suspended (exec_suspend: taken, and aResumer's 
+        // program runs again; exec_resume: the body's again (the state is deleted); exec_discard: deleted))
+        std::size_t exec_depth();
+        // (a thread that runs the program's functions: the program's context (the main program's, whichever program starts the thread), 
+        // and the new thread's own knowledge of it (main_program_context's, for program switches))
+        void* main_program_context();
+        void thread_main_program(void* aMain);
+        void* exec_suspend(std::size_t aDepth, void* aResumer);
+        void exec_resume(void* aState);
+        void exec_discard(void* aState);
         void fn_set_update(object* aSet, object* aIterable);
         void fn_dict_merge(object* aDict, object* aMapping);
         void fn_ns_set(object* aDict, char const* aName, object* aValue);     // (a class body's namespace: a bound name (aValue null: unbound))
@@ -762,7 +782,7 @@ namespace neos::python_runtime
         void explicit_raise();                          // (the exception raised next is raised by a raise statement (not re-raised))
         void entering_frame();                          // (the exception raised next is raised as the innermost frame is entered (it is not in its traceback))
         long long recursion_limit();                    // (sys.getrecursionlimit() (sys.cpp))
-        void fn_depth_check(std::int32_t aDepth);       // (the depth of calls: RecursionError beyond the limit)
+        std::int32_t fn_depth_check(std::int32_t aDepth);   // (the depth of calls: RecursionError beyond the limit; the depth to check beyond next)
         object* call_method_named(object* aObject, char const* aName, std::vector<object*> aArgs);  // (steals the arguments)
         // (a native function whose arguments it binds itself (values.cpp's make_bound_function): called with aSelf (non-null: a method's 
         // instance) first, then aArgs, with no tuple made for them; is_bound_function: whether it is one)
@@ -947,7 +967,9 @@ namespace neos::python_runtime
         }
         void run_exit_functions();                      // (atexit's: the program ends (services.cpp))
         bool signals_check();                           // (the Python handlers of signals that have arrived are called: false if one raised)
+        void signal_wait(int aSignal);                  // (a signal that the process sent itself: its arrival waited for (if it has a Python handler))
         void signals_start();                           // (the signals ignored from the start (SIGPIPE: BrokenPipeError instead))
+        void signals_end();                             // (the program has ended: signals are no longer passed to its thread)
         void fn_finish();
 
         // --- files (io.cpp)

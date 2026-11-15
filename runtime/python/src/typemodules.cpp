@@ -49,6 +49,7 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        bool generator_make_iterable_coroutine(object* aObject);    // (generators.cpp)
         namespace
         {
             // --- abc
@@ -778,7 +779,25 @@ namespace neos::python_runtime
                             return nullptr;
                         if (!is_callable(a[0]))
                             return error("TypeError", "types.coroutine() expects a callable");
-                        return new_reference(a[0]);
+                        // (a function whose calls' generators are awaitable (CPython sets its code's CO_ITERABLE_COROUTINE): a wrapper (as
+                        // functools.wraps makes it) that marks them; its other results are its own)
+                        ref const wrapper{ make_function("coroutine", [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
+                        {
+                            auto const func = static_cast<object*>(aData);
+                            auto const result = call(func, aArgs, aKwargs);
+                            if (result != nullptr)
+                                generator_make_iterable_coroutine(result);
+                            return result;
+                        }, (retain(a[0]), a[0])) };     // (the function: kept as long as the wrapper's data, which lives as long as the program)
+                        ref const wraps{ module_attribute("functools", "wraps") };
+                        if (!wraps)
+                            return nullptr;
+                        ref const wrapsArgs{ make_tuple({ new_reference(a[0]) }) };
+                        ref const decorator{ call(wraps.get(), wrapsArgs.get(), nullptr) };
+                        if (!decorator)
+                            return nullptr;
+                        ref const decoratorArgs{ make_tuple({ new_reference(wrapper.get()) }) };
+                        return call(decorator.get(), decoratorArgs.get(), nullptr);
                     } }
             };
 

@@ -49,6 +49,7 @@
 #include <string>
 #include <vector>
 #include "objects.hpp"
+#include "values.hpp"
 
 namespace neos::python_runtime
 {
@@ -430,6 +431,7 @@ namespace neos::python_runtime
                 bool recursive = false;
                 bool includeHidden = false;
                 bool bytes = false;
+                object* dirFd = nullptr;    ///< (dir_fd (borrowed): the paths are relative to its directory, as CPython's glob's)
             };
 
             bool path_join(std::string const& aDirectory, std::string const& aName, std::string& aResult)
@@ -451,8 +453,32 @@ namespace neos::python_runtime
                 return result;
             }
 
-            bool path_test(char const* aFunction, std::string const& aPath)
+            bool path_test(char const* aFunction, std::string const& aPath, glob_state const& aState)
             {
+                // (relative to a dir_fd: _lexists's os.lstat and _isdir's os.stat, of its directory)
+                if (aState.dirFd != nullptr)
+                {
+                    bool const lexists = std::strcmp(aFunction, "path.lexists") == 0;
+                    ref const kwargs{ make_dict() };
+                    ref const key{ make_str("dir_fd") };
+                    dict_set(kwargs.get(), key.get(), aState.dirFd);
+                    ref const st = os_call(lexists ? "lstat" : "stat", { make_str(aPath) }, kwargs.get());
+                    if (!st)
+                    {
+                        clear_error();
+                        return false;
+                    }
+                    if (lexists)
+                        return true;
+                    ref const mode{ getattr(st.get(), "st_mode") };
+                    long long m = 0;
+                    if (!mode || !to_index(mode.get(), m))
+                    {
+                        clear_error();
+                        return false;
+                    }
+                    return (m & 0170000) == 0040000;
+                }
                 ref const r{ os_call(aFunction, { make_str(aPath) }) };
                 if (!r)
                 {
@@ -462,11 +488,44 @@ namespace neos::python_runtime
                 return truth(r.get()) == 1;
             }
 
-            // (_listdir: the names of a directory's entries (directories only: aDirectoriesOnly); none if it cannot be read)
-            std::vector<std::string> list_directory(std::string const& aDirectory, bool aDirectoriesOnly)
+            // (_listdir (_iterdir): the names of a directory's entries (directories only: aDirectoriesOnly); none if it cannot be read; relative 
+            // to a dir_fd: the directory opened by it (or the dir_fd's directory itself))
+            std::vector<std::string> list_directory(std::string const& aDirectory, bool aDirectoriesOnly, glob_state const& aState)
             {
                 std::vector<std::string> result;
-                ref const it{ os_call("scandir", { make_str(aDirectory.empty() ? std::string{ "." } : aDirectory) }) };
+                ref opened;
+                ref argument;
+                if (aState.dirFd != nullptr)
+                {
+                    if (!aDirectory.empty())
+                    {
+                        ref const kwargs{ make_dict() };
+                        ref const key{ make_str("dir_fd") };
+                        dict_set(kwargs.get(), key.get(), aState.dirFd);
+#if defined(O_DIRECTORY)
+                        auto const flags = make_int(O_RDONLY | O_DIRECTORY);
+#else
+                        auto const flags = make_int(O_RDONLY);
+#endif
+                        opened = os_call("open", { make_str(aDirectory), flags }, kwargs.get());
+                        if (!opened)
+                        {
+                            clear_error();
+                            return result;
+                        }
+                        argument = opened;
+                    }
+                    else
+                        argument = ref{ new_reference(aState.dirFd) };
+                }
+                else
+                    argument = ref{ make_str(aDirectory.empty() ? std::string{ "." } : aDirectory) };
+                struct closer
+                {
+                    object* fd;
+                    ~closer() { if (fd != nullptr) { ref const r{ os_call("close", { new_reference(fd) }) }; if (!r) clear_error(); } }
+                } const close{ opened.get() };
+                ref const it{ os_call("scandir", { new_reference(argument.get()) }) };
                 if (!it)
                 {
                     clear_error();
@@ -501,7 +560,7 @@ namespace neos::python_runtime
 
             bool glob1(std::string const& aDirectory, std::string const& aPattern, bool aDirectoriesOnly, glob_state const& aState, std::vector<std::string>& aResult)
             {
-                auto names = list_directory(aDirectory, aDirectoriesOnly);
+                auto names = list_directory(aDirectory, aDirectoriesOnly, aState);
                 if (!(aState.includeHidden || is_hidden(aPattern)))
                     names.erase(std::remove_if(names.begin(), names.end(), is_hidden), names.end());
                 ref const pattern{ normcase(ref{ make_str(aPattern) }.get()) };
@@ -519,20 +578,20 @@ namespace neos::python_runtime
                 return true;
             }
 
-            void glob0(std::string const& aDirectory, std::string const& aBasename, std::vector<std::string>& aResult)
+            void glob0(std::string const& aDirectory, std::string const& aBasename, glob_state const& aState, std::vector<std::string>& aResult)
             {
                 if (!aBasename.empty())
                 {
-                    if (path_test("path.lexists", glob_join(aDirectory, aBasename)))
+                    if (path_test("path.lexists", glob_join(aDirectory, aBasename), aState))
                         aResult.push_back(aBasename);
                 }
-                else if (path_test("path.isdir", aDirectory))
+                else if (path_test("path.isdir", aDirectory, aState))
                     aResult.push_back(aBasename);
             }
 
             void rlistdir(std::string const& aDirectory, bool aDirectoriesOnly, glob_state const& aState, std::vector<std::string>& aResult)
             {
-                for (auto const& x : list_directory(aDirectory, aDirectoriesOnly))
+                for (auto const& x : list_directory(aDirectory, aDirectoriesOnly, aState))
                     if (aState.includeHidden || !is_hidden(x))
                     {
                         aResult.push_back(x);
@@ -546,7 +605,7 @@ namespace neos::python_runtime
 
             void glob2(std::string const& aDirectory, bool aDirectoriesOnly, glob_state const& aState, std::vector<std::string>& aResult)
             {
-                if (aDirectory.empty() || path_test("path.isdir", aDirectory))
+                if (aDirectory.empty() || path_test("path.isdir", aDirectory, aState))
                     aResult.push_back({});
                 rlistdir(aDirectory, aDirectoriesOnly, aState, aResult);
             }
@@ -561,6 +620,20 @@ namespace neos::python_runtime
                 return true;
             }
 
+            // (glob0's and glob1's DeprecationWarning (CPython 3.13's warnings._deprecated: removed in 3.15))
+            bool glob_deprecated(char const* aName)
+            {
+                ref const deprecated{ module_attribute("warnings", "_deprecated") };
+                ref const remove{ make_tuple({ make_int(3), make_int(15) }) };
+                ref const kwargs{ make_dict() };
+                ref const key{ make_str("remove") };
+                if (!deprecated || dict_set(kwargs.get(), key.get(), remove.get()) != 0)
+                    return false;
+                ref const r{ invoke(deprecated.get(), { make_str(aName), make_str("{name} is deprecated and will be removed in Python {remove}. Use "
+                    "glob.glob and pass a directory to its root_dir argument instead.") }, kwargs.get()) };
+                return static_cast<bool>(r);
+            }
+
             // (_iglob)
             bool iglob(std::string const& aPathname, std::string const& aRoot, bool aDirectoriesOnly, glob_state const& aState, std::vector<std::string>& aResult)
             {
@@ -571,10 +644,10 @@ namespace neos::python_runtime
                 {
                     if (!basename.empty())
                     {
-                        if (path_test("path.lexists", glob_join(aRoot, aPathname)))
+                        if (path_test("path.lexists", glob_join(aRoot, aPathname), aState))
                             aResult.push_back(aPathname);
                     }
-                    else if (path_test("path.isdir", glob_join(aRoot, directory)))
+                    else if (path_test("path.isdir", glob_join(aRoot, directory), aState))
                         // (a pattern that ends with a separator matches only directories)
                         aResult.push_back(aPathname);
                     return true;
@@ -607,7 +680,7 @@ namespace neos::python_runtime
                             return false;
                     }
                     else
-                        glob0(in, basename, names);
+                        glob0(in, basename, aState, names);
                     for (auto const& n : names)
                     {
                         std::string joined;
@@ -631,6 +704,8 @@ namespace neos::python_runtime
                 if (a[1] != nullptr && kind_of(a[1]) != NEOS_PY_NONE && !path_text(a[1], root))
                     return nullptr;
                 state.recursive = a[3] != nullptr && truth(a[3]) == 1;
+                if (a[2] != nullptr && a[2] != none())
+                    state.dirFd = a[2];
                 state.includeHidden = a[4] != nullptr && truth(a[4]) == 1;
                 std::vector<std::string> results;
                 if (!iglob(pathname, root, false, state, results))
@@ -804,10 +879,11 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string directory, pattern;
-                        if (!parse_arguments("glob0", aArgs, aKwargs, { "dirname", "pattern" }, 2u, 0u, a) || !path_text(a[0], directory) || !path_text(a[1], pattern))
+                        if (!parse_arguments("glob0", aArgs, aKwargs, { "dirname", "pattern" }, 2u, 0u, a) || !glob_deprecated("glob.glob0") || !path_text(a[0], directory) ||
+                            !path_text(a[1], pattern))
                             return nullptr;
                         std::vector<std::string> names;
-                        glob0(directory, pattern, names);
+                        glob0(directory, pattern, glob_state{}, names);
                         std::vector<object*> items;
                         for (auto& n : names)
                             items.push_back(make_str(std::move(n)));
@@ -817,7 +893,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string directory, pattern;
-                        if (!parse_arguments("glob1", aArgs, aKwargs, { "dirname", "pattern" }, 2u, 0u, a) || !path_text(a[0], directory) || !path_text(a[1], pattern))
+                        if (!parse_arguments("glob1", aArgs, aKwargs, { "dirname", "pattern" }, 2u, 0u, a) || !glob_deprecated("glob.glob1") || !path_text(a[0], directory) || !path_text(a[1], pattern))
                             return nullptr;
                         std::vector<std::string> names;
                         if (!glob1(directory, pattern, false, glob_state{}, names))
@@ -1239,7 +1315,8 @@ namespace neos::python_runtime
                 bool ignore = false;
                 object* onexc = nullptr;
                 object* onerror = nullptr;
-                bool handle(char const* aFunction, object* aPath, object* aException)
+                bool onexcKeywords = false;     ///< (_onexc_kwargs: onexc is also passed direntry and dir_fd (tempfile's))
+                bool handle(char const* aFunction, object* aPath, object* aException, object* aEntry = nullptr, object* aDirFd = nullptr)
                 {
                     if (ignore)
                         return true;
@@ -1253,7 +1330,10 @@ namespace neos::python_runtime
                         clear_error();
                     ref r;
                     if (onexc != nullptr)
-                        r = ref{ invoke(onexc, { new_reference(function ? function.get() : none()), new_reference(aPath), new_reference(aException) }) };
+                    {
+                        ref const kw{ onexcKeywords ? keywords({ { "direntry", aEntry != nullptr ? aEntry : none() }, { "dir_fd", aDirFd != nullptr ? aDirFd : none() } }) : ref{} };
+                        r = ref{ invoke(onexc, { new_reference(function ? function.get() : none()), new_reference(aPath), new_reference(aException) }, kw.get()) };
+                    }
                     else
                     {
                         ref const cls{ class_of(aException) };
@@ -1324,8 +1404,210 @@ namespace neos::python_runtime
                 return rm_step(aHandler, "rmdir", aPath, true);
             }
 
-            object* rmtree(object* aPath, rmtree_handler& aHandler)
+            // (shutil._use_fd_functions: os.open, os.stat, os.unlink and os.rmdir take dir_fd, os.scandir a descriptor and os.stat 
+            // follow_symlinks (POSIX's os))
+#if defined(_WIN32)
+            constexpr bool kUseFdFunctions = false;
+#else
+            constexpr bool kUseFdFunctions = true;
+#endif
+
+            // (_rmtree_safe_fd's stack: its first operation (lstat, close or rmdir), the directory's descriptor (None: the top-level 
+            // directory without dir_fd), the path (onexc's) and the os.DirEntry (null: the top-level directory))
+            struct rmtree_item
             {
+                char const* function;
+                ref dirFd;
+                ref path;
+                ref entry;
+            };
+
+            // (_rmtree_safe_fd: one item of the stack (the version using fd-based APIs to protect against races); false: an exception
+            // was raised and not handled)
+            bool rmtree_safe_fd(std::vector<rmtree_item>& aStack, rmtree_handler& aHandler)
+            {
+                auto item = std::move(aStack.back());
+                aStack.pop_back();
+                char const* function = item.function;
+                ref const name{ item.entry ? getattr(item.entry.get(), "name") : new_reference(item.path.get()) };
+                if (!name)
+                    return false;
+                object* const parentFd = std::strcmp(function, "close") == 0 ? none() : item.dirFd.get();
+                ref const dirFdKeyword{ keywords({ { "dir_fd", item.dirFd.get() } }) };
+                auto const body = [&]() -> bool
+                {
+                    if (std::strcmp(function, "close") == 0)
+                        return static_cast<bool>(os_call("close", { new_reference(item.dirFd.get()) }));
+                    if (std::strcmp(function, "rmdir") == 0)
+                        return static_cast<bool>(os_call("rmdir", { new_reference(name.get()) }, dirFdKeyword.get()));
+                    // (lstat: to guard against symlink races, the standard lstat()/open()/fstat() trick)
+                    ref originalStat;
+                    if (!item.entry)
+                        originalStat = os_call("lstat", { new_reference(name.get()) }, dirFdKeyword.get());
+                    else
+                    {
+                        ref const statMethod{ getattr(item.entry.get(), "stat") };
+                        ref const kw{ keywords({ { "follow_symlinks", make_bool(false) } }) };
+                        originalStat = statMethod ? ref{ invoke(statMethod.get(), {}, kw.get()) } : ref{};
+                    }
+                    if (!originalStat)
+                        return false;
+                    function = "open";
+                    ref const readOnly{ os_function("O_RDONLY") };
+                    ref const nonBlocking{ readOnly ? os_function("O_NONBLOCK") : ref{} };
+                    long long flags = 0, nonBlockingFlag = 0;
+                    if (!nonBlocking || !to_index(readOnly.get(), flags) || !to_index(nonBlocking.get(), nonBlockingFlag))
+                        return false;
+                    ref const topFd{ os_call("open", { new_reference(name.get()), make_int(flags | nonBlockingFlag) }, dirFdKeyword.get()) };
+                    if (!topFd)
+                        return false;
+                    function = "path.islink";
+                    {
+                        // (symbolic links to directories are forbidden, see GH-46010; its descriptor is closed (finally))
+                        ref const fileStat{ os_call("fstat", { new_reference(topFd.get()) }) };
+                        ref const same{ fileStat ? os_call("path.samestat", { new_reference(originalStat.get()), new_reference(fileStat.get()) }) : ref{} };
+                        int const isSame = same ? truth(same.get()) : -1;
+                        if (isSame == 1)
+                            aStack.push_back({ "rmdir", item.dirFd, item.path, item.entry });
+                        aStack.push_back({ "close", topFd, item.path, item.entry });
+                        if (isSame == -1)
+                            return false;
+                        if (isSame == 0)
+                        {
+                            ref const cls{ exception_class("OSError") };
+                            ref const e{ invoke(cls.get(), { make_str("Cannot call rmtree on a symbolic link") }) };
+                            if (e)
+                                raise_exception(e.get());
+                            return false;
+                        }
+                    }
+                    function = "scandir";
+                    std::vector<object*> items;
+                    {
+                        ref const it{ os_call("scandir", { new_reference(topFd.get()) }) };
+                        if (!it || !collect(it.get(), items))
+                            return false;
+                    }
+                    std::vector<ref> entries;
+                    for (auto i : items)
+                        entries.emplace_back(i);
+                    ref const topFdKeyword{ keywords({ { "dir_fd", topFd.get() } }) };
+                    for (auto const& entry : entries)
+                    {
+                        ref const entryName{ getattr(entry.get(), "name") };
+                        ref const fullname{ entryName ? os_call("path.join", { new_reference(item.path.get()), new_reference(entryName.get()) }) : ref{} };
+                        if (!fullname)
+                            return false;
+                        ref const isDirMethod{ getattr(entry.get(), "is_dir") };
+                        ref const kw{ keywords({ { "follow_symlinks", make_bool(false) } }) };
+                        ref const isDir{ isDirMethod ? invoke(isDirMethod.get(), {}, kw.get()) : nullptr };
+                        if (!isDir)
+                        {
+                            ref const e{ take_exception() };
+                            if (!e)
+                                return false;
+                            if (exception_is(e.get(), "FileNotFoundError"))
+                                continue;
+                            if (!exception_is(e.get(), "OSError"))
+                                return (raise_exception(e.get()), false);
+                        }
+                        else if (truth(isDir.get()) == 1)
+                        {
+                            // (traverse into the sub-directory)
+                            aStack.push_back({ "lstat", topFd, fullname, entry });
+                            continue;
+                        }
+                        ref const unlinked{ os_call("unlink", { new_reference(entryName.get()) }, topFdKeyword.get()) };
+                        if (!unlinked)
+                        {
+                            ref const e{ take_exception() };
+                            if (!e)
+                                return false;
+                            if (exception_is(e.get(), "FileNotFoundError"))
+                                continue;
+                            if (!exception_is(e.get(), "OSError"))
+                                return (raise_exception(e.get()), false);
+                            if (!aHandler.handle("unlink", fullname.get(), e.get(), entry.get(), topFd.get()))
+                                return false;
+                        }
+                    }
+                    return true;
+                };
+                if (body())
+                    return true;
+                // (an OSError (one that onexc raised in the loop too): its filename is the path, and onexc is called (a FileNotFoundError: 
+                // only the top-level directory's, or close's))
+                ref const e{ take_exception() };
+                if (!e)
+                    return false;
+                if (!exception_is(e.get(), "OSError") || (exception_is(e.get(), "FileNotFoundError") && item.entry && std::strcmp(function, "close") != 0))
+                {
+                    if (!exception_is(e.get(), "OSError"))
+                        return (raise_exception(e.get()), false);
+                    return true;
+                }
+                if (setattr(e.get(), "filename", item.path.get()) != 0)
+                    return false;
+                return aHandler.handle(function, item.path.get(), e.get(), item.entry ? item.entry.get() : none(), parentFd);
+            }
+
+            object* rmtree(object* aPath, rmtree_handler& aHandler, object* aDirFd = nullptr)
+            {
+                if (kUseFdFunctions)
+                {
+                    // (the fd-based version (it does not work on bytes: decoded))
+                    ref path{ new_reference(aPath) };
+                    std::string_view bytes;
+                    if (kind_of(aPath) != NEOS_PY_STR && bytes_like(aPath, bytes) && type_name(aPath) == std::string_view{ "bytes" })
+                    {
+                        path = os_call("fsdecode", { new_reference(aPath) });
+                        if (!path)
+                            return nullptr;
+                    }
+                    std::vector<rmtree_item> stack;
+                    stack.push_back({ "lstat", ref{ new_reference(aDirFd != nullptr ? aDirFd : none()) }, path, ref{} });
+                    bool ok = true;
+                    while (ok && !stack.empty())
+                        ok = rmtree_safe_fd(stack, aHandler);
+                    // (any file descriptors still on the stack: closed)
+                    ref const pending{ ok ? ref{} : take_exception() };
+                    while (!stack.empty())
+                    {
+                        auto item = std::move(stack.back());
+                        stack.pop_back();
+                        if (std::strcmp(item.function, "close") != 0)
+                            continue;
+                        if (!os_call("close", { new_reference(item.dirFd.get()) }))
+                        {
+                            ref const e{ take_exception() };
+                            if (!e)
+                                return nullptr;
+                            bool const handled = exception_is(e.get(), "OSError") ? aHandler.handle("close", item.path.get(), e.get()) : 
+                                (raise_exception(e.get()), false);
+                            if (!handled)
+                            {
+                                // (raised in the finally block: its context is the exception that was propagating)
+                                ref const raised{ take_exception() };
+                                if (!raised)
+                                    return nullptr;
+                                if (pending && raised.get() != pending.get())
+                                {
+                                    ref const context{ getattr(raised.get(), "__context__") };
+                                    clear_error();
+                                    if (!context || kind_of(context.get()) == NEOS_PY_NONE)
+                                        setattr(raised.get(), "__context__", pending.get());
+                                }
+                                raise_exception(raised.get());
+                                return nullptr;
+                            }
+                        }
+                    }
+                    if (pending)
+                        return (raise_exception(pending.get()), nullptr);
+                    return new_reference(none());
+                }
+                if (aDirFd != nullptr && kind_of(aDirFd) != NEOS_PY_NONE)
+                    return error("NotImplementedError", "dir_fd unavailable on this platform");
                 ref const st{ os_call("lstat", { new_reference(aPath) }) };
                 if (!st)
                 {
@@ -1629,17 +1911,21 @@ namespace neos::python_runtime
                 { "rmtree", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
-                        if (!parse_arguments("rmtree", aArgs, aKwargs, { "path", "ignore_errors", "onerror", "onexc", "dir_fd" }, 1u, 0u, a))
+                        if (!parse_arguments("rmtree", aArgs, aKwargs, { "path", "ignore_errors", "onerror", "onexc", "dir_fd", "_onexc_kwargs" }, 1u, 0u, a))
                             return nullptr;
                         if (aArgs.size() > 3u)
                             return error("TypeError", "rmtree() takes from 1 to 3 positional arguments but " + std::to_string(aArgs.size()) + " were given");
+                        object* const dirFd = a[4] != nullptr ? a[4] : none();
+                        ref const audit{ module_attribute("sys", "audit") };
+                        ref const audited{ audit ? invoke(audit.get(), { make_str("shutil.rmtree"), new_reference(a[0]), new_reference(dirFd) }) : nullptr };
+                        if (!audited)
+                            return nullptr;
                         rmtree_handler handler;
                         handler.ignore = a[1] != nullptr && truth(a[1]) == 1;
                         handler.onerror = a[2] != nullptr && kind_of(a[2]) != NEOS_PY_NONE ? a[2] : nullptr;
                         handler.onexc = a[3] != nullptr && kind_of(a[3]) != NEOS_PY_NONE ? a[3] : nullptr;
-                        if (a[4] != nullptr && kind_of(a[4]) != NEOS_PY_NONE)
-                            return error("NotImplementedError", "dir_fd unavailable on this platform");
-                        return rmtree(a[0], handler);
+                        handler.onexcKeywords = a[5] != nullptr && truth(a[5]) == 1;
+                        return rmtree(a[0], handler, dirFd);
                     } },
                 { "move", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1760,6 +2046,25 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sShutilFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                // (rmtree.avoids_symlink_attacks: the fd-based version's (rmtree: a function with attributes))
+                for (auto& attribute : aAttributes)
+                    if (attribute.first == "rmtree")
+                    {
+                        auto const* const entry = &*std::find_if(std::begin(sShutilFunctions), std::end(sShutilFunctions), 
+                            [](builtin_entry const& e) { return std::strcmp(e.name, "rmtree") == 0; });
+                        py const rmtreeFunction = make_native_function("rmtree", "rmtree", "Recursively delete a directory tree.", "shutil",
+                            [entry](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                std::vector<object*> args;
+                                for (auto const& arg : aArgs)
+                                    args.push_back(arg.get());
+                                return py{ entry->function(args, aKwargs) };
+                            });
+                        rmtreeFunction.set_attr("avoids_symlink_attacks", py::borrowed(make_bool(kUseFdFunctions)));
+                        release(attribute.second);
+                        attribute.second = new_reference(rmtreeFunction.get());
+                    }
+                aAttributes.emplace_back("_use_fd_functions", make_bool(kUseFdFunctions));
                 for (auto name : { "Error", "SameFileError", "SpecialFileError", "ExecError", "ReadError", "RegistryError" })
                     aAttributes.emplace_back(name, shutil_error(name));
 #if defined(_WIN32)

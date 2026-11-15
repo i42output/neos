@@ -336,6 +336,14 @@ namespace neos::python_runtime::detail::xml_dom_minicompat_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.dom.minicompat", xml_dom_minicompat_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.dom.minicompat", xml_dom_minicompat_module, assigned);
     }
 }

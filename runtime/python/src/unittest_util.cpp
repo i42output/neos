@@ -149,6 +149,10 @@ namespace neos::python_runtime::detail::unittest_util_module
         void make_unittest_util()
         {
             static module_writer const& w = writer("unittest.util");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.util", "namedtuple", import_attribute("collections", "namedtuple"));
+            define("unittest.util", "Counter", import_attribute("collections", "Counter"));
+            define("unittest.util", "commonprefix", import_attribute("os.path", "commonprefix"));
             define("unittest.util", "__unittest", boolean(true));
             define("unittest.util", "_MAX_LENGTH", I<80>());
             define("unittest.util", "_PLACEHOLDER_LEN", I<12>());
@@ -189,7 +193,7 @@ namespace neos::python_runtime::detail::unittest_util_module
                     {
                         return args;
                     }
-                    prefix = (Mod<"os.path">().attr("commonprefix"))(args);
+                    prefix = (G<"unittest.util.commonprefix">())(args);
                     prefixlen = py{ prefix.size() };
                     common_len = (G<"unittest.util._MAX_LENGTH">()) - (((maxlen - prefixlen) + (G<"unittest.util._MIN_BEGIN_LEN">())) + (G<"unittest.util._PLACEHOLDER_LEN">()));
                     if (common_len > (G<"unittest.util._MIN_COMMON_LEN">()))
@@ -361,7 +365,7 @@ namespace neos::python_runtime::detail::unittest_util_module
                     return boolean(x > y) - boolean(x < y);
                 }));
 
-            define("unittest.util", "_Mismatch", (Mod<"collections">().attr("namedtuple"))(S<"Mismatch">(), S<"actual expected value">()));
+            define("unittest.util", "_Mismatch", (G<"unittest.util.namedtuple">())(S<"Mismatch">(), S<"actual expected value">()));
             define("unittest.util", "_count_diff_all_purpose", w.function("_count_diff_all_purpose", "_count_diff_all_purpose", { py_positional("actual"), py_positional("expected") }, [](arguments a) -> py
                 {
                     py actual = a[0];
@@ -463,7 +467,7 @@ namespace neos::python_runtime::detail::unittest_util_module
                     py s;
                     py t;
                     // elements must be hashable
-                    auto const items25 = unpack(py_tuple({ (Mod<"collections">().attr("Counter"))(actual), (Mod<"collections">().attr("Counter"))(expected) }), 2);
+                    auto const items25 = unpack(py_tuple({ (G<"unittest.util.Counter">())(actual), (G<"unittest.util.Counter">())(expected) }), 2);
                     s = items25[0];
                     t = items25[1];
                     result = py_list();
@@ -506,9 +510,6 @@ namespace neos::python_runtime::detail::unittest_util_module
                 }
                 if (auto const doc = unittest_util_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("namedtuple", import_attribute("collections", "namedtuple").release());
-                aAttributes.emplace_back("Counter", import_attribute("collections", "Counter").release());
-                aAttributes.emplace_back("commonprefix", import_attribute("os.path", "commonprefix").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -517,6 +518,14 @@ namespace neos::python_runtime::detail::unittest_util_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.util", unittest_util_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.util", unittest_util_module, assigned);
     }
 }

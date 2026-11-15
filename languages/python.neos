@@ -116,6 +116,12 @@
     global $ language.keyword ::= potential keyword ::= "global" ;
     with $ language.keyword ::= potential keyword ::= "with" ;
     del $ language.keyword ::= potential keyword ::= "del" ;
+    class $ language.keyword ::= potential keyword ::= "class" ;
+    lambda $ language.keyword ::= potential keyword ::= "lambda" ;
+    nonlocal $ language.keyword ::= potential keyword ::= "nonlocal" ;
+    yield $ language.keyword ::= potential keyword ::= "yield" ;
+    async $ language.keyword ::= potential keyword ::= "async" ;
+    await $ language.keyword ::= potential keyword ::= "await" ;
 
     int ::= potential keyword ::= "int" ;
     float ::= potential keyword ::= "float" ;
@@ -133,6 +139,8 @@
         ( '.' , digit sequence , [ ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ] ) | ( digit sequence , ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ) ;
     positive integer ::= 
         digit sequence ;
+    prefixed integer ::= 
+        ( '0' , ( 'x' | 'X' ) , { [ '_' ] , ( '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' ) } + ) | ( '0' , ( 'o' | 'O' ) , { [ '_' ] , '0' .. '7' } + ) | ( '0' , ( 'b' | 'B' ) , { [ '_' ] , '0' .. '1' } + ) ;
     digit sequence ::= 
         digit , { [ '_' ] , digit } ;
     digit ::= 
@@ -202,12 +210,12 @@
 ${
     file $ python.module ::= [ NL ] , { statement , NL } ;
 
-    statement ::= function definition | if header | elif header | else header | while header | for header | for in header | 
-        try header | except header | finally header | with header | simple statements ;
+    statement ::= decorator | function definition | class header | if header | elif header | else header | while header | for header | for in header | 
+        try header | except header | finally header | with items header | with header | simple statements ;
     simple statements ::= simple statement , { [ S ] , semicolon , [ S ] , simple statement } , [ [ S ] , semicolon ] ;
 
     simple statement $ python.statement ::= 
-        pass | stub | break statement | continue statement | return statement | raise statement | assert statement | global statement | del statement | import statement | from import statement |
+        pass | stub | break statement | continue statement | return statement | raise statement | assert statement | global statement | nonlocal statement | del statement | import statement | from import statement |
         augmented assignment | assignment | expression list ;
 
     stub $ python.stub ::= ellipsis ;
@@ -217,19 +225,24 @@ ${
     return statement $ python.return ::= return , [ [ S ] , expression list ] ;
     raise statement $ python.raise ::= raise , [ S , expression , [ S , from , S , expression ] ] ;
     global statement $ python.global ::= global , S , identifier , { [ S ] , comma , [ S ] , identifier } ;
+    nonlocal statement ::= nonlocal , S , identifier , { [ S ] , comma , [ S ] , identifier } ;
     del statement $ python.del ::= del , [ S ] , target , { [ S ] , comma , [ S ] , target } , [ [ S ] , comma ] ;
     assert statement $ python.assert ::= assert , [ S ] , expression , [ [ S ] , comma , [ S ] , expression ] ;
 
     try header $ python.try ::= try , [ S ] , colon , [ [ S ] , simple statements ] ;
     except header $ python.except ::= except , [ S , expression , [ S , as , S , as name ] ] , [ S ] , colon , [ [ S ] , simple statements ] ;
     finally header $ python.finally ::= finally , [ S ] , colon , [ [ S ] , simple statements ] ;
-    with header $ python.with ::= with , S , expression , 
+    with items header $ python.with ::= [ async , S ] , with , S , with item , { [ S ] , comma , [ S ] , with item } + , [ S ] , colon , [ [ S ] , simple statements ] ;
+    with item ::= expression , [ S , as , S , with target ] ;
+    with target $ python.with.targets ::= target ;
+    with header $ python.with ::= [ async , S ] , with , S , expression , 
         ( ( S , as , S , as name , [ S ] , colon ) | ( S , as , S , with targets , [ S ] , colon ) | ( [ S ] , colon ) ) , [ [ S ] , simple statements ] ;
     with targets $ python.with.targets ::= target list ;
     as name $ python.as.name ::= identifier | ( open paren , [ S ] , identifier , { [ S ] , comma , [ S ] , identifier } , [ [ S ] , comma ] , [ S ] , close paren ) ;
 
+    import statement $ python.import ::= import , S , dotted name , [ S , as , S , identifier ] , { [ S ] , comma , [ S ] , dotted name , [ S , as , S , identifier ] } + ;
     import statement $ python.import ::= import , S , dotted name , [ S , as , S , identifier ] ;
-    from import statement $ python.import.from ::= from , S , module name , [ S ] , import , S , ( multiply | ( import name , { [ S ] , comma , [ S ] , import name } ) ) ;
+    from import statement $ python.import.from ::= from , S , module name , [ S ] , import , [ S ] , ( multiply | ( open paren , [ bracket space ] , import name , { [ bracket space ] , comma , [ bracket space ] , import name } , [ [ bracket space ] , comma ] , [ bracket space ] , close paren ) | ( import name , { [ S ] , comma , [ S ] , import name } ) ) ;
     module name ::= ( dot , { dot } , [ [ S ] , dotted name ] ) | dotted name ;
     dotted name ::= identifier , { [ S ] , dot , [ S ] , identifier } ;
     import name ::= identifier , [ S , as , S , identifier ] ;
@@ -244,20 +257,26 @@ ${
     starred target $ python.target ::= multiply , [ S ] , primary ;
     target ::= target group | plain target ;
     plain target $ python.target ::= primary ;
-    target group $ python.target.group ::= ( open paren , [ S ] , target list , [ S ] , close paren ) | ( open bracket , [ S ] , target list , [ S ] , close bracket ) ;
+    target group $ python.target.group ::= ( open paren , [ bracket space ] , [ bracketed target list , [ bracket space ] ] , close paren ) | ( open bracket , [ bracket space ] , [ bracketed target list , [ bracket space ] ] , close bracket ) ;
 
     function definition $ python.function ::= 
-        def , S , def signature , [ S ] , colon $ language.scope.open , [ [ S ] , simple statements ] ;
+        [ async , S ] , def , S , def signature , [ S ] , colon $ language.scope.open , [ [ S ] , simple statements ] ;
     def signature $ language.function.signature ::= 
-        function name , [ S ] , open paren , [ S ] , [ parameters ] , [ S ] , close paren , [ [ S ] , arrow , [ S ] , type $ language.function.return.type ] ;
-    parameters $ language.function.parameters ::= parameter item , { [ S ] , comma , [ S ] , parameter item } , [ [ S ] , comma ] ;
+        function name , [ S ] , open paren , [ bracket space ] , [ parameters ] , [ bracket space ] , close paren , [ [ S ] , arrow , [ S ] , type $ language.function.return.type ] ;
+    parameters $ language.function.parameters ::= parameter item , { [ bracket space ] , comma , [ bracket space ] , parameter item } , [ [ bracket space ] , comma ] ;
     parameter item ::= parameter | multiply | divide ;
     parameter $ language.function.parameter ::= 
-        [ ( power operator | multiply ) , [ S ] ] , ( id | builtin id ) , [ [ S ] , colon , [ S ] , type ] , [ [ S ] , assign , [ S ] , parameter default ] ;
+        [ ( power operator | multiply ) , [ bracket space ] ] , ( id | builtin id ) , [ [ bracket space ] , colon , [ bracket space ] , type ] , [ [ bracket space ] , assign , [ bracket space ] , bracketed parameter default ] ;
     parameter default $ python.parameter.default ::= expression ;
     function name $ language.function.name ::= id | builtin id ;
     builtin id $ language.identifier ::= int | float | str | bool | range | object ;
     id $ language.identifier ::= identifier ;
+
+    bracket space ::= { S | NL } + ;
+    decorator $ python.statement ::= matmul , [ S ] , expression ;
+    class header $ language.class ::= 
+        class , S , identifier , [ [ S ] , open paren , [ bracket space ] , [ bracketed argument , { [ bracket space ] , comma , [ bracket space ] , bracketed argument } , [ [ bracket space ] , comma ] ] , [ bracket space ] , close paren ] , [ S ] , 
+        colon $ language.scope.open , [ [ S ] , simple statements ] ;
 
     if header $ python.if ::= if , [ S ] , expression , [ S ] , colon , [ [ S ] , simple statements ] ;
     elif header $ python.elif ::= elif , [ S ] , expression , [ S ] , colon , [ [ S ] , simple statements ] ;
@@ -267,15 +286,19 @@ ${
         for , S , for variable , S , in , S , range , [ S ] , open paren , [ S ] , argument , { [ S ] , comma , [ S ] , argument } , [ S ] , close paren , [ S ] , colon , [ [ S ] , simple statements ] ;
     for variable $ python.for.variable ::= id ;
     for in header $ python.for.in ::= 
-        for , S , for targets , S , in , S , expression list , [ S ] , colon , [ [ S ] , simple statements ] ;
+        [ async , S ] , for , S , for targets , S , in , S , expression list , [ S ] , colon , [ [ S ] , simple statements ] ;
     for targets $ python.for.targets ::= target list ;
 
-    expression list ::= tuple display | expression ;
+    expression list ::= yield expression | tuple display | expression ;
+    yield expression ::= yield , [ ( S , from , S , expression ) | ( [ S ] , expression list ) ] ;
 
-    expression $ language.expression ::= assignment expression | ( or test , [ [ S ] , conditional tail ] ) ;
+    expression $ language.expression ::= lambda expression | assignment expression | ( or test , [ [ S ] , conditional tail ] ) ;
     assignment expression $ python.walrus ::= walrus target , [ S ] , walrus operator , [ S ] , expression ;
     walrus target $ python.target ::= walrus name ;
     walrus name $ math.expression.operand ::= id ;
+    lambda expression ::= lambda , [ S , lambda parameters ] , [ S ] , colon , [ S ] , expression ;
+    lambda parameters $ language.function.parameters ::= lambda parameter , { [ S ] , comma , [ S ] , lambda parameter } , [ [ S ] , comma ] ;
+    lambda parameter $ language.function.parameter ::= [ ( power operator | multiply ) , [ S ] ] , id , [ [ S ] , assign , [ S ] , parameter default ] ;
     conditional tail $ python.conditional ::= if , [ S ] , or test , [ S ] , else , [ S ] , expression ;
 
     or test ::= and test , { [ S ] , or tail } ;
@@ -321,44 +344,45 @@ ${
     negative factor $ python.negative ::= minus , [ S ] , factor ;
     positive factor $ python.positive ::= plus , [ S ] , factor ;
     invert factor $ python.invert ::= tilde , [ S ] , factor ;
-    power ::= primary , [ [ S ] , power tail ] ;
+    power ::= ( await primary | primary ) , [ [ S ] , power tail ] ;
+    await primary ::= await , S , primary ;
     power tail $ python.power ::= power operator , [ S ] , factor ;
 
     primary ::= atom , { trailer } ;
     trailer ::= generator call trailer | call trailer | subscript trailer | attribute trailer ;
-    generator call trailer $ python.call ::= [ S ] , comprehension paren , [ S ] , generator , [ S ] , close paren ;
+    generator call trailer $ python.call ::= [ S ] , comprehension paren , [ bracket space ] , bracketed generator , [ bracket space ] , close paren ;
     generator $ language.function.argument ::= generator expression ;
-    generator expression $ python.list.comprehension ::= expression , { [ S ] , comprehension clause } + ;
-    call trailer $ python.call ::= [ S ] , open paren , [ S ] , [ argument , { [ S ] , comma , [ S ] , argument } , [ [ S ] , comma ] ] , [ S ] , close paren ;
+    generator expression $ python.list.comprehension ::= expression , { [ bracket space ] , comprehension clause } + ;
+    call trailer $ python.call ::= [ S ] , open paren , [ bracket space ] , [ bracketed argument , { [ S ] , comma , [ bracket space ] , bracketed argument } , [ [ S ] , comma ] ] , [ bracket space ] , close paren ;
     argument $ language.function.argument ::= ( ( power operator | multiply ) , [ S ] , expression ) | ( [ keyword , [ S ] , assign , [ S ] ] , expression ) ;
     keyword ::= identifier | int | float | str | bool | range | object ;
-    subscript trailer $ python.subscript ::= [ S ] , open bracket , [ S ] , subscript item , { [ S ] , comma , [ S ] , subscript item } , [ [ S ] , comma ] , [ S ] , close bracket ;
+    subscript trailer $ python.subscript ::= [ S ] , open bracket , [ bracket space ] , bracketed subscript item , { [ bracket space ] , comma , [ bracket space ] , bracketed subscript item } , [ [ bracket space ] , comma ] , [ bracket space ] , close bracket ;
     subscript item $ language.function.argument ::= slice | ( multiply , [ S ] , bitwise or ) | expression ;
     slice $ python.slice ::= [ expression ] , [ S ] , colon , [ S ] , [ expression ] , [ [ S ] , colon , [ S ] , [ expression ] ] ;
     attribute trailer $ python.attribute ::= [ S ] , dot , [ S ] , ( identifier | int | float | str | bool | range | object ) ;
 
     atom ::= 
-        empty tuple | ( open paren , [ S ] , ( tuple display | expression ) , [ S ] , close paren ) | list comprehension | list display | dict comprehension | dict display | set comprehension | set display |
+        empty tuple | ( open paren , [ bracket space ] , ( bracketed yield expression | bracketed tuple display | bracketed expression ) , [ bracket space ] , close paren ) | list comprehension | list display | dict comprehension | dict display | set comprehension | set display |
         ellipsis value | none value | true | false | builtin name | imaginary | math operand ;
-    empty tuple $ python.tuple.empty ::= open paren , [ S ] , close paren ;
+    empty tuple $ python.tuple.empty ::= open paren , [ bracket space ] , close paren ;
     tuple display $ python.tuple ::= item , ( ( { [ S ] , comma , [ S ] , item } + , [ [ S ] , comma ] ) | ( [ S ] , comma ) ) ;
     list comprehension $ python.list.comprehension ::= 
-        comprehension bracket , [ S ] , expression , { [ S ] , comprehension clause } + , [ S ] , close bracket ;
+        comprehension bracket , [ bracket space ] , bracketed expression , { [ bracket space ] , bracketed comprehension clause } + , [ bracket space ] , close bracket ;
     dict comprehension $ python.dict.comprehension ::= 
-        comprehension brace , [ S ] , expression , [ S ] , colon , [ S ] , expression , { [ S ] , comprehension clause } + , [ S ] , close brace ;
+        comprehension brace , [ bracket space ] , bracketed expression , [ bracket space ] , colon , [ bracket space ] , bracketed expression , { [ bracket space ] , bracketed comprehension clause } + , [ bracket space ] , close brace ;
     set comprehension $ python.set.comprehension ::= 
-        comprehension brace , [ S ] , expression , { [ S ] , comprehension clause } + , [ S ] , close brace ;
+        comprehension brace , [ bracket space ] , bracketed expression , { [ bracket space ] , bracketed comprehension clause } + , [ bracket space ] , close brace ;
     comprehension brace $ python.comprehension.start ::= open brace ;
     comprehension bracket $ python.comprehension.start ::= open bracket ;
     comprehension paren $ python.comprehension.start ::= open paren ;
     comprehension clause ::= comprehension for | comprehension if ;
     comprehension for $ python.comprehension.for ::= for , S , target list , S , in , S , or test ;
     comprehension if $ python.comprehension.if ::= if , S , or test ;
-    list display $ python.list ::= open bracket , [ S ] , [ item , { [ S ] , comma , [ S ] , item } , [ [ S ] , comma ] ] , [ S ] , close bracket ;
-    dict display $ python.dict ::= open brace , [ S ] , [ dict item , { [ S ] , comma , [ S ] , dict item } , [ [ S ] , comma ] ] , [ S ] , close brace ;
+    list display $ python.list ::= open bracket , [ bracket space ] , [ bracketed item , { [ bracket space ] , comma , [ bracket space ] , bracketed item } , [ [ bracket space ] , comma ] ] , [ bracket space ] , close bracket ;
+    dict display $ python.dict ::= open brace , [ bracket space ] , [ bracketed dict item , { [ bracket space ] , comma , [ bracket space ] , bracketed dict item } , [ [ bracket space ] , comma ] ] , [ bracket space ] , close brace ;
     dict item ::= dict unpacking | ( item , [ S ] , colon , [ S ] , item ) ;
     dict unpacking $ language.function.argument ::= power operator , [ S ] , bitwise or ;
-    set display $ python.set ::= open brace , [ S ] , item , { [ S ] , comma , [ S ] , item } , [ [ S ] , comma ] , [ S ] , close brace ;
+    set display $ python.set ::= open brace , [ bracket space ] , bracketed item , { [ bracket space ] , comma , [ bracket space ] , bracketed item } , [ [ bracket space ] , comma ] , [ bracket space ] , close brace ;
     item $ language.function.argument ::= ( multiply , [ S ] , bitwise or ) | expression ;
     ellipsis value $ python.ellipsis ::= ellipsis ;
     none value $ python.none ::= none ;
@@ -366,6 +390,7 @@ ${
     math operand $ math.expression.operand ::= number | id | string literal ;
 
     number $ math.universal.real ::= positive real ;
+    number $ math.universal.integer ::= prefixed integer ;
     number $ math.universal.integer ::= positive integer ;
 
     type ::= int type | float type | str type | bool type | none type | object type ;
@@ -375,4 +400,82 @@ ${
     bool type $ language.type.boolean ::= bool ;
     none type $ language.type.void ::= none ;
     object type $ language.type.object ::= ( object | identifier ) , { [ S ] , dot , [ S ] , identifier } ;
+
+    (* the contents of brackets: line breaks (and comments) are whitespace within them *)
+    bracketed expression list ::= bracketed yield expression | bracketed tuple display | bracketed expression ;
+    bracketed yield expression ::= yield , [ ( bracket space , from , bracket space , bracketed expression ) | ( [ bracket space ] , bracketed expression list ) ] ;
+    bracketed tuple display $ python.tuple ::= bracketed item , ( ( { [ bracket space ] , comma , [ bracket space ] , bracketed item } + , [ [ bracket space ] , comma ] ) | ( [ bracket space ] , comma ) ) ;
+    bracketed item $ language.function.argument ::= ( multiply , [ bracket space ] , bracketed bitwise or ) | bracketed expression ;
+    bracketed expression $ language.expression ::= bracketed lambda expression | bracketed assignment expression | ( bracketed or test , [ [ bracket space ] , bracketed conditional tail ] ) ;
+    bracketed assignment expression $ python.walrus ::= walrus target , [ bracket space ] , walrus operator , [ bracket space ] , bracketed expression ;
+    bracketed conditional tail $ python.conditional ::= if , [ bracket space ] , bracketed or test , [ bracket space ] , else , [ bracket space ] , bracketed expression ;
+    bracketed lambda expression ::= lambda , [ bracket space , bracketed lambda parameters ] , [ bracket space ] , colon , [ bracket space ] , bracketed expression ;
+    bracketed lambda parameters $ language.function.parameters ::= bracketed lambda parameter , { [ bracket space ] , comma , [ bracket space ] , bracketed lambda parameter } , [ [ bracket space ] , comma ] ;
+    bracketed lambda parameter $ language.function.parameter ::= [ ( power operator | multiply ) , [ bracket space ] ] , id , [ [ bracket space ] , assign , [ bracket space ] , bracketed parameter default ] ;
+    bracketed parameter default $ python.parameter.default ::= bracketed expression ;
+    bracketed or test ::= bracketed and test , { [ bracket space ] , bracketed or tail } ;
+    bracketed or tail $ python.or ::= or , [ bracket space ] , bracketed and test ;
+    bracketed and test ::= bracketed not test , { [ bracket space ] , bracketed and tail } ;
+    bracketed and tail $ python.and ::= and , [ bracket space ] , bracketed not test ;
+    bracketed not test ::= bracketed not expression | bracketed comparison ;
+    bracketed not expression $ python.not ::= not , [ bracket space ] , bracketed not test ;
+    bracketed comparison ::= bracketed bitwise or , { [ bracket space ] , bracketed comparison tail } ;
+    bracketed comparison tail ::= 
+        bracketed less equal tail | bracketed greater equal tail | bracketed equal tail | bracketed not equal tail | bracketed less tail | bracketed greater tail | bracketed not in tail | bracketed in tail | bracketed is not tail | bracketed is tail ;
+    bracketed less equal tail $ python.lessequal ::= lessthanorequal , [ bracket space ] , bracketed bitwise or ;
+    bracketed greater equal tail $ python.greaterequal ::= greaterthanorequal , [ bracket space ] , bracketed bitwise or ;
+    bracketed equal tail $ python.equal ::= equal , [ bracket space ] , bracketed bitwise or ;
+    bracketed not equal tail $ python.notequal ::= notequal , [ bracket space ] , bracketed bitwise or ;
+    bracketed less tail $ python.less ::= lessthan , [ bracket space ] , bracketed bitwise or ;
+    bracketed greater tail $ python.greater ::= greaterthan , [ bracket space ] , bracketed bitwise or ;
+    bracketed not in tail $ python.notin ::= not , bracket space , in , [ bracket space ] , bracketed bitwise or ;
+    bracketed in tail $ python.in ::= in , [ bracket space ] , bracketed bitwise or ;
+    bracketed is not tail $ python.isnot ::= is , bracket space , not , [ bracket space ] , bracketed bitwise or ;
+    bracketed is tail $ python.is ::= is , [ bracket space ] , bracketed bitwise or ;
+    bracketed bitwise or ::= bracketed bitwise xor , { [ bracket space ] , bracketed bitor tail } ;
+    bracketed bitor tail $ python.bitor ::= bar , [ bracket space ] , bracketed bitwise xor ;
+    bracketed bitwise xor ::= bracketed bitwise and , { [ bracket space ] , bracketed bitxor tail } ;
+    bracketed bitxor tail $ python.bitxor ::= caret , [ bracket space ] , bracketed bitwise and ;
+    bracketed bitwise and ::= bracketed shift expression , { [ bracket space ] , bracketed bitand tail } ;
+    bracketed bitand tail $ python.bitand ::= ampersand , [ bracket space ] , bracketed shift expression ;
+    bracketed shift expression ::= bracketed arithmetic , { [ bracket space ] , ( bracketed lshift tail | bracketed rshift tail ) } ;
+    bracketed lshift tail $ python.lshift ::= lshift , [ bracket space ] , bracketed arithmetic ;
+    bracketed rshift tail $ python.rshift ::= rshift , [ bracket space ] , bracketed arithmetic ;
+    bracketed arithmetic ::= bracketed term , { [ bracket space ] , ( bracketed add tail | bracketed subtract tail ) } ;
+    bracketed add tail $ python.add ::= plus , [ bracket space ] , bracketed term ;
+    bracketed subtract tail $ python.subtract ::= minus , [ bracket space ] , bracketed term ;
+    bracketed term ::= bracketed factor , { [ bracket space ] , ( bracketed multiply tail | bracketed matmul tail | bracketed floordivide tail | bracketed divide tail | bracketed modulo tail ) } ;
+    bracketed multiply tail $ python.multiply ::= multiply , [ bracket space ] , bracketed factor ;
+    bracketed matmul tail $ python.matmul ::= matmul , [ bracket space ] , bracketed factor ;
+    bracketed floordivide tail $ python.floordivide ::= floordivide , [ bracket space ] , bracketed factor ;
+    bracketed divide tail $ python.divide ::= divide , [ bracket space ] , bracketed factor ;
+    bracketed modulo tail $ python.modulo ::= modulo , [ bracket space ] , bracketed factor ;
+    bracketed factor ::= bracketed negative factor | bracketed positive factor | bracketed invert factor | bracketed power ;
+    bracketed negative factor $ python.negative ::= minus , [ bracket space ] , bracketed factor ;
+    bracketed positive factor $ python.positive ::= plus , [ bracket space ] , bracketed factor ;
+    bracketed invert factor $ python.invert ::= tilde , [ bracket space ] , bracketed factor ;
+    bracketed power ::= ( bracketed await primary | bracketed primary ) , [ [ bracket space ] , bracketed power tail ] ;
+    bracketed await primary ::= await , bracket space , bracketed primary ;
+    bracketed power tail $ python.power ::= power operator , [ bracket space ] , bracketed factor ;
+    bracketed primary ::= atom , { bracketed trailer } ;
+    bracketed trailer ::= bracketed generator call trailer | bracketed call trailer | bracketed subscript trailer | bracketed attribute trailer ;
+    bracketed generator call trailer $ python.call ::= [ bracket space ] , comprehension paren , [ bracket space ] , bracketed generator , [ bracket space ] , close paren ;
+    bracketed call trailer $ python.call ::= [ bracket space ] , open paren , [ bracket space ] , [ bracketed argument , { [ bracket space ] , comma , [ bracket space ] , bracketed argument } , [ [ bracket space ] , comma ] ] , [ bracket space ] , close paren ;
+    bracketed subscript trailer $ python.subscript ::= [ bracket space ] , open bracket , [ bracket space ] , bracketed subscript item , { [ bracket space ] , comma , [ bracket space ] , bracketed subscript item } , [ [ bracket space ] , comma ] , [ bracket space ] , close bracket ;
+    bracketed attribute trailer $ python.attribute ::= [ bracket space ] , dot , [ bracket space ] , ( identifier | int | float | str | bool | range | object ) ;
+    bracketed argument $ language.function.argument ::= ( ( power operator | multiply ) , [ bracket space ] , bracketed expression ) | ( [ keyword , [ bracket space ] , assign , [ bracket space ] ] , bracketed expression ) ;
+    bracketed generator $ language.function.argument ::= bracketed generator expression ;
+    bracketed generator expression $ python.list.comprehension ::= bracketed expression , { [ bracket space ] , bracketed comprehension clause } + ;
+    bracketed subscript item $ language.function.argument ::= bracketed slice | ( multiply , [ bracket space ] , bracketed bitwise or ) | bracketed expression ;
+    bracketed slice $ python.slice ::= [ bracketed expression ] , [ bracket space ] , colon , [ bracket space ] , [ bracketed expression ] , [ [ bracket space ] , colon , [ bracket space ] , [ bracketed expression ] ] ;
+    bracketed dict item ::= bracketed dict unpacking | ( bracketed item , [ bracket space ] , colon , [ bracket space ] , bracketed item ) ;
+    bracketed dict unpacking $ language.function.argument ::= power operator , [ bracket space ] , bracketed bitwise or ;
+    bracketed comprehension clause ::= bracketed comprehension for | bracketed comprehension if ;
+    bracketed comprehension for $ python.comprehension.for ::= for , bracket space , bracketed target list , bracket space , in , bracket space , bracketed or test ;
+    bracketed comprehension if $ python.comprehension.if ::= if , bracket space , bracketed or test ;
+    bracketed target list ::= bracketed target item , { [ bracket space ] , comma , [ bracket space ] , bracketed target item } , [ [ bracket space ] , comma ] ;
+    bracketed target item ::= bracketed starred target | bracketed target ;
+    bracketed starred target $ python.target ::= multiply , [ bracket space ] , bracketed primary ;
+    bracketed target ::= target group | bracketed plain target ;
+    bracketed plain target $ python.target ::= bracketed primary ;
 }$

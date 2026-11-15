@@ -149,6 +149,8 @@ namespace neos::python_runtime::detail::unittest__log_module
         void make_unittest__log()
         {
             static module_writer const& w = writer("unittest._log");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest._log", "_BaseTestCaseContext", import_attribute("unittest.case", "_BaseTestCaseContext"));
             define("unittest._log", "_LoggingWatcher", (Mod<"collections">()).method("namedtuple", { S<"_LoggingWatcher">(), py_list({ S<"records">(), S<"output">() }) }));
             define("unittest._log", "_CapturingHandler", w.make_class("_CapturingHandler", { Mod<"logging">().attr("Handler") }, {
                 { "__init__", w.method("_CapturingHandler", "__init__", {  }, [](arguments a) -> py
@@ -174,7 +176,7 @@ namespace neos::python_runtime::detail::unittest__log_module
                         return none();
                     }) }, }));
 
-            define("unittest._log", "_AssertLogsContext", w.make_class("_AssertLogsContext", { Mod<"unittest.case">().attr("_BaseTestCaseContext") }, {
+            define("unittest._log", "_AssertLogsContext", w.make_class("_AssertLogsContext", { G<"unittest._log._BaseTestCaseContext">() }, {
                 { "LOGGING_FORMAT", S<"%(levelname)s:%(name)s:%(message)s">() },
                 { "__init__", w.method("_AssertLogsContext", "__init__", { py_positional("test_case"), py_positional("logger_name"), py_positional("level"), py_positional("no_logs") }, [](arguments a) -> py
                     {
@@ -183,7 +185,7 @@ namespace neos::python_runtime::detail::unittest__log_module
                         py logger_name = a[2];
                         py level = a[3];
                         py no_logs = a[4];
-                        (Mod<"unittest.case">().attr("_BaseTestCaseContext")).method("__init__", { self, test_case });
+                        (G<"unittest._log._BaseTestCaseContext">()).method("__init__", { self, test_case });
                         self.set_attr("logger_name", logger_name);
                         if (level.truthy())
                         {
@@ -277,7 +279,6 @@ namespace neos::python_runtime::detail::unittest__log_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("logging", py{ fn_import("logging") }.release());
                 aAttributes.emplace_back("collections", py{ fn_import("collections") }.release());
-                aAttributes.emplace_back("_BaseTestCaseContext", import_attribute("unittest.case", "_BaseTestCaseContext").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -286,6 +287,14 @@ namespace neos::python_runtime::detail::unittest__log_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest._log", unittest__log_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest._log", unittest__log_module, assigned);
     }
 }

@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::http_client_module
         void make_http_client()
         {
             static module_writer const& w = writer("http.client");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("http.client", "urlsplit", import_attribute("urllib.parse", "urlsplit"));
             // HTTPMessage, parse_headers(), and the HTTP status code constants are
             // intentionally omitted for simplicity
             define("http.client", "__all__", py_list({ S<"HTTPResponse">(), S<"HTTPConnection">(), S<"HTTPException">(), S<"NotConnected">(), S<"UnknownProtocol">(), S<"UnknownTransferEncoding">(), S<"UnimplementedFileMode">(), S<"IncompleteRead">(), S<"InvalidURL">(), S<"ImproperConnectionState">(), S<"CannotSendRequest">(), S<"CannotSendHeader">(), S<"ResponseNotReady">(), S<"BadStatusLine">(), S<"LineTooLong">(), S<"RemoteDisconnected">(), S<"error">(), S<"responses">() }));
@@ -1962,7 +1964,7 @@ namespace neos::python_runtime::detail::http_client_module
                                 netloc = S<"">();
                                 if (url.method("startswith", { S<"http">() }).truthy())
                                 {
-                                    auto const items54 = unpack((Mod<"urllib.parse">().attr("urlsplit"))(url), 5);
+                                    auto const items54 = unpack((G<"http.client.urlsplit">())(url), 5);
                                     nil = items54[0];
                                     netloc = items54[1];
                                     nil = items54[2];
@@ -2454,7 +2456,6 @@ namespace neos::python_runtime::detail::http_client_module
                 aAttributes.emplace_back("socket", py{ fn_import("socket") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("collections", py{ fn_import("collections") }.release());
-                aAttributes.emplace_back("urlsplit", import_attribute("urllib.parse", "urlsplit").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -2463,6 +2464,14 @@ namespace neos::python_runtime::detail::http_client_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("http.client", http_client_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("http.client", http_client_module, assigned);
     }
 }

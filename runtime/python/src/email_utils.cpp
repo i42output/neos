@@ -160,6 +160,10 @@ namespace neos::python_runtime::detail::email_utils_module
         void make_email_utils()
         {
             static module_writer const& w = writer("email.utils");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.utils", "quote", import_attribute("email._parseaddr", "quote"));
+            define("email.utils", "_AddressList", import_attribute("email._parseaddr", "AddressList"));
+            define("email.utils", "_parsedate_tz", import_attribute("email._parseaddr", "_parsedate_tz"));
             // Copyright (C) 2001-2010 Python Software Foundation
             // Author: Barry Warsaw
             // Contact: email-sig@python.org
@@ -365,13 +369,13 @@ namespace neos::python_runtime::detail::email_utils_module
                     if (!strict.truthy())
                     {
                         all = (G<"email.utils.COMMASPACE">()).method("join", { [&]() -> py { py const comprehension8 = py_list(); py v; for (py const& item : iterate{ fieldvalues }) { v = item; comprehension8.method("append", { (B<"str">())(v) }); } return comprehension8; }() });
-                        a_ = (Mod<"email._parseaddr">().attr("AddressList"))(all);
+                        a_ = (G<"email.utils._AddressList">())(all);
                         return a_.attr("addresslist");
                     }
                     fieldvalues = [&]() -> py { py const comprehension9 = py_list(); py v; for (py const& item : iterate{ fieldvalues }) { v = item; comprehension9.method("append", { (B<"str">())(v) }); } return comprehension9; }();
                     fieldvalues = (G<"email.utils._pre_parse_validation">())(fieldvalues);
                     addr = (G<"email.utils.COMMASPACE">()).method("join", { fieldvalues });
-                    a_ = (Mod<"email._parseaddr">().attr("AddressList"))(addr);
+                    a_ = (G<"email.utils._AddressList">())(addr);
                     result = (G<"email.utils._post_parse_validation">())(a_.attr("addresslist"));
                     // Treat output as invalid if the number of addresses is not equal to the
                     // expected number of addresses.
@@ -557,7 +561,7 @@ namespace neos::python_runtime::detail::email_utils_module
                     py exc;
                     py parsed_date_tz;
                     py tz;
-                    parsed_date_tz = (Mod<"email._parseaddr">().attr("_parsedate_tz"))(data);
+                    parsed_date_tz = (G<"email.utils._parsedate_tz">())(data);
                     if (parsed_date_tz.is_none())
                     {
                         py_raise((B<"ValueError">())((S<"Invalid date value or format \"%s\"">()) % (B<"str">())(data)));
@@ -597,7 +601,7 @@ namespace neos::python_runtime::detail::email_utils_module
                     py addrs;
                     if (!strict.truthy())
                     {
-                        addrs = (Mod<"email._parseaddr">().attr("AddressList"))(addr).attr("addresslist");
+                        addrs = (G<"email.utils._AddressList">())(addr).attr("addresslist");
                         if (!addrs.truthy())
                         {
                             return py_tuple({ S<"">(), S<"">() });
@@ -613,7 +617,7 @@ namespace neos::python_runtime::detail::email_utils_module
                         return py_tuple({ S<"">(), S<"">() });
                     }
                     addr = (G<"email.utils._pre_parse_validation">())(py_list({ addr }))[I<0>()];
-                    addrs = (G<"email.utils._post_parse_validation">())((Mod<"email._parseaddr">().attr("AddressList"))(addr).attr("addresslist"));
+                    addrs = (G<"email.utils._post_parse_validation">())((G<"email.utils._AddressList">())(addr).attr("addresslist"));
                     if (((!addrs.truthy()) || (py{ addrs.size() } > (I<1>()))))
                     {
                         return py_tuple({ S<"">(), S<"">() });
@@ -712,7 +716,7 @@ namespace neos::python_runtime::detail::email_utils_module
                         }
                         else
                         {
-                            new_params.method("append", { py_tuple({ name, (S<"\"%s\"">()) % (Mod<"email._parseaddr">().attr("quote"))(value) }) });
+                            new_params.method("append", { py_tuple({ name, (S<"\"%s\"">()) % (G<"email.utils.quote">())(value) }) });
                         }
                     }
                     if (rfc2231_params.truthy())
@@ -761,7 +765,7 @@ namespace neos::python_runtime::detail::email_utils_module
                                 }
                                 value.method("append", { s });
                             }
-                            value = (Mod<"email._parseaddr">().attr("quote"))((G<"email.utils.EMPTYSTRING">()).method("join", { value }));
+                            value = (G<"email.utils.quote">())((G<"email.utils.EMPTYSTRING">()).method("join", { value }));
                             if (extended.truthy())
                             {
                                 auto const items27 = unpack((G<"email.utils.decode_rfc2231">())(value), 3);
@@ -864,12 +868,9 @@ namespace neos::python_runtime::detail::email_utils_module
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("datetime", py{ fn_import("datetime") }.release());
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
-                aAttributes.emplace_back("quote", import_attribute("email._parseaddr", "quote").release());
-                aAttributes.emplace_back("_AddressList", import_attribute("email._parseaddr", "AddressList").release());
                 aAttributes.emplace_back("mktime_tz", import_attribute("email._parseaddr", "mktime_tz").release());
                 aAttributes.emplace_back("parsedate", import_attribute("email._parseaddr", "parsedate").release());
                 aAttributes.emplace_back("parsedate_tz", import_attribute("email._parseaddr", "parsedate_tz").release());
-                aAttributes.emplace_back("_parsedate_tz", import_attribute("email._parseaddr", "_parsedate_tz").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -878,6 +879,14 @@ namespace neos::python_runtime::detail::email_utils_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.utils", email_utils_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.utils", email_utils_module, assigned);
     }
 }

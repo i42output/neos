@@ -264,9 +264,22 @@ namespace neos::python_runtime::detail::asyncio
             }) != nullptr;
         }
 
+        // (an attribute of a module of the package assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the 
+        // object that its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            std::string_view module{ aModule };
+            if (module.starts_with("asyncio."))
+                module.remove_prefix(8u);
+            else if (module != "_asyncio")
+                return;
+            if (aValue != nullptr)
+                define(std::string{ module }.c_str(), aName, py::borrowed(aValue));
+        }
+
 #define NEOS_ASYNCIO_MODULE(name) \
         inline bool const sAsyncio_##name = register_module("asyncio." #name, [](std::vector<std::pair<std::string, object*>>& aAttributes) \
-            { return asyncio_module(aAttributes, #name); });
+            { return asyncio_module(aAttributes, #name); }, assigned);
         NEOS_ASYNCIO_MODULE(base_events)
         NEOS_ASYNCIO_MODULE(base_futures)
         NEOS_ASYNCIO_MODULE(base_subprocess)
@@ -302,6 +315,6 @@ namespace neos::python_runtime::detail::asyncio
         inline bool const sAsyncio = register_module("asyncio", [](std::vector<std::pair<std::string, object*>>& aAttributes)
             { return asyncio_module(aAttributes, ""); });
         inline bool const sAsyncioC = register_module("_asyncio", [](std::vector<std::pair<std::string, object*>>& aAttributes)
-            { return asyncio_module(aAttributes, "_asyncio"); });
+            { return asyncio_module(aAttributes, "_asyncio"); }, assigned);
     }
 }

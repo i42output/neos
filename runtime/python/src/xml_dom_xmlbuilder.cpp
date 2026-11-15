@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::xml_dom_xmlbuilder_module
         void make_xml_dom_xmlbuilder()
         {
             static module_writer const& w = writer("xml.dom.xmlbuilder");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xml.dom.xmlbuilder", "NodeFilter", import_attribute("xml.dom.NodeFilter", "NodeFilter"));
             define("xml.dom.xmlbuilder", "__all__", py_list({ S<"DOMBuilder">(), S<"DOMEntityResolver">(), S<"DOMInputSource">() }));
                 // Note that the DOMBuilder class in LoadSave constrains which of these
                 // values can be set using the DOM Level 3 LoadSave feature.
@@ -590,7 +592,7 @@ namespace neos::python_runtime::detail::xml_dom_xmlbuilder_module
                 { "FILTER_REJECT", I<2>() },
                 { "FILTER_SKIP", I<3>() },
                 { "FILTER_INTERRUPT", I<4>() },
-                { "whatToShow", (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_ALL") },
+                { "whatToShow", (G<"xml.dom.xmlbuilder.NodeFilter">()).attr("SHOW_ALL") },
                 { "_get_whatToShow", w.method("DOMBuilderFilter", "_get_whatToShow", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -707,7 +709,6 @@ namespace neos::python_runtime::detail::xml_dom_xmlbuilder_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("copy", py{ fn_import("copy") }.release());
                 aAttributes.emplace_back("xml", py{ fn_import("xml") }.release());
-                aAttributes.emplace_back("NodeFilter", import_attribute("xml.dom.NodeFilter", "NodeFilter").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -716,6 +717,14 @@ namespace neos::python_runtime::detail::xml_dom_xmlbuilder_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.dom.xmlbuilder", xml_dom_xmlbuilder_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.dom.xmlbuilder", xml_dom_xmlbuilder_module, assigned);
     }
 }

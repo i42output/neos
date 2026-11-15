@@ -160,6 +160,7 @@ namespace neos::compilers::python
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                     analyze_line(l);
                 redefined();
+                global_qualnames();
                 static std::set<std::string_view> const sSpecial = { "__name__", "__file__", "__doc__", "__builtins__", "__spec__", "__loader__",
                     "__package__", "__path__", "__debug__", "__cached__" };
                 std::set<std::string> names = iModule.bound;
@@ -305,6 +306,7 @@ namespace neos::compilers::python
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                     analyze_line(l);
                 redefined();
+                global_qualnames();
                 resolve(iModule);
                 // (the annotations of the defs that are not the grammar's types: removed (the module's functions': their sources are
                 // its functions' __annotations__ (see aAnnotations); the others' are __annotate's))
@@ -782,6 +784,67 @@ namespace neos::compilers::python
                 }
             }
 
+            // (a function or class whose name its enclosing function declares global: its qualified name is its name (CPython's 
+            // compiler_set_qualname: GLOBAL_EXPLICIT), and its functions' and lambdas' are within it; the scopes' names are known once the 
+            // lines have been analyzed)
+            void global_qualnames()
+            {
+                auto const declared_global = [](scope const& aScope)
+                {
+                    auto const& shown = aScope.classBody ? aScope.className : aScope.name;
+                    return aScope.kind == scope::Function && aScope.parent != nullptr && aScope.parent->kind == scope::Function && 
+                        !aScope.parent->classBody && aScope.parent->globals.contains(shown);
+                };
+                if (std::none_of(iScopes.begin(), iScopes.end(), [&](auto const& s) { return declared_global(*s); }))
+                    return;
+                // (parents before their children: the order the scopes were made in)
+                for (auto const& s : iScopes)
+                {
+                    auto& f = *s;
+                    if (f.kind == scope::Function && f.parent != &iModule)
+                    {
+                        auto const& shown = f.classBody ? f.className : f.name;
+                        if (declared_global(f))
+                            f.qualname = shown;
+                        else if (f.parent->classBody)
+                            f.qualname = f.parent->qualname + "." + shown;
+                        else
+                            f.qualname = f.parent->qualname + ".<locals>." + shown;
+                    }
+                    else if (f.kind == scope::Lambda && f.parent != nullptr)
+                        f.qualname = (f.parent->kind == scope::Module ? std::string{} : f.parent->qualname + ".<locals>.") + "<lambda>";
+                }
+            }
+
+            // (the colon of the parameters of the lambda at aLambda (a line's token): the first outside brackets that is not the colon of a 
+            // lambda in a parameter's default ("lambda x = lambda: 1: x()"); aEnd if none)
+            std::size_t lambda_colon(std::size_t aLine, std::size_t aLambda, std::size_t aEnd) const
+            {
+                int depth = 0;
+                int lambdas = 0;
+                auto colon = aLambda + 1u;
+                for (; colon < aEnd; ++colon)
+                {
+                    auto const& k = tok(aLine, colon);
+                    if (k.kind == token::Name && text(k) == "lambda" && depth == 0)
+                        ++lambdas;
+                    else if (k.kind == token::Op)
+                    {
+                        auto const op = text(k);
+                        if (opening(op))
+                            ++depth;
+                        else if (closing(op))
+                            --depth;
+                        else if (op == ":" && depth == 0)
+                        {
+                            if (lambdas == 0)
+                                break;
+                            --lambdas;
+                        }
+                    }
+                }
+                return colon;
+            }
             // (the lambdas of a line's tokens [aBegin, aEnd))
             void find_lambdas(std::size_t aLine, std::size_t aBegin, std::size_t aEnd)
             {
@@ -796,28 +859,12 @@ namespace neos::compilers::python
                     l.name = "<lambda>";
                     l.qualname = (owner.kind == scope::Module ? std::string{} : owner.qualname + ".<locals>.") + "<lambda>";
                     // (its parameters: up to its colon)
-                    auto colon = t + 1u;
-                    int depth = 0;
-                    while (colon < aEnd)
-                    {
-                        auto const& k = tok(aLine, colon);
-                        if (k.kind == token::Op)
-                        {
-                            auto const op = text(k);
-                            if (opening(op))
-                                ++depth;
-                            else if (closing(op))
-                                --depth;
-                            else if (op == ":" && depth == 0)
-                                break;
-                        }
-                        ++colon;
-                    }
+                    auto const colon = lambda_colon(aLine, t, aEnd);
                     l.colon = colon;
                     parameters(l, aLine, t + 1u, colon);
                     // (its body: up to a comma or a closing bracket at its level, a comprehension's for, or the end of the statement)
                     auto end = colon + 1u;
-                    depth = 0;
+                    int depth = 0;
                     while (end < aEnd)
                     {
                         auto const& k = tok(aLine, end);
@@ -840,21 +887,7 @@ namespace neos::compilers::python
                         else if (k.kind == token::Name && text(k) == "lambda")
                         {
                             // (a lambda in its body: its parameters' colon is not the end)
-                            int d = 0;
-                            auto c = end + 1u;
-                            while (c < aEnd && !(d == 0 && is_op(aLine, c, ":")))
-                            {
-                                if (tok(aLine, c).kind == token::Op)
-                                {
-                                    auto const op = text(aLine, c);
-                                    if (opening(op))
-                                        ++d;
-                                    else if (closing(op))
-                                        --d;
-                                }
-                                ++c;
-                            }
-                            end = c;
+                            end = lambda_colon(aLine, end, aEnd);
                         }
                         ++end;
                     }
@@ -862,6 +895,8 @@ namespace neos::compilers::python
                     for (auto x = colon + 1u; x < end; ++x)
                         iOwners[aLine][x] = &l;
                     iSkip[aLine][t] = true;
+                    // (the lambdas in its parameters' defaults (the enclosing scope's: they are evaluated there) and in its body)
+                    find_lambdas(aLine, t + 1u, colon);
                     find_lambdas(aLine, colon + 1u, end);
                     t = end - 1u;
                 }
@@ -990,6 +1025,12 @@ namespace neos::compilers::python
                 for (auto t = aBegin; t < aEnd; ++t)
                 {
                     auto const& k = tok(aLine, t);
+                    // (a lambda's parameters (their defaults' '=' and its colon): not the statement's)
+                    if (k.kind == token::Name && text(k) == "lambda" && iOwners[aLine][t] == &owner)
+                    {
+                        t = lambda_colon(aLine, t, aEnd);
+                        continue;
+                    }
                     if (k.kind != token::Op || iOwners[aLine][t] != &owner)
                         continue;
                     auto const op = text(k);
@@ -1093,9 +1134,48 @@ namespace neos::compilers::python
                     }
                     return n;
                 };
+                // (references: its names that its scope reads (also a decorator's line's: the scope that applies it reads them, e.g. a class
+                // body's in a function, whose free names they can be))
+                auto const references = [&]()
+                {
+                    std::vector<std::string_view> brackets;
+                    for (std::size_t t = 0u; t < n; ++t)
+                    {
+                        auto const& k = tokens[t];
+                        if (k.kind == token::Op)
+                        {
+                            auto const op = text(k);
+                            if (opening(op))
+                                brackets.push_back(op);
+                            else if (closing(op) && !brackets.empty())
+                                brackets.pop_back();
+                            continue;
+                        }
+                        if (k.kind == token::Name && text(k) == "yield" && (iOwners[aLine][t]->kind == scope::Function || iOwners[aLine][t]->kind == scope::Lambda))
+                            iOwners[aLine][t]->generator = iOwners[aLine][t]->yields = true;
+                        if (k.kind != token::Name || iSkip[aLine][t] || keywords().contains(text(k)))
+                            continue;
+                        if (t > 0u && is_op(aLine, t - 1u, "."))
+                        {
+                            iSkip[aLine][t] = true;
+                            continue;
+                        }
+                        // (a keyword argument)
+                        if (t + 1u < n && is_op(aLine, t + 1u, "=") && !brackets.empty() && brackets.back() == "(" && t > 0u &&
+                            (is_op(aLine, t - 1u, "(") || is_op(aLine, t - 1u, ",")))
+                        {
+                            iSkip[aLine][t] = true;
+                            continue;
+                        }
+                        iOwners[aLine][t]->referenced.insert(std::string{ text(k) });
+                    }
+                };
                 std::size_t body = n;
                 if (is_op(aLine, 0u, "@"))
+                {
+                    references();
                     return;
+                }
                 if (keyword == "def")
                 {
                     // (its inline body)
@@ -1148,8 +1228,11 @@ namespace neos::compilers::python
                                 ++e;
                             }
                             targets(aLine, t + 1u, e);
-                            for (auto x = t + 1u; x < e; ++x)
-                                iSkip[aLine][x] = iSkip[aLine][x] || iBinding[aLine][x];
+                            // (an except clause's target is a name (a cell's: the compiler sets the cell too); a with statement's can be any
+                            // target (a cell's name: its cell's value, "as _k_x.v"))
+                            if (keyword == "except")
+                                for (auto x = t + 1u; x < e; ++x)
+                                    iSkip[aLine][x] = iSkip[aLine][x] || iBinding[aLine][x];
                         }
                     body = colon + 1u;
                 }
@@ -1176,38 +1259,7 @@ namespace neos::compilers::python
                     if (t == n)
                         simple_statement(aLine, s, n);
                 }
-                // (references)
-                std::vector<std::string_view> brackets;
-                for (std::size_t t = 0u; t < n; ++t)
-                {
-                    auto const& k = tokens[t];
-                    if (k.kind == token::Op)
-                    {
-                        auto const op = text(k);
-                        if (opening(op))
-                            brackets.push_back(op);
-                        else if (closing(op) && !brackets.empty())
-                            brackets.pop_back();
-                        continue;
-                    }
-                    if (k.kind == token::Name && text(k) == "yield" && (iOwners[aLine][t]->kind == scope::Function || iOwners[aLine][t]->kind == scope::Lambda))
-                        iOwners[aLine][t]->generator = iOwners[aLine][t]->yields = true;
-                    if (k.kind != token::Name || iSkip[aLine][t] || keywords().contains(text(k)))
-                        continue;
-                    if (t > 0u && is_op(aLine, t - 1u, "."))
-                    {
-                        iSkip[aLine][t] = true;
-                        continue;
-                    }
-                    // (a keyword argument)
-                    if (t + 1u < n && is_op(aLine, t + 1u, "=") && !brackets.empty() && brackets.back() == "(" && t > 0u &&
-                        (is_op(aLine, t - 1u, "(") || is_op(aLine, t - 1u, ",")))
-                    {
-                        iSkip[aLine][t] = true;
-                        continue;
-                    }
-                    iOwners[aLine][t]->referenced.insert(std::string{ text(k) });
-                }
+                references();
             }
 
             // (the scope whose local a name (used in aScope, which does not bind it) is: null if a global)
@@ -1571,7 +1623,7 @@ namespace neos::compilers::python
                 bool lineStart = true;
                 char quote = 0;
                 bool triple = false;
-                std::size_t content = 0u;   // (where the string's content begins: its closing quotes follow it)
+                std::size_t quotes = 0u;    // (a triple-quoted string: the quote characters (not escaped ones) just before i)
                 for (std::size_t i = 0u; i < aText.size(); ++i)
                 {
                     char const c = aText[i];
@@ -1593,11 +1645,19 @@ namespace neos::compilers::python
                     if (quote != 0)
                     {
                         if (c == '\\' && i + 1u < aText.size())
-                            result += aText[++i];
-                        else if (c == quote && (!triple || (i >= content + 2u && aText[i - 1u] == quote && aText[i - 2u] == quote)))
+                        {
+                            for (auto const last = tokens::escape_last(aText, i); i < last;)
+                                result += aText[++i];
+                            quotes = 0u;
+                        }
+                        else if (c == quote && (!triple || ++quotes == 3u))
                             quote = 0;
-                        else if (c == '\n' && !triple)
-                            quote = 0;
+                        else if (c != quote)
+                        {
+                            quotes = 0u;
+                            if (c == '\n' && !triple)
+                                quote = 0;
+                        }
                     }
                     else if (c == '\'' || c == '\"')
                     {
@@ -1608,7 +1668,7 @@ namespace neos::compilers::python
                             result += aText[++i];
                             result += aText[++i];
                         }
-                        content = i + 1u;
+                        quotes = 0u;
                     }
                     else if (c == '#')
                     {

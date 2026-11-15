@@ -149,6 +149,9 @@ namespace neos::python_runtime::detail::unittest_runner_module
         void make_unittest_runner()
         {
             static module_writer const& w = writer("unittest.runner");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.runner", "_SubTest", import_attribute("unittest.case", "_SubTest"));
+            define("unittest.runner", "registerResult", import_attribute("unittest.signals", "registerResult"));
             define("unittest.runner", "__unittest", boolean(true));
             define("unittest.runner", "_WritelnDecorator", w.make_class("_WritelnDecorator", { B<"object">() }, {
                 { "__init__", w.method("_WritelnDecorator", "__init__", { py_positional("stream") }, [](arguments a) -> py
@@ -235,7 +238,7 @@ namespace neos::python_runtime::detail::unittest_runner_module
                         py test = a[1];
                         py status = a[2];
                         py is_subtest;
-                        is_subtest = boolean(isinstance(test, Mod<"unittest.case">().attr("_SubTest")));
+                        is_subtest = boolean(isinstance(test, G<"unittest.runner._SubTest">()));
                         if ((is_subtest.truthy() || self.attr("_newline").truthy()))
                         {
                             if (!self.attr("_newline").truthy())
@@ -557,7 +560,7 @@ namespace neos::python_runtime::detail::unittest_runner_module
                         py timeTaken;
                         py unexpectedSuccesses;
                         result = self.method("_makeResult");
-                        (Mod<"unittest.signals">().attr("registerResult"))(result);
+                        (G<"unittest.runner.registerResult">())(result);
                         result.set_attr("failfast", self.attr("failfast"));
                         result.set_attr("buffer", self.attr("buffer"));
                         result.set_attr("tb_locals", self.attr("tb_locals"));
@@ -725,8 +728,6 @@ namespace neos::python_runtime::detail::unittest_runner_module
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("warnings", py{ fn_import("warnings") }.release());
                 aAttributes.emplace_back("result", py{ fn_import("unittest.result") }.release());
-                aAttributes.emplace_back("_SubTest", import_attribute("unittest.case", "_SubTest").release());
-                aAttributes.emplace_back("registerResult", import_attribute("unittest.signals", "registerResult").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -735,6 +736,14 @@ namespace neos::python_runtime::detail::unittest_runner_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.runner", unittest_runner_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.runner", unittest_runner_module, assigned);
     }
 }

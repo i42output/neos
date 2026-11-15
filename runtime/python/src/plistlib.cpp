@@ -160,6 +160,9 @@ namespace neos::python_runtime::detail::plistlib_module
         void make_plistlib()
         {
             static module_writer const& w = writer("plistlib");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("plistlib", "BytesIO", import_attribute("io", "BytesIO"));
+            define("plistlib", "ParserCreate", import_attribute("xml.parsers.expat", "ParserCreate"));
             define("plistlib", "__all__", py_list({ S<"InvalidFileException">(), S<"FMT_XML">(), S<"FMT_BINARY">(), S<"load">(), S<"dump">(), S<"loads">(), S<"dumps">(), S<"UID">() }));
             define("plistlib", "PlistFormat", (Mod<"enum">()).method("Enum", { S<"PlistFormat">(), S<"FMT_XML FMT_BINARY">() }, { { "module", S<"plistlib">() } }));
             define("plistlib", "FMT_XML", (G<"plistlib.PlistFormat">()).attr("FMT_XML"));
@@ -368,7 +371,7 @@ namespace neos::python_runtime::detail::plistlib_module
                     {
                         py self = a[0];
                         py fileobj = a[1];
-                        self.set_attr("parser", (Mod<"xml.parsers.expat">().attr("ParserCreate"))());
+                        self.set_attr("parser", (G<"plistlib.ParserCreate">())());
                         self.attr("parser").set_attr("StartElementHandler", self.attr("handle_begin_element"));
                         self.attr("parser").set_attr("EndElementHandler", self.attr("handle_end_element"));
                         self.attr("parser").set_attr("CharacterDataHandler", self.attr("handle_data"));
@@ -1574,7 +1577,7 @@ namespace neos::python_runtime::detail::plistlib_module
                         }
                         value = value.method("encode");
                     }
-                    fp = (Mod<"io">().attr("BytesIO"))(value);
+                    fp = (G<"plistlib.BytesIO">())(value);
                     return (G<"plistlib.load">()).call({ fp }, { { "fmt", fmt }, { "dict_type", dict_type }, { "aware_datetime", aware_datetime } });
                 }));
 
@@ -1604,7 +1607,7 @@ namespace neos::python_runtime::detail::plistlib_module
                     py sort_keys = a[3];
                     py aware_datetime = a[4];
                     py fp;
-                    fp = (Mod<"io">().attr("BytesIO"))();
+                    fp = (G<"plistlib.BytesIO">())();
                     (G<"plistlib.dump">()).call({ value, fp }, { { "fmt", fmt }, { "skipkeys", skipkeys }, { "sort_keys", sort_keys }, { "aware_datetime", aware_datetime } });
                     return fp.method("getvalue");
                 }));
@@ -1626,12 +1629,10 @@ namespace neos::python_runtime::detail::plistlib_module
                 aAttributes.emplace_back("codecs", py{ fn_import("codecs") }.release());
                 aAttributes.emplace_back("datetime", py{ fn_import("datetime") }.release());
                 aAttributes.emplace_back("enum", py{ fn_import("enum") }.release());
-                aAttributes.emplace_back("BytesIO", import_attribute("io", "BytesIO").release());
                 aAttributes.emplace_back("itertools", py{ fn_import("itertools") }.release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("struct", py{ fn_import("struct") }.release());
-                aAttributes.emplace_back("ParserCreate", import_attribute("xml.parsers.expat", "ParserCreate").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -1640,6 +1641,14 @@ namespace neos::python_runtime::detail::plistlib_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("plistlib", plistlib_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("plistlib", plistlib_module, assigned);
     }
 }

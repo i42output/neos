@@ -160,6 +160,10 @@ namespace neos::python_runtime::detail::email_feedparser_module
         void make_email_feedparser()
         {
             static module_writer const& w = writer("email.feedparser");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.feedparser", "compat32", import_attribute("email._policybase", "compat32"));
+            define("email.feedparser", "deque", import_attribute("collections", "deque"));
+            define("email.feedparser", "StringIO", import_attribute("io", "StringIO"));
             // Copyright (C) 2004-2006 Python Software Foundation
             // Authors: Baxter, Wouters and Warsaw
             // Contact: email-sig@python.org
@@ -179,9 +183,9 @@ namespace neos::python_runtime::detail::email_feedparser_module
                 { "__init__", w.method("BufferedSubFile", "__init__", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        self.set_attr("_partial", (Mod<"io">().attr("StringIO")).call({  }, { { "newline", S<"">() } }));
+                        self.set_attr("_partial", (G<"email.feedparser.StringIO">()).call({  }, { { "newline", S<"">() } }));
                         // A deque of full, pushed lines
-                        self.set_attr("_lines", (Mod<"collections">().attr("deque"))());
+                        self.set_attr("_lines", (G<"email.feedparser.deque">())());
                         // The stack of false-EOF checking predicates.
                         self.set_attr("_eofstack", py_list());
                         // A flag indicating whether the file has been closed or not.
@@ -303,7 +307,7 @@ namespace neos::python_runtime::detail::email_feedparser_module
 
                 // Non-public interface for supporting Parser's headersonly flag
             define("email.feedparser", "FeedParser", w.make_class("FeedParser", {  }, {
-                { "__init__", w.method("FeedParser", "__init__", { py_positional("_factory", none()), py_keyword("policy", Mod<"email._policybase">().attr("compat32")) }, [](arguments a) -> py
+                { "__init__", w.method("FeedParser", "__init__", { py_positional("_factory", none()), py_keyword("policy", G<"email.feedparser.compat32">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py _factory = a[1];
@@ -968,9 +972,6 @@ namespace neos::python_runtime::detail::email_feedparser_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("errors", import_attribute("email", "errors").release());
-                aAttributes.emplace_back("compat32", import_attribute("email._policybase", "compat32").release());
-                aAttributes.emplace_back("deque", import_attribute("collections", "deque").release());
-                aAttributes.emplace_back("StringIO", import_attribute("io", "StringIO").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -979,6 +980,14 @@ namespace neos::python_runtime::detail::email_feedparser_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.feedparser", email_feedparser_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.feedparser", email_feedparser_module, assigned);
     }
 }

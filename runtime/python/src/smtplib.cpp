@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::smtplib_module
         void make_smtplib()
         {
             static module_writer const& w = writer("smtplib");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("smtplib", "encode_base64", import_attribute("email.base64mime", "body_encode"));
             // ! /usr/bin/env python3
             // Author: The Dragon De Monsyne <dragondm@integral.org>
             // ESMTP support, test code and doc fixes added by
@@ -926,7 +928,7 @@ namespace neos::python_runtime::detail::smtplib_module
                         initial_response = (initial_response_ok.truthy() ? authobject() : none());
                         if (!initial_response.is_none())
                         {
-                            response = (Mod<"email.base64mime">().attr("body_encode")).call({ initial_response.method("encode", { S<"ascii">() }) }, { { "eol", S<"">() } });
+                            response = (G<"smtplib.encode_base64">()).call({ initial_response.method("encode", { S<"ascii">() }) }, { { "eol", S<"">() } });
                             auto const items22 = unpack(self.method("docmd", { S<"AUTH">(), (mechanism + (S<" ">())) + response }), 2);
                             code = items22[0];
                             resp = items22[1];
@@ -947,7 +949,7 @@ namespace neos::python_runtime::detail::smtplib_module
                                 target25.set_attr("_auth_challenge_count", inplace(NEOS_PY_ADD, target25.attr("_auth_challenge_count"), I<1>()));
                             }
                             challenge = (Mod<"base64">().attr("decodebytes"))(resp);
-                            response = (Mod<"email.base64mime">().attr("body_encode")).call({ authobject(challenge).method("encode", { S<"ascii">() }) }, { { "eol", S<"">() } });
+                            response = (G<"smtplib.encode_base64">()).call({ authobject(challenge).method("encode", { S<"ascii">() }) }, { { "eol", S<"">() } });
                             auto const items26 = unpack(self.method("docmd", { response }), 2);
                             code = items26[0];
                             resp = items26[1];
@@ -1518,7 +1520,6 @@ namespace neos::python_runtime::detail::smtplib_module
                 aAttributes.emplace_back("copy", py{ fn_import("copy") }.release());
                 aAttributes.emplace_back("datetime", py{ fn_import("datetime") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
-                aAttributes.emplace_back("encode_base64", import_attribute("email.base64mime", "body_encode").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -1527,6 +1528,14 @@ namespace neos::python_runtime::detail::smtplib_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("smtplib", smtplib_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("smtplib", smtplib_module, assigned);
     }
 }

@@ -1976,6 +1976,66 @@ namespace neos::python_runtime
                 return result.release_ownership();
             }
 
+            // --- SRE_Scanner (Pattern.scanner: _sre.c's scanner_match and scanner_search)
+
+            struct scanner_object
+            {
+                header h;
+                object* pattern;
+                object* string;
+                std::shared_ptr<std::u32string> text;
+                long long position;
+                long long endpos;
+                bool mustAdvance = false;   ///< (the last match was empty: the next must not be empty where it ended)
+                bool exhausted = false;     ///< (no match was found: None from now on)
+                ~scanner_object() { release(pattern); release(string); }
+            };
+
+            neos_py_type make_scanner_type()
+            {
+                auto type = make_type("_sre.SRE_Scanner", "SRE_Scanner", retain_object, release_object<scanner_object>);
+                type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
+                {
+                    auto& s = *reinterpret_cast<scanner_object*>(aSelf);
+                    if (std::strcmp(aName, "pattern") == 0)
+                        return borrowed(s.pattern);
+                    if (std::strcmp(aName, "match") == 0 || std::strcmp(aName, "search") == 0)
+                        return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
+                        {
+                            auto const& args = as<tuple_object>(aArgs)->items;
+                            bool const search = aData != nullptr;
+                            if (args.size() != 1u || (aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty()))
+                                return error("TypeError", std::string{ search ? "search" : "match" } + "() takes no arguments");
+                            auto& s = *reinterpret_cast<scanner_object*>(args[0]);
+                            if (s.exhausted || s.position > s.endpos)
+                                return borrowed(none());
+                            auto const m = run(s.pattern, s.string, s.text, s.position, s.endpos, search ? 2 : 0, s.mustAdvance);
+                            if (m == nullptr)
+                            {
+                                if (failed())
+                                    return nullptr;
+                                s.exhausted = true;
+                                return borrowed(none());
+                            }
+                            auto const& marks = as_match(m).marks;
+                            s.mustAdvance = marks[1] == marks[0];
+                            s.position = marks[1];
+                            return m;
+                        }, std::strcmp(aName, "search") == 0 ? aSelf : nullptr, aSelf);
+                    return error("AttributeError", std::string{ "'_sre.SRE_Scanner' object has no attribute '" } + aName + "'");
+                };
+                return type;
+            }
+
+            neos_py_type sScannerType = make_scanner_type();
+
+            object* make_scanner(object* aPattern, pattern_arguments const& aArguments)
+            {
+                auto const n = static_cast<long long>(aArguments.text->size());
+                return &(new scanner_object{ { { &sScannerType.base } }, borrowed(aPattern), borrowed(aArguments.string), aArguments.text,
+                    std::clamp(aArguments.pos, 0ll, n), std::clamp(aArguments.endpos, 0ll, n) })->h.base;
+            }
+
             neos_py_type make_pattern_type()
             {
                 auto type = make_type("re.Pattern", "Pattern", retain_object, release_object<pattern_object>);
@@ -2025,6 +2085,18 @@ namespace neos::python_runtime
                         }
                         return result.release_ownership();
                     }
+                    // (scanner(string, pos=0, endpos=sys.maxsize): an SRE_Scanner, whose match() and search() go on from the end of the 
+                    // last match (an empty match: the next must advance))
+                    if (name == "scanner")
+                        return make_function("scanner", [](neos_py_context*, void*, object* aArgs, object* aKwargs) -> object*
+                        {
+                            auto const& args = as<tuple_object>(aArgs)->items;
+                            std::vector<object*> const rest{ args.begin() + 1, args.end() };
+                            pattern_arguments a;
+                            if (!search_arguments("scanner", args[0], rest, aKwargs, a))
+                                return nullptr;
+                            return make_scanner(args[0], a);
+                        }, nullptr, aSelf);
                     static char const* const sMethods[] = { "match", "fullmatch", "search", "findall", "finditer", "sub", "subn", "split" };
                     for (std::size_t i = 0u; i < std::size(sMethods); ++i)
                         if (name == sMethods[i])
@@ -2183,6 +2255,145 @@ namespace neos::python_runtime
 
             int pattern_instancecheck(neos_py_context*, void* aData, object* aObject) { return (aData == nullptr ? is_pattern(aObject) : is_match(aObject)) ? 1 : 0; }
 
+            // --- re.Scanner (Lib/re/__init__.py's (undocumented) Scanner: its phrases as one pattern, each phrase a group of it (the group of
+            // the phrase that matched is the match's lastindex), scanned with Pattern.scanner)
+
+            object* scanner_init(neos_py_context*, void*, object* aArgs, object* aKwargs)
+            {
+                auto const& args = as<tuple_object>(aArgs)->items;
+                std::vector<object*> const rest{ args.begin() + 1, args.end() };
+                std::vector<object*> a;
+                if (!parse_arguments("Scanner", rest, aKwargs, { "lexicon", "flags" }, 1u, 0u, a))
+                    return nullptr;
+                auto const self = args[0];
+                if (setattr(self, "lexicon", a[0]) != 0)
+                    return nullptr;
+                ref const compile{ module_attribute("re", "compile") };
+                ref const flags{ a[1] != nullptr ? borrowed(a[1]) : make_int(0) };
+                ref const it{ iter(a[0]) };
+                if (!compile || !it)
+                    return nullptr;
+                ref const groups{ make_dict() };    // (the pattern's group of each phrase: the phrase's index)
+                std::vector<object*> parts;
+                struct release_parts { std::vector<object*>& parts; ~release_parts() { for (auto p : parts) release(p); } } const releaseParts{ parts };
+                bool text = true;
+                long long group = 1;
+                for (long long index = 0;; ++index)
+                {
+                    ref const entry{ next(it.get()) };
+                    if (!entry)
+                    {
+                        if (failed())
+                            return nullptr;
+                        break;
+                    }
+                    ref const zero{ make_int(0) };
+                    ref const phrase{ getitem(entry.get(), zero.get()) };
+                    if (!phrase)
+                        return nullptr;
+                    text = kind_of(phrase.get()) == NEOS_PY_STR;
+                    ref const compileArgs{ make_tuple({ borrowed(phrase.get()), borrowed(flags.get()) }) };
+                    ref const compiled{ call(compile.get(), compileArgs.get(), nullptr) };
+                    if (!compiled)
+                        return nullptr;
+                    ref const count{ getattr(compiled.get(), "groups") };
+                    long long n = 0;
+                    if (!count || !to_index(count.get(), n))
+                        return nullptr;
+                    ref const key{ make_int(group) };
+                    ref const value{ make_int(index) };
+                    if (dict_set(groups.get(), key.get(), value.get()) != 0)
+                        return nullptr;
+                    group += 1 + n;
+                    ref const open{ text ? make_str("(") : make_bytes("(") };
+                    ref const close{ text ? make_str(")") : make_bytes(")") };
+                    ref const opened{ binary(NEOS_PY_ADD, open.get(), phrase.get(), false) };
+                    ref const closed{ opened ? binary(NEOS_PY_ADD, opened.get(), close.get(), false) : nullptr };
+                    if (!closed)
+                        return nullptr;
+                    parts.push_back(borrowed(closed.get()));
+                }
+                ref const separator{ text ? make_str("|") : make_bytes("|") };
+                std::vector<object*> items;
+                for (auto p : parts)
+                    items.push_back(borrowed(p));
+                ref const list{ make_list(std::move(items)) };
+                object* const joinArgs[] = { list.get() };
+                ref const combined{ method_call(separator.get(), "join", std::span<object* const>{ joinArgs }, nullptr) };
+                if (!combined)
+                    return nullptr;
+                ref const compileArgs{ make_tuple({ borrowed(combined.get()), borrowed(flags.get()) }) };
+                ref const pattern{ call(compile.get(), compileArgs.get(), nullptr) };
+                if (!pattern || setattr(self, "scanner", pattern.get()) != 0 || setattr(self, "_groups", groups.get()) != 0)
+                    return nullptr;
+                return borrowed(none());
+            }
+
+            object* scanner_scan(neos_py_context*, void*, object* aArgs, object* aKwargs)
+            {
+                auto const& args = as<tuple_object>(aArgs)->items;
+                std::vector<object*> const rest{ args.begin() + 1, args.end() };
+                std::vector<object*> a;
+                if (!parse_arguments("scan", rest, aKwargs, { "string" }, 1u, 0u, a))
+                    return nullptr;
+                auto const self = args[0];
+                ref const pattern{ getattr(self, "scanner") };
+                ref const lexicon{ getattr(self, "lexicon") };
+                ref const groups{ getattr(self, "_groups") };
+                if (!pattern || !lexicon || !groups)
+                    return nullptr;
+                object* const scannerArgs[] = { a[0] };
+                ref const scanner{ method_call(pattern.get(), "scanner", std::span<object* const>{ scannerArgs }, nullptr) };
+                ref const match{ scanner ? getattr(scanner.get(), "match") : nullptr };
+                if (!match)
+                    return nullptr;
+                ref const result{ make_list() };
+                long long i = 0;
+                for (;;)
+                {
+                    ref const noArgs{ make_tuple() };
+                    ref const m{ call(match.get(), noArgs.get(), nullptr) };
+                    if (!m)
+                        return nullptr;
+                    if (kind_of(m.get()) == NEOS_PY_NONE)
+                        break;
+                    auto const& mo = as_match(m.get());
+                    auto const j = mo.marks[1];
+                    if (i == j)
+                        break;
+                    // (the phrase's action: called (self, the matched text) if it is callable (self.match: the match), kept if not None)
+                    ref const lastIndex{ make_int(mo.lastindex) };
+                    ref const phraseIndex{ getitem(groups.get(), lastIndex.get()) };
+                    ref const entry{ phraseIndex ? getitem(lexicon.get(), phraseIndex.get()) : nullptr };
+                    ref const one{ make_int(1) };
+                    ref action{ entry ? getitem(entry.get(), one.get()) : nullptr };
+                    if (!action)
+                        return nullptr;
+                    if (is_callable(action.get()))
+                    {
+                        if (setattr(self, "match", m.get()) != 0)
+                            return nullptr;
+                        object* const groupArgs[] = { nullptr };
+                        ref const text{ method_call(m.get(), "group", std::span<object* const>{ groupArgs, 0u }, nullptr) };
+                        if (!text)
+                            return nullptr;
+                        ref const actionArgs{ make_tuple({ borrowed(self), borrowed(text.get()) }) };
+                        action = ref{ call(action.get(), actionArgs.get(), nullptr) };
+                        if (!action)
+                            return nullptr;
+                    }
+                    if (kind_of(action.get()) != NEOS_PY_NONE)
+                        as<list_object>(result.get())->items.push_back(borrowed(action.get()));
+                    i = j;
+                }
+                ref const start{ make_int(i) };
+                ref const slice{ make_slice(start.get(), nullptr, nullptr) };
+                ref const remainder{ getitem(a[0], slice.get()) };
+                if (!remainder)
+                    return nullptr;
+                return make_tuple({ borrowed(result.get()), borrowed(remainder.get()) });
+            }
+
             bool re_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
                 for (auto const& f : sReFunctions)
@@ -2225,6 +2436,12 @@ namespace neos::python_runtime
                     ref const table{ module_attribute("copyreg", "dispatch_table") };
                     if (!table || dict_set(table.get(), patternType, pickleFunction) < 0)
                         return false;
+                }
+                {
+                    ref const objectType{ type_object_for("object", "object") };
+                    ref const init{ make_function("__init__", scanner_init, nullptr) };
+                    ref const scan{ make_function("scan", scanner_scan, nullptr) };
+                    aAttributes.emplace_back("Scanner", make_class("re", "Scanner", { objectType.get() }, { { "__init__", init.get() }, { "scan", scan.get() } }));
                 }
                 aAttributes.emplace_back("Match", context()->type_new(context(), "Match", "re.Match",
                     [](neos_py_context*, void*, object*, object*) -> object* { return error("TypeError", "cannot create 're.Match' instances"); },

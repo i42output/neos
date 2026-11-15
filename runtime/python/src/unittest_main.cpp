@@ -149,6 +149,8 @@ namespace neos::python_runtime::detail::unittest_main_module
         void make_unittest_main()
         {
             static module_writer const& w = writer("unittest.main");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.main", "installHandler", import_attribute("unittest.signals", "installHandler"));
             define("unittest.main", "__unittest", boolean(true));
             define("unittest.main", "_NO_TESTS_EXITCODE", I<5>());
             define("unittest.main", "MAIN_EXAMPLES", S<"Examples:\n  %(prog)s test_module               - run tests from test_module\n  %(prog)s module.TestClass          - run tests from module.TestClass\n  %(prog)s module.Class.test_method  - run specified test method\n  %(prog)s path/to/test_file.py      - run tests from test_file.py\n">());
@@ -457,7 +459,7 @@ namespace neos::python_runtime::detail::unittest_main_module
                         py testRunner;
                         if (self.attr("catchbreak").truthy())
                         {
-                            (Mod<"unittest.signals">().attr("installHandler"))();
+                            (G<"unittest.main.installHandler">())();
                         }
                         if (self.attr("testRunner").is_none())
                         {
@@ -539,7 +541,6 @@ namespace neos::python_runtime::detail::unittest_main_module
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("loader", py{ fn_import("unittest.loader") }.release());
                 aAttributes.emplace_back("runner", py{ fn_import("unittest.runner") }.release());
-                aAttributes.emplace_back("installHandler", import_attribute("unittest.signals", "installHandler").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -548,6 +549,14 @@ namespace neos::python_runtime::detail::unittest_main_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.main", unittest_main_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.main", unittest_main_module, assigned);
     }
 }

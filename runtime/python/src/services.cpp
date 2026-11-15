@@ -60,6 +60,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdint>
 #include <csignal>
@@ -511,7 +512,10 @@ namespace neos::python_runtime
                         if (!is_class(cls.get()) && !(kind_of(self) == NEOS_PY_OTHER && std::strcmp(self->type->name, "object") == 0) && 
                             !(protocol >= 2 && is_type_object(cls.get()) && ownGetstate()))
                         {
+                            // (as CPython's: the type's tp_name (a type of a module's: its qualified name, e.g. '_thread.lock'))
                             std::string name = type_name(self);
+                            if (kind_of(self) == NEOS_PY_OTHER && python_type(self) != nullptr && !std::string_view{ self->type->name }.starts_with("python."))
+                                name = self->type->name;
                             return error("TypeError", "cannot pickle '" + name + "' object");
                         }
                         // (an instance of a subclass of set, frozenset or bytearray: their __reduce__ (cls, (list(self),), state) and
@@ -1472,6 +1476,10 @@ namespace neos::python_runtime
             object* sSignalsEnum = nullptr;
             object* sDefaultIntHandler = nullptr;
             std::thread::id sMainThread = std::this_thread::get_id();
+#if !defined(_WIN32)
+            pthread_t const sMainPthread = pthread_self();   ///< (the thread that runs the program's (Python's main thread's) code)
+            std::atomic<bool> sMainPthreadRunning{ true };  ///< (until the program ends)
+#endif
             bool sSignalModule = false;
             std::atomic<long long> sWakeupFd{ -1 };     ///< (set_wakeup_fd's: the signals' numbers are written to it (as bytes))
 #if defined(_WIN32)
@@ -1479,7 +1487,9 @@ namespace neos::python_runtime
             std::atomic<socket_send> sWakeupSend{ nullptr };   ///< (Windows: the wakeup fd is a socket (Winsock's send))
 #endif
 
-            void neos_python_signal(int aSignal)
+            // (a signal that has arrived (or that _thread.interrupt_main simulates): pending, for its Python handler, and its number written to
+            // the wakeup fd (CPython's trip_signal))
+            void trip_signal(int aSignal)
             {
                 if (aSignal > 0 && aSignal < kSignalCount)
                 {
@@ -1500,6 +1510,23 @@ namespace neos::python_runtime
                     errno = savedErrno;
 #endif
                 }
+            }
+
+            void neos_python_signal(int aSignal)
+            {
+#if !defined(_WIN32)
+                // (a signal that arrived on another thread (e.g. the host's, which waits for the program's, or a threading.Thread's): passed 
+                // to the thread that runs Python's main thread's code, so that a blocking call that it is making (e.g. socket.sendall's 
+                // send) is interrupted (EINTR) and its Python handler runs there, as CPython's (only the main thread runs handlers))
+                if (sMainPthreadRunning.load(std::memory_order_relaxed) && !pthread_equal(pthread_self(), sMainPthread))
+                {
+                    int const savedErrno = errno;
+                    ::pthread_kill(sMainPthread, aSignal);
+                    errno = savedErrno;
+                    return;
+                }
+#endif
+                trip_signal(aSignal);
 #if defined(_WIN32)
                 std::signal(aSignal, neos_python_signal);   // (Windows resets the handler)
 #endif
@@ -1944,6 +1971,28 @@ namespace neos::python_runtime
 
         // (the signals that the interpreter ignores from its start (Modules/signalmodule.c's signal_install_handlers): writing to a pipe or socket
         // whose other end is closed raises BrokenPipeError instead of ending the program, and exceeding the file size limit raises OSError)
+        // (_thread.interrupt_main(signum): the effect of the signal arriving in the main thread, if Python handles it (its handler is not 
+        // SIG_DFL or SIG_IGN; else nothing); false (ValueError) if aSignal is not a signal's number)
+        bool signal_interrupt_main(long long aSignal)
+        {
+            if (aSignal < 1 || aSignal >= kSignalCount)
+            {
+                error("ValueError", "signal number out of range");
+                return false;
+            }
+            auto const handler = sHandlers[aSignal];
+            if (handler != nullptr && !is_int_like(builtin_value(handler)) && is_callable(handler))
+                trip_signal(static_cast<int>(aSignal));
+            return true;
+        }
+
+        void signals_end()
+        {
+#if !defined(_WIN32)
+            sMainPthreadRunning.store(false, std::memory_order_relaxed);
+#endif
+        }
+
         void signals_start()
         {
 #if defined(SIGPIPE)
@@ -1967,6 +2016,18 @@ namespace neos::python_runtime
         bool signals_check()
         {
             return !sAnyPending.load(std::memory_order_relaxed) || signals_handle();
+        }
+        // (a signal that the process sent itself (os.kill): its arrival waited for if it has a Python handler (another thread may be the
+        // one it is delivered to, after kill returns: CPython's main thread is the only one, so its handler runs before kill returns))
+        void signal_wait(int aSignal)
+        {
+            if (aSignal <= 0 || aSignal >= kSignalCount)
+                return;
+            auto const handler = sHandlers[aSignal];
+            if (handler == nullptr || !is_callable(handler) || is_int_like(builtin_value(handler)))
+                return;
+            for (int i = 0; i < 1000 && !sPending[aSignal].load(); ++i)
+                std::this_thread::sleep_for(std::chrono::microseconds{ 100 });
         }
         // (signals_check's: out of line, so that its check is cheap)
         bool signals_handle()

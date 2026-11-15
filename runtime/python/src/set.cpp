@@ -1012,7 +1012,20 @@ namespace neos::python_runtime
                         return result.release_ownership();
                     } },
                 { "update", true, arguments::Any, [](set_object* s, std::vector<object*> const& a) -> object*
-                    { for (auto o : a) if (update_internal(s, o) != 0) return nullptr; return none(); } }
+                    { for (auto o : a) if (update_internal(s, o) != 0) return nullptr; return none(); } },
+                // (set.__init__(iterable=()): emptied, then updated (set_init); a frozenset's is object's (it does nothing))
+                { "__init__", false, arguments::Any, [](set_object* s, std::vector<object*> const& a) -> object*
+                    {
+                        if (!is_set(as_object(s)))
+                            return none();
+                        if (a.size() > 1u)
+                            return error("TypeError", "set expected at most 1 argument, got " + std::to_string(a.size()));
+                        if (s->used != 0 && clear_internal(s) != 0)
+                            return nullptr;
+                        if (!a.empty() && update_internal(s, a[0]) != 0)
+                            return nullptr;
+                        return none();
+                    } }
             };
 
             object* call_set_method(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
@@ -1184,6 +1197,41 @@ namespace neos::python_runtime
                     --si.len;
                     retain(entry[i].key);
                     return entry[i].key;
+                };
+                // (__length_hint__ (setiter_len: the items left, 0 if the set changed size) and __reduce__ (setiter_reduce: iter of a
+                // list of the items left))
+                type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
+                {
+                    if (std::strcmp(aName, "__length_hint__") == 0)
+                        return make_function("__length_hint__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        {
+                            auto const& si = *reinterpret_cast<set_iterator_object*>(as<tuple_object>(aArgs)->items.at(0u));
+                            return make_int(si.set != nullptr && si.used == si.set->used ? si.len : 0);
+                        }, nullptr, aSelf);
+                    if (std::strcmp(aName, "__reduce__") == 0)
+                        return make_function("__reduce__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        {
+                            auto const self = as<tuple_object>(aArgs)->items.at(0u);
+                            auto& si = *reinterpret_cast<set_iterator_object*>(self);
+                            // (a copy of the iterator, so that the iterator itself is not exhausted)
+                            std::vector<object*> items;
+                            if (si.set != nullptr && si.used == si.set->used)
+                            {
+                                auto const entry = si.set->table;
+                                for (auto i = si.pos; i <= si.set->mask; ++i)
+                                    if (entry[i].key != nullptr && entry[i].key != dummy)
+                                        items.push_back((retain(entry[i].key), entry[i].key));
+                            }
+                            ref iterFunction{ fn_builtin("iter") };
+                            if (!iterFunction)
+                            {
+                                for (auto i : items)
+                                    release(i);
+                                return nullptr;
+                            }
+                            return make_tuple({ iterFunction.release_ownership(), make_tuple({ make_list(std::move(items)) }) });
+                        }, nullptr, aSelf);
+                    return error("AttributeError", std::string{ "'set_iterator' object has no attribute '" } + aName + "'");
                 };
                 return type;
             }

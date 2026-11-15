@@ -132,20 +132,48 @@ names the CPython sources it is derived from.
   objects.cpp          Objects/floatobject.c, Objects/complexobject.c,
                        Objects/longobject.c, Objects/rangeobject.c,
                        Objects/sliceobject.c, Objects/tupleobject.c,
-                       Objects/exceptions.c (BlockingIOError's
-                       characters_written), Python/bltinmodule.c,
+                       Objects/exceptions.c (OSError's members, str()
+                       and reduction: oserror_parse_args, oserror_init,
+                       OSError_str and OSError_reduce),
+                       Python/bltinmodule.c,
                        Python/pyhash.c (including its SipHash-1-3),
                        Modules/mathmodule.c and Modules/cmathmodule.c;
                        the reductions (pickling) of Objects/listobject.c,
                        Objects/dictobject.c, Objects/unicodeobject.c,
-                       Objects/methodobject.c and Objects/typeobject.c
+                       Objects/methodobject.c, Objects/typeobject.c and
+                       Objects/classobject.c (method_reduce);
+                       Objects/typeobject.c's object_set_class
   operator.cpp         Lib/heapq.py, Lib/copy.py and Modules/_operator.c
                        (itemgetter's, attrgetter's and methodcaller's
                        reductions)
   os.cpp               Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py,
-                       Modules/errnomodule.c (errno's Winsock codes) and
-                       Lib/os.py (PathLike, fsencode, fsdecode and
-                       get_exec_path)
+                       Modules/errnomodule.c (errno's Winsock codes),
+                       Lib/os.py (PathLike, fsencode, fsdecode,
+                       get_exec_path, _Environ (environ and environb),
+                       execl, execle, execlp, execlpe, execvp, execvpe and
+                       the spawn functions, renames, _exists and
+                       _get_exports_list), Modules/posixmodule.c
+                       (execv's and execve's arguments, the uid and gid
+                       converters, pathconf, fpathconf, confstr and their
+                       names; the arguments, errors and results of abort,
+                       chroot, ctermid, fdatasync, getpriority,
+                       setpriority, lockf, major, minor, makedev, mknod,
+                       posix_fallocate, posix_fadvise, pread, pwrite,
+                       readv, writev, preadv, pwritev, tcgetpgrp,
+                       tcsetpgrp, WCOREDUMP, WIFCONTINUED, getgrouplist,
+                       register_at_fork, posix_openpt, grantpt, unlockpt,
+                       ptsname, login_tty, forkpty, wait3, wait4, waitid,
+                       pipe2, getrandom, eventfd, eventfd_read,
+                       eventfd_write, memfd_create, sendfile,
+                       copy_file_range, splice, unshare, setns,
+                       pidfd_open, the xattr functions and the timerfd
+                       functions, and the constants), Modules/resource.c
+                       (the resource module), Lib/stat.py (UF_*, SF_*,
+                       FILE_ATTRIBUTE_* and _filemode_table) and
+                       Lib/pathlib/_local.py and _abc.py
+                       (Path's lchmod, symlink_to, hardlink_to, readlink,
+                       is_block_device, is_char_device, is_fifo,
+                       is_socket, owner, group and from_uri)
   pickle.cpp           Modules/_pickle.c, Modules/clinic/_pickle.c.h,
                        Objects/picklebufobject.c, Lib/pickle.py and
                        Lib/_compat_pickle.py
@@ -220,10 +248,11 @@ names the CPython sources it is derived from.
                        license: see below)
   text.cpp             Lib/textwrap.py
   textmodules.cpp      Lib/string.py (Template's pattern) and Modules/binascii.c
-                       (a2b_qp and b2a_qp)
+                       (a2b_qp, b2a_qp, a2b_uu and b2a_uu)
   threads.cpp          Lib/threading.py, Lib/_threading_local.py and
                        Modules/_threadmodule.c
-  time.cpp             Modules/timemodule.c
+  time.cpp             Modules/timemodule.c and Lib/_strptime.py (the
+                       warning of a day of month without a year)
   tomllib.cpp, tomllib_parser.cpp, tomllib_re.cpp and tomllib_types.cpp
                        Lib/tomllib (__init__.py, _parser.py, _re.py and
                        _types.py: SPDX-License-Identifier: MIT;

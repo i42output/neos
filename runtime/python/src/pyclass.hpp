@@ -125,8 +125,10 @@ namespace neos::python_runtime::detail::pyclass
         {
             return builtin("property")(method(aClass, aName, {}, [aGetter](arguments a) { return aGetter(a[0]); }));
         }
-        // (a class of the module: type(aName, aBases, namespace) (its metaclass: its bases' most derived); its docstring: the module's)
-        py make_class(char const* aName, std::vector<py> const& aBases, namespace_type const& aNamespace, char const* aQualname = nullptr) const
+        // (a class of the module: type(aName, aBases, namespace) (its metaclass: its bases' most derived, or aMetaclass (class C(B, 
+        // metaclass=M)) if that is more derived); its docstring: the module's)
+        py make_class(char const* aName, std::vector<py> const& aBases, namespace_type const& aNamespace, char const* aQualname = nullptr,
+            py const& aMetaclass = {}) const
         {
             std::vector<py> bases = aBases.empty() ? std::vector<py>{ builtin("object") } : aBases;
             // (bases that are not classes: their __mro_entries__'s (e.g. typing.NamedTuple's), as the class statement resolves them)
@@ -145,7 +147,7 @@ namespace neos::python_runtime::detail::pyclass
                 if (resolved)
                     bases = std::move(entries);
             }
-            py meta = builtin("type");
+            py meta = aMetaclass.empty() ? builtin("type") : aMetaclass;
             for (auto const& b : bases)
             {
                 py const t = type_of(b);

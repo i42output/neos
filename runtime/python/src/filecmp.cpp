@@ -160,6 +160,9 @@ namespace neos::python_runtime::detail::filecmp_module
         void make_filecmp()
         {
             static module_writer const& w = writer("filecmp");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("filecmp", "filterfalse", import_attribute("itertools", "filterfalse"));
+            define("filecmp", "GenericAlias", import_attribute("types", "GenericAlias"));
             define("filecmp", "__all__", py_list({ S<"clear_cache">(), S<"cmp">(), S<"dircmp">(), S<"cmpfiles">(), S<"DEFAULT_IGNORES">() }));
             define("filecmp", "_cache", py_dict());
             define("filecmp", "BUFSIZE", (I<8>()) * (I<1024>()));
@@ -338,8 +341,8 @@ namespace neos::python_runtime::detail::filecmp_module
                         a_ = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("left_list")), self.attr("left_list")));
                         b = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("right_list")), self.attr("right_list")));
                         self.set_attr("common", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (B<"filter">())(b.attr("__contains__"), a_))));
-                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(b.attr("__contains__"), a_))));
-                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(a_.attr("__contains__"), b))));
+                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (G<"filecmp.filterfalse">())(b.attr("__contains__"), a_))));
+                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (G<"filecmp.filterfalse">())(a_.attr("__contains__"), b))));
                         return none();
                     }) },
                 { "phase2", w.method("dircmp", "phase2", {  }, [](arguments a) -> py
@@ -818,8 +821,8 @@ namespace neos::python_runtime::detail::filecmp_module
                         a_ = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("left_list")), self.attr("left_list")));
                         b = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("right_list")), self.attr("right_list")));
                         self.set_attr("common", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (B<"filter">())(b.attr("__contains__"), a_))));
-                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(b.attr("__contains__"), a_))));
-                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(a_.attr("__contains__"), b))));
+                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (G<"filecmp.filterfalse">())(b.attr("__contains__"), a_))));
+                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (G<"filecmp.filterfalse">())(a_.attr("__contains__"), b))));
                         return none();
                     }) }, { "left_only", w.method("dircmp", "phase1", {  }, [](arguments a) -> py
                     {
@@ -829,8 +832,8 @@ namespace neos::python_runtime::detail::filecmp_module
                         a_ = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("left_list")), self.attr("left_list")));
                         b = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("right_list")), self.attr("right_list")));
                         self.set_attr("common", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (B<"filter">())(b.attr("__contains__"), a_))));
-                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(b.attr("__contains__"), a_))));
-                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(a_.attr("__contains__"), b))));
+                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (G<"filecmp.filterfalse">())(b.attr("__contains__"), a_))));
+                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (G<"filecmp.filterfalse">())(a_.attr("__contains__"), b))));
                         return none();
                     }) }, { "right_only", w.method("dircmp", "phase1", {  }, [](arguments a) -> py
                     {
@@ -840,8 +843,8 @@ namespace neos::python_runtime::detail::filecmp_module
                         a_ = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("left_list")), self.attr("left_list")));
                         b = (B<"dict">())((B<"zip">())((B<"map">())((Mod<"os">().attr("path")).attr("normcase"), self.attr("right_list")), self.attr("right_list")));
                         self.set_attr("common", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (B<"filter">())(b.attr("__contains__"), a_))));
-                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(b.attr("__contains__"), a_))));
-                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (Mod<"itertools">().attr("filterfalse"))(a_.attr("__contains__"), b))));
+                        self.set_attr("left_only", (B<"list">())((B<"map">())(a_.attr("__getitem__"), (G<"filecmp.filterfalse">())(b.attr("__contains__"), a_))));
+                        self.set_attr("right_only", (B<"list">())((B<"map">())(b.attr("__getitem__"), (G<"filecmp.filterfalse">())(a_.attr("__contains__"), b))));
                         return none();
                     }) }, { "left_list", w.method("dircmp", "phase0", {  }, [](arguments a) -> py
                     {
@@ -871,7 +874,7 @@ namespace neos::python_runtime::detail::filecmp_module
                         self.attr("methodmap")[attr](self);
                         return (B<"getattr">())(self, attr);
                     }) },
-                { "__class_getitem__", (B<"classmethod">())(Mod<"types">().attr("GenericAlias")) }, }));
+                { "__class_getitem__", (B<"classmethod">())(G<"filecmp.GenericAlias">()) }, }));
 
             define("filecmp", "cmpfiles", w.function("cmpfiles", "cmpfiles", { py_positional("a"), py_positional("b"), py_positional("common"), py_positional("shallow", boolean(true)) }, [](arguments a) -> py
                 {
@@ -930,7 +933,7 @@ namespace neos::python_runtime::detail::filecmp_module
                 {
                     py flist = a[0];
                     py skip = a[1];
-                    return (B<"list">())((Mod<"itertools">().attr("filterfalse"))(skip.attr("__contains__"), flist));
+                    return (B<"list">())((G<"filecmp.filterfalse">())(skip.attr("__contains__"), flist));
                 }));
 
             // Demonstration and testing.
@@ -980,8 +983,6 @@ namespace neos::python_runtime::detail::filecmp_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("stat", py{ fn_import("stat") }.release());
-                aAttributes.emplace_back("filterfalse", import_attribute("itertools", "filterfalse").release());
-                aAttributes.emplace_back("GenericAlias", import_attribute("types", "GenericAlias").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -990,6 +991,14 @@ namespace neos::python_runtime::detail::filecmp_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("filecmp", filecmp_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("filecmp", filecmp_module, assigned);
     }
 }

@@ -148,8 +148,12 @@ namespace neos::python_runtime::detail::pkgutil_module
         void make_pkgutil()
         {
             static module_writer const& w = writer("pkgutil");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("pkgutil", "namedtuple", import_attribute("collections", "namedtuple"));
+            define("pkgutil", "simplegeneric", import_attribute("functools", "singledispatch"));
+            define("pkgutil", "ModuleType", import_attribute("types", "ModuleType"));
             define("pkgutil", "__all__", py_list({ S<"get_importer">(), S<"iter_importers">(), S<"get_loader">(), S<"find_loader">(), S<"walk_packages">(), S<"iter_modules">(), S<"get_data">(), S<"read_code">(), S<"extend_path">(), S<"ModuleInfo">() }));
-            define("pkgutil", "ModuleInfo", (Mod<"collections">().attr("namedtuple"))(S<"ModuleInfo">(), S<"module_finder name ispkg">()));
+            define("pkgutil", "ModuleInfo", (G<"pkgutil.namedtuple">())(S<"ModuleInfo">(), S<"module_finder name ispkg">()));
             (G<"pkgutil.ModuleInfo">()).set_attr("__doc__", S<"A namedtuple with minimal info about a module.">());
             define("pkgutil", "read_code", w.function("read_code", "read_code", { py_positional("stream") }, [](arguments a) -> py
                 {
@@ -280,7 +284,7 @@ namespace neos::python_runtime::detail::pkgutil_module
                     });
                 }));
 
-            define("pkgutil", "iter_importer_modules", (Mod<"functools">().attr("singledispatch"))(w.function("iter_importer_modules", "iter_importer_modules", { py_positional("importer"), py_positional("prefix", S<"">()) }, [](arguments a) -> py
+            define("pkgutil", "iter_importer_modules", (G<"pkgutil.simplegeneric">())(w.function("iter_importer_modules", "iter_importer_modules", { py_positional("importer"), py_positional("prefix", S<"">()) }, [](arguments a) -> py
                 {
                     py importer = a[0];
                     py prefix = a[1];
@@ -491,7 +495,7 @@ namespace neos::python_runtime::detail::pkgutil_module
                             return none();
                         }
                     }
-                    if (isinstance(module_or_name, Mod<"types">().attr("ModuleType")))
+                    if (isinstance(module_or_name, G<"pkgutil.ModuleType">()))
                     {
                         module = module_or_name;
                         loader = (B<"getattr">())(module, S<"__loader__">(), none());
@@ -828,15 +832,12 @@ namespace neos::python_runtime::detail::pkgutil_module
                 }
                 if (auto const doc = pkgutil_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("namedtuple", import_attribute("collections", "namedtuple").release());
-                aAttributes.emplace_back("simplegeneric", import_attribute("functools", "singledispatch").release());
                 aAttributes.emplace_back("importlib", py{ fn_import("importlib") }.release());
                 aAttributes.emplace_back("importlib", py{ fn_import("importlib") }.release());
                 aAttributes.emplace_back("importlib", py{ fn_import("importlib") }.release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
-                aAttributes.emplace_back("ModuleType", import_attribute("types", "ModuleType").release());
                 aAttributes.emplace_back("warnings", py{ fn_import("warnings") }.release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
@@ -846,6 +847,14 @@ namespace neos::python_runtime::detail::pkgutil_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("pkgutil", pkgutil_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("pkgutil", pkgutil_module, assigned);
     }
 }

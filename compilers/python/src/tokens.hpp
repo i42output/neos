@@ -69,6 +69,13 @@ namespace neos::compilers::python::tokens
         return sKeywords;
     }
 
+    // (the last character of the escape in a string literal whose backslash is at aBackslash: the character after it, or a CRLF's LF
+    // (a line continued by a backslash: CPython reads a CRLF as LF))
+    inline std::size_t escape_last(std::string_view aText, std::size_t aBackslash)
+    {
+        return aBackslash + 2u < aText.size() && aText[aBackslash + 1u] == '\r' && aText[aBackslash + 2u] == '\n' ? aBackslash + 2u : aBackslash + 1u;
+    }
+
     // (the end of a string literal whose quote is at aStart)
     inline std::size_t string_end(std::string const& aText, std::size_t aStart)
     {
@@ -78,7 +85,7 @@ namespace neos::compilers::python::tokens
         for (; j < aText.size(); ++j)
         {
             if (aText[j] == '\\')
-                ++j;
+                j = escape_last(aText, j);
             else if (aText[j] == q && (!triple || (j + 2u < aText.size() && aText[j + 1u] == q && aText[j + 2u] == q)))
                 return triple ? j + 3u : j + 1u;
             else if (!triple && aText[j] == '\n')
@@ -163,7 +170,7 @@ namespace neos::compilers::python::tokens
             if (auto const named = raw ? j : named_escape_end(aText, j); named != j)
                 j = named - 1u;
             else if (aText[j] == '\\' && j + 1u < aText.size() && aText[j + 1u] != '{' && aText[j + 1u] != '}')
-                ++j;
+                j = escape_last(aText, j);
             else if (aText[j] == '{')
             {
                 if (j + 1u < aText.size() && aText[j + 1u] == '{')

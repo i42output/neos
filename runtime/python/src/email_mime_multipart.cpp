@@ -160,11 +160,13 @@ namespace neos::python_runtime::detail::email_mime_multipart_module
         void make_email_mime_multipart()
         {
             static module_writer const& w = writer("email.mime.multipart");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.mime.multipart", "MIMEBase", import_attribute("email.mime.base", "MIMEBase"));
             // Copyright (C) 2002-2006 Python Software Foundation
             // Author: Barry Warsaw
             // Contact: email-sig@python.org
             define("email.mime.multipart", "__all__", py_list({ S<"MIMEMultipart">() }));
-            define("email.mime.multipart", "MIMEMultipart", w.make_class("MIMEMultipart", { Mod<"email.mime.base">().attr("MIMEBase") }, {
+            define("email.mime.multipart", "MIMEMultipart", w.make_class("MIMEMultipart", { G<"email.mime.multipart.MIMEBase">() }, {
                 { "__init__", w.method("MIMEMultipart", "__init__", { py_positional("_subtype", S<"mixed">()), py_positional("boundary", none()), py_positional("_subparts", none()), py_keyword("policy", none()) }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -174,7 +176,7 @@ namespace neos::python_runtime::detail::email_mime_multipart_module
                         py policy = a[4];
                         py _params = a[5];
                         py p;
-                        call_ex((Mod<"email.mime.base">().attr("MIMEBase")).attr("__init__"), { self, S<"multipart">(), _subtype }, py{}, _params, { { "policy", policy } });
+                        call_ex((G<"email.mime.multipart.MIMEBase">()).attr("__init__"), { self, S<"multipart">(), _subtype }, py{}, _params, { { "policy", policy } });
                         // Initialise _payload to an empty list as the Message superclass's
                         // implementation of is_multipart assumes that _payload is a list for
                         // multipart messages.
@@ -207,7 +209,6 @@ namespace neos::python_runtime::detail::email_mime_multipart_module
                 }
                 if (auto const doc = email_mime_multipart_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("MIMEBase", import_attribute("email.mime.base", "MIMEBase").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -216,6 +217,14 @@ namespace neos::python_runtime::detail::email_mime_multipart_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.mime.multipart", email_mime_multipart_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.mime.multipart", email_mime_multipart_module, assigned);
     }
 }

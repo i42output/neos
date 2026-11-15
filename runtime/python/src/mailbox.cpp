@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::mailbox_module
         void make_mailbox()
         {
             static module_writer const& w = writer("mailbox");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("mailbox", "GenericAlias", import_attribute("types", "GenericAlias"));
             // Notes for authors of new mailbox subclasses:
             // 
             // Remember to fsync() changes to disk before closing a modified file
@@ -635,7 +637,7 @@ namespace neos::python_runtime::detail::mailbox_module
                         }
                         return none();
                     }) },
-                { "__class_getitem__", (B<"classmethod">())(Mod<"types">().attr("GenericAlias")) }, }));
+                { "__class_getitem__", (B<"classmethod">())(G<"mailbox.GenericAlias">()) }, }));
 
                 // This method is for backward compatibility only.
             define("mailbox", "Maildir", w.make_class("Maildir", { G<"mailbox.Mailbox">() }, {
@@ -4340,7 +4342,7 @@ namespace neos::python_runtime::detail::mailbox_module
                         }
                         return self.attr("_file").attr("closed");
                     })) },
-                { "__class_getitem__", (B<"classmethod">())(Mod<"types">().attr("GenericAlias")) }, }));
+                { "__class_getitem__", (B<"classmethod">())(G<"mailbox.GenericAlias">()) }, }));
 
             define("mailbox", "_PartialFile", w.make_class("_PartialFile", { G<"mailbox._ProxyFile">() }, {
                 { "__init__", w.method("_PartialFile", "__init__", { py_positional("f"), py_positional("start", none()), py_positional("stop", none()) }, [](arguments a) -> py
@@ -4607,7 +4609,6 @@ namespace neos::python_runtime::detail::mailbox_module
                 aAttributes.emplace_back("email", py{ fn_import("email") }.release());
                 aAttributes.emplace_back("io", py{ fn_import("io") }.release());
                 aAttributes.emplace_back("contextlib", py{ fn_import("contextlib") }.release());
-                aAttributes.emplace_back("GenericAlias", import_attribute("types", "GenericAlias").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -4616,6 +4617,14 @@ namespace neos::python_runtime::detail::mailbox_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("mailbox", mailbox_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("mailbox", mailbox_module, assigned);
     }
 }

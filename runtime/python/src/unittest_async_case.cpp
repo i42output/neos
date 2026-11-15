@@ -152,6 +152,8 @@ namespace neos::python_runtime::detail::unittest_async_case_module
         void make_unittest_async_case()
         {
             static module_writer const& w = writer("unittest.async_case");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.async_case", "TestCase", import_attribute("unittest.case", "TestCase"));
             define("unittest.async_case", "__unittest", boolean(true));
                 // Names intentionally have a long prefix
                 // to reduce a chance of clashing with user-defined attributes
@@ -177,7 +179,7 @@ namespace neos::python_runtime::detail::unittest_async_case_module
                 // should reset a policy in every test module
                 // by calling asyncio.set_event_loop_policy(None) in tearDownModule()
                 // or set loop_factory=asyncio.EventLoop
-            define("unittest.async_case", "IsolatedAsyncioTestCase", w.make_class("IsolatedAsyncioTestCase", { Mod<"unittest.case">().attr("TestCase") }, {
+            define("unittest.async_case", "IsolatedAsyncioTestCase", w.make_class("IsolatedAsyncioTestCase", { G<"unittest.async_case.TestCase">() }, {
                 { "loop_factory", none() },
                 { "__init__", w.method("IsolatedAsyncioTestCase", "__init__", { py_positional("methodName", S<"runTest">()) }, [](arguments a) -> py
                     {
@@ -383,7 +385,6 @@ namespace neos::python_runtime::detail::unittest_async_case_module
                 aAttributes.emplace_back("contextvars", py{ fn_import("contextvars") }.release());
                 aAttributes.emplace_back("inspect", py{ fn_import("inspect") }.release());
                 aAttributes.emplace_back("warnings", py{ fn_import("warnings") }.release());
-                aAttributes.emplace_back("TestCase", import_attribute("unittest.case", "TestCase").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -392,6 +393,14 @@ namespace neos::python_runtime::detail::unittest_async_case_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.async_case", unittest_async_case_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.async_case", unittest_async_case_module, assigned);
     }
 }

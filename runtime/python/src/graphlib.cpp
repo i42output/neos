@@ -147,6 +147,8 @@ namespace neos::python_runtime::detail::graphlib_module
         void make_graphlib()
         {
             static module_writer const& w = writer("graphlib");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("graphlib", "GenericAlias", import_attribute("types", "GenericAlias"));
             define("graphlib", "__all__", py_list({ S<"TopologicalSorter">(), S<"CycleError">() }));
             define("graphlib", "_NODE_OUT", I<-1>());
             define("graphlib", "_NODE_DONE", I<-2>());
@@ -446,7 +448,7 @@ namespace neos::python_runtime::detail::graphlib_module
                             return none();
                         });
                     }) },
-                { "__class_getitem__", (B<"classmethod">())(Mod<"types">().attr("GenericAlias")) }, }));
+                { "__class_getitem__", (B<"classmethod">())(G<"graphlib.GenericAlias">()) }, }));
         }
 
         bool graphlib_module(std::vector<std::pair<std::string, object*>>& aAttributes)
@@ -461,7 +463,6 @@ namespace neos::python_runtime::detail::graphlib_module
                 }
                 if (auto const doc = graphlib_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("GenericAlias", import_attribute("types", "GenericAlias").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -470,6 +471,14 @@ namespace neos::python_runtime::detail::graphlib_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("graphlib", graphlib_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("graphlib", graphlib_module, assigned);
     }
 }

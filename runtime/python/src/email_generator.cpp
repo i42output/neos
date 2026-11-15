@@ -160,6 +160,12 @@ namespace neos::python_runtime::detail::email_generator_module
         void make_email_generator()
         {
             static module_writer const& w = writer("email.generator");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.generator", "deepcopy", import_attribute("copy", "deepcopy"));
+            define("email.generator", "StringIO", import_attribute("io", "StringIO"));
+            define("email.generator", "BytesIO", import_attribute("io", "BytesIO"));
+            define("email.generator", "_has_surrogates", import_attribute("email.utils", "_has_surrogates"));
+            define("email.generator", "HeaderWriteError", import_attribute("email.errors", "HeaderWriteError"));
             // Copyright (C) 2001-2010 Python Software Foundation
             // Author: Barry Warsaw
             // Contact: email-sig@python.org
@@ -300,7 +306,7 @@ namespace neos::python_runtime::detail::email_generator_module
                 { "_new_buffer", w.method("Generator", "_new_buffer", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (Mod<"io">().attr("StringIO"))();
+                        return (G<"email.generator.StringIO">())();
                     }) },
                 { "_encode", w.method("Generator", "_encode", { py_positional("s") }, [](arguments a) -> py
                     {
@@ -366,7 +372,7 @@ namespace neos::python_runtime::detail::email_generator_module
                         // If we munged the cte, copy the message again and re-fix the CTE.
                         if (munge_cte.truthy())
                         {
-                            msg = (Mod<"copy">().attr("deepcopy"))(msg);
+                            msg = (G<"email.generator.deepcopy">())(msg);
                             // Preserve the header order if the CTE header already exists.
                             if (msg.method("get", { S<"content-transfer-encoding">() }).is_none())
                             {
@@ -436,11 +442,11 @@ namespace neos::python_runtime::detail::email_generator_module
                                 linesep = self.attr("policy").attr("linesep");
                                 if (!folded.method("endswith", { self.attr("policy").attr("linesep") }).truthy())
                                 {
-                                    py_raise((Mod<"email.errors">().attr("HeaderWriteError"))(S(std::string{ "folded header does not end with " } + linesep.repr() + ": " + folded.repr())));
+                                    py_raise((G<"email.generator.HeaderWriteError">())(S(std::string{ "folded header does not end with " } + linesep.repr() + ": " + folded.repr())));
                                 }
                                 if ((G<"email.generator.NEWLINE_WITHOUT_FWSP">()).method("search", { folded.method("removesuffix", { linesep }) }).truthy())
                                 {
-                                    py_raise((Mod<"email.errors">().attr("HeaderWriteError"))(S(std::string{ "folded header contains newline: " } + folded.repr())));
+                                    py_raise((G<"email.generator.HeaderWriteError">())(S(std::string{ "folded header contains newline: " } + folded.repr())));
                                 }
                             }
                             self.method("write", { folded });
@@ -464,14 +470,14 @@ namespace neos::python_runtime::detail::email_generator_module
                         {
                             py_raise((B<"TypeError">())((S<"string payload expected: %s">()) % (B<"type">())(payload)));
                         }
-                        if ((Mod<"email.utils">().attr("_has_surrogates"))(msg.attr("_payload")).truthy())
+                        if ((G<"email.generator._has_surrogates">())(msg.attr("_payload")).truthy())
                         {
                             charset = msg.method("get_param", { S<"charset">() });
                             if (!charset.is_none())
                             {
                                 // XXX: This copy stuff is an ugly hack to avoid modifying the
                                 // existing message.
-                                msg = (Mod<"copy">().attr("deepcopy"))(msg);
+                                msg = (G<"email.generator.deepcopy">())(msg);
                                 del_item(msg, S<"content-transfer-encoding">());
                                 msg.method("set_payload", { msg.attr("_payload"), charset });
                                 payload = msg.method("get_payload");
@@ -500,14 +506,14 @@ namespace neos::python_runtime::detail::email_generator_module
                         {
                             py_raise((B<"TypeError">())((S<"string payload expected: %s">()) % (B<"type">())(payload)));
                         }
-                        if ((Mod<"email.utils">().attr("_has_surrogates"))(msg.attr("_payload")).truthy())
+                        if ((G<"email.generator._has_surrogates">())(msg.attr("_payload")).truthy())
                         {
                             charset = msg.method("get_param", { S<"charset">() });
                             if (!charset.is_none())
                             {
                                 // XXX: This copy stuff is an ugly hack to avoid modifying the
                                 // existing message.
-                                msg = (Mod<"copy">().attr("deepcopy"))(msg);
+                                msg = (G<"email.generator.deepcopy">())(msg);
                                 del_item(msg, S<"content-transfer-encoding">());
                                 msg.method("set_payload", { msg.attr("_payload"), charset });
                                 payload = msg.method("get_payload");
@@ -760,7 +766,7 @@ namespace neos::python_runtime::detail::email_generator_module
                 { "_new_buffer", w.method("BytesGenerator", "_new_buffer", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (Mod<"io">().attr("BytesIO"))();
+                        return (G<"email.generator.BytesIO">())();
                     }) },
                 { "_encode", w.method("BytesGenerator", "_encode", { py_positional("s") }, [](arguments a) -> py
                     {
@@ -787,11 +793,11 @@ namespace neos::python_runtime::detail::email_generator_module
                                 linesep = self.attr("policy").attr("linesep").method("encode");
                                 if (!folded.method("endswith", { linesep }).truthy())
                                 {
-                                    py_raise((Mod<"email.errors">().attr("HeaderWriteError"))(S(std::string{ "folded header does not end with " } + linesep.repr() + ": " + folded.repr())));
+                                    py_raise((G<"email.generator.HeaderWriteError">())(S(std::string{ "folded header does not end with " } + linesep.repr() + ": " + folded.repr())));
                                 }
                                 if ((G<"email.generator.NEWLINE_WITHOUT_FWSP_BYTES">()).method("search", { folded.method("removesuffix", { linesep }) }).truthy())
                                 {
-                                    py_raise((Mod<"email.errors">().attr("HeaderWriteError"))(S(std::string{ "folded header contains newline: " } + folded.repr())));
+                                    py_raise((G<"email.generator.HeaderWriteError">())(S(std::string{ "folded header contains newline: " } + folded.repr())));
                                 }
                             }
                             self.attr("_fp").method("write", { folded });
@@ -808,7 +814,7 @@ namespace neos::python_runtime::detail::email_generator_module
                         {
                             return none();
                         }
-                        if (((Mod<"email.utils">().attr("_has_surrogates"))(msg.attr("_payload")).truthy() && (!(self.attr("policy").attr("cte_type") == (S<"7bit">())))))
+                        if (((G<"email.generator._has_surrogates">())(msg.attr("_payload")).truthy() && (!(self.attr("policy").attr("cte_type") == (S<"7bit">())))))
                         {
                             if (self.attr("_mangle_from_").truthy())
                             {
@@ -830,7 +836,7 @@ namespace neos::python_runtime::detail::email_generator_module
                         {
                             return none();
                         }
-                        if (((Mod<"email.utils">().attr("_has_surrogates"))(msg.attr("_payload")).truthy() && (!(self.attr("policy").attr("cte_type") == (S<"7bit">())))))
+                        if (((G<"email.generator._has_surrogates">())(msg.attr("_payload")).truthy() && (!(self.attr("policy").attr("cte_type") == (S<"7bit">())))))
                         {
                             if (self.attr("_mangle_from_").truthy())
                             {
@@ -922,11 +928,6 @@ namespace neos::python_runtime::detail::email_generator_module
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("random", py{ fn_import("random") }.release());
-                aAttributes.emplace_back("deepcopy", import_attribute("copy", "deepcopy").release());
-                aAttributes.emplace_back("StringIO", import_attribute("io", "StringIO").release());
-                aAttributes.emplace_back("BytesIO", import_attribute("io", "BytesIO").release());
-                aAttributes.emplace_back("_has_surrogates", import_attribute("email.utils", "_has_surrogates").release());
-                aAttributes.emplace_back("HeaderWriteError", import_attribute("email.errors", "HeaderWriteError").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -935,6 +936,14 @@ namespace neos::python_runtime::detail::email_generator_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.generator", email_generator_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.generator", email_generator_module, assigned);
     }
 }

@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::ftplib_module
         void make_ftplib()
         {
             static module_writer const& w = writer("ftplib");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("ftplib", "_GLOBAL_DEFAULT_TIMEOUT", import_attribute("socket", "_GLOBAL_DEFAULT_TIMEOUT"));
             // 
             // Changes and improvements suggested by Steve Majewski.
             // Modified by Jack to work on the mac.
@@ -220,7 +222,7 @@ namespace neos::python_runtime::detail::ftplib_module
                 { "welcome", none() },
                 { "passiveserver", boolean(true) },
                 { "trust_server_pasv_ipv4_address", boolean(false) },
-                { "__init__", w.method("FTP", "__init__", { py_positional("host", S<"">()), py_positional("user", S<"">()), py_positional("passwd", S<"">()), py_positional("acct", S<"">()), py_positional("timeout", Mod<"socket">().attr("_GLOBAL_DEFAULT_TIMEOUT")), py_positional("source_address", none()), py_keyword("encoding", S<"utf-8">()) }, [](arguments a) -> py
+                { "__init__", w.method("FTP", "__init__", { py_positional("host", S<"">()), py_positional("user", S<"">()), py_positional("passwd", S<"">()), py_positional("acct", S<"">()), py_positional("timeout", G<"ftplib._GLOBAL_DEFAULT_TIMEOUT">()), py_positional("source_address", none()), py_keyword("encoding", S<"utf-8">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py host = a[1];
@@ -570,7 +572,7 @@ namespace neos::python_runtime::detail::ftplib_module
                         {
                             resp = self.method("sendeprt", { host, port });
                         }
-                        if (!self.attr("timeout").is((Mod<"socket">().attr("_GLOBAL_DEFAULT_TIMEOUT"))))
+                        if (!self.attr("timeout").is((G<"ftplib._GLOBAL_DEFAULT_TIMEOUT">())))
                         {
                             sock.method("settimeout", { self.attr("timeout") });
                         }
@@ -683,7 +685,7 @@ namespace neos::python_runtime::detail::ftplib_module
                                     auto const items8 = unpack(sock.method("accept"), 2);
                                     conn = items8[0];
                                     sockaddr = items8[1];
-                                    if (!self.attr("timeout").is((Mod<"socket">().attr("_GLOBAL_DEFAULT_TIMEOUT"))))
+                                    if (!self.attr("timeout").is((G<"ftplib._GLOBAL_DEFAULT_TIMEOUT">())))
                                     {
                                         conn.method("settimeout", { self.attr("timeout") });
                                     }
@@ -1597,7 +1599,6 @@ namespace neos::python_runtime::detail::ftplib_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("socket", py{ fn_import("socket") }.release());
-                aAttributes.emplace_back("_GLOBAL_DEFAULT_TIMEOUT", import_attribute("socket", "_GLOBAL_DEFAULT_TIMEOUT").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -1606,6 +1607,14 @@ namespace neos::python_runtime::detail::ftplib_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("ftplib", ftplib_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("ftplib", ftplib_module, assigned);
     }
 }

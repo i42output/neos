@@ -148,12 +148,14 @@ namespace neos::python_runtime::detail::tomllib_module
         void make_tomllib()
         {
             static module_writer const& w = writer("tomllib");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("tomllib", "TOMLDecodeError", import_attribute("tomllib._parser", "TOMLDecodeError"));
             // SPDX-License-Identifier: MIT
             // SPDX-FileCopyrightText: 2021 Taneli Hukkinen
             // Licensed to PSF under a Contributor Agreement.
             define("tomllib", "__all__", py_tuple({ S<"loads">(), S<"load">(), S<"TOMLDecodeError">() }));
             // Pretend this exception was created here.
-            (Mod<"tomllib._parser">().attr("TOMLDecodeError")).set_attr("__module__", S<"tomllib">());
+            (G<"tomllib.TOMLDecodeError">()).set_attr("__module__", S<"tomllib">());
         }
 
         bool tomllib_module(std::vector<std::pair<std::string, object*>>& aAttributes)
@@ -168,7 +170,6 @@ namespace neos::python_runtime::detail::tomllib_module
                 }
                 if (auto const doc = tomllib_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("TOMLDecodeError", import_attribute("tomllib._parser", "TOMLDecodeError").release());
                 aAttributes.emplace_back("load", import_attribute("tomllib._parser", "load").release());
                 aAttributes.emplace_back("loads", import_attribute("tomllib._parser", "loads").release());
                 for (auto const& [name, value] : s.attributes)
@@ -179,6 +180,14 @@ namespace neos::python_runtime::detail::tomllib_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("tomllib", tomllib_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("tomllib", tomllib_module, assigned);
     }
 }

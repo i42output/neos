@@ -210,18 +210,19 @@ namespace neos::python_runtime
                                 return error("TypeError", "__setstate__() takes exactly one argument (" + std::to_string(aArgs.size() - 1u) + " given)");
                             auto& p = as_partial(aArgs[0]);
                             auto const state = aArgs[1];
-                            if (kind_of(state) != NEOS_PY_TUPLE)
-                                return error("TypeError", "argument to __setstate__ must be a tuple");
-                            auto const& items = as<tuple_object>(state)->items;
+                            if (kind_of(builtin_value(state)) != NEOS_PY_TUPLE)
+                                return error("TypeError", "invalid partial state");
+                            // (as CPython's partial_setstate: a tuple of 4 (callable, tuple, dict or None, dict or None), else "invalid partial state")
+                            auto const& items = as<tuple_object>(builtin_value(state))->items;
                             if (items.size() != 4u)
-                                return error("TypeError", "expected 4 items in state, got " + std::to_string(items.size()));
+                                return error("TypeError", "invalid partial state");
                             auto const fn = items[0];
                             auto const fnargs = items[1];
                             auto const kw = items[2];
                             auto const dict = items[3];
                             ref const callable{ call_with(fn_builtin("callable"), { borrowed(fn) }) };
                             if (!callable || truth(callable.get()) != 1 || kind_of(builtin_value(fnargs)) != NEOS_PY_TUPLE ||
-                                (kw != none() && kind_of(builtin_value(kw)) != NEOS_PY_DICT))
+                                (kw != none() && kind_of(builtin_value(kw)) != NEOS_PY_DICT) || (dict != none() && kind_of(builtin_value(dict)) != NEOS_PY_DICT))
                                 return error("TypeError", "invalid partial state");
                             std::vector<object*> args;
                             for (auto a : as<tuple_object>(builtin_value(fnargs))->items)
@@ -431,6 +432,17 @@ namespace neos::python_runtime
                         return make_function(aName, lru_method, reinterpret_cast<void*>(1), aSelf);
                     if (std::strcmp(aName, "__wrapped__") == 0)
                         return borrowed(lru.function);
+                    // (pickling: by its qualified name (CPython's lru_cache_reduce); copying: itself (lru_cache_copy and lru_cache_deepcopy))
+                    if (std::strcmp(aName, "__reduce__") == 0 || std::strcmp(aName, "__reduce_ex__") == 0)
+                        return make_function(aName, [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        {
+                            return getattr(as<tuple_object>(aArgs)->items.at(0), "__qualname__");
+                        }, nullptr, aSelf);
+                    if (std::strcmp(aName, "__copy__") == 0 || std::strcmp(aName, "__deepcopy__") == 0)
+                        return make_function(aName, [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                        {
+                            return borrowed(as<tuple_object>(aArgs)->items.at(0));
+                        }, nullptr, aSelf);
                     if (std::strcmp(aName, "cache_parameters") == 0)
                         return make_function(aName, [](neos_py_context*, void*, object* aArgs, object*) -> object*
                         {

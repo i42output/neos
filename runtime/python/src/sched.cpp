@@ -147,8 +147,12 @@ namespace neos::python_runtime::detail::sched_module
         void make_sched()
         {
             static module_writer const& w = writer("sched");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("sched", "namedtuple", import_attribute("collections", "namedtuple"));
+            define("sched", "count", import_attribute("itertools", "count"));
+            define("sched", "_time", import_attribute("time", "monotonic"));
             define("sched", "__all__", py_list({ S<"scheduler">() }));
-            define("sched", "Event", (Mod<"collections">().attr("namedtuple"))(S<"Event">(), S<"time, priority, sequence, action, argument, kwargs">()));
+            define("sched", "Event", (G<"sched.namedtuple">())(S<"Event">(), S<"time, priority, sequence, action, argument, kwargs">()));
             (G<"sched.Event">()).attr("time").set_attr("__doc__", S<"Numeric type compatible with the return value of the\ntimefunc function passed to the constructor.">());
             (G<"sched.Event">()).attr("priority").set_attr("__doc__", S<"Events scheduled for the same time will be executed\nin the order of their priority.">());
             (G<"sched.Event">()).attr("sequence").set_attr("__doc__", S<"A continually increasing sequence number that\n    separates events if time and priority are equal.">());
@@ -157,7 +161,7 @@ namespace neos::python_runtime::detail::sched_module
             (G<"sched.Event">()).attr("kwargs").set_attr("__doc__", S<"kwargs is a dictionary holding the keyword\narguments for the action.">());
             define("sched", "_sentinel", (B<"object">())());
             define("sched", "scheduler", w.make_class("scheduler", {  }, {
-                { "__init__", w.method("scheduler", "__init__", { py_positional("timefunc", Mod<"time">().attr("monotonic")), py_positional("delayfunc", Mod<"time">().attr("sleep")) }, [](arguments a) -> py
+                { "__init__", w.method("scheduler", "__init__", { py_positional("timefunc", G<"sched._time">()), py_positional("delayfunc", Mod<"time">().attr("sleep")) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py timefunc = a[1];
@@ -166,7 +170,7 @@ namespace neos::python_runtime::detail::sched_module
                         self.set_attr("_lock", (Mod<"threading">().attr("RLock"))());
                         self.set_attr("timefunc", timefunc);
                         self.set_attr("delayfunc", delayfunc);
-                        self.set_attr("_sequence_generator", (Mod<"itertools">().attr("count"))());
+                        self.set_attr("_sequence_generator", (G<"sched.count">())());
                         return none();
                     }) },
                 { "enterabs", w.method("scheduler", "enterabs", { py_positional("time"), py_positional("priority"), py_positional("action"), py_positional("argument", py_tuple()), py_positional("kwargs", G<"sched._sentinel">()) }, [](arguments a) -> py
@@ -423,10 +427,7 @@ namespace neos::python_runtime::detail::sched_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("heapq", py{ fn_import("heapq") }.release());
-                aAttributes.emplace_back("namedtuple", import_attribute("collections", "namedtuple").release());
-                aAttributes.emplace_back("count", import_attribute("itertools", "count").release());
                 aAttributes.emplace_back("threading", py{ fn_import("threading") }.release());
-                aAttributes.emplace_back("_time", import_attribute("time", "monotonic").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -435,6 +436,14 @@ namespace neos::python_runtime::detail::sched_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("sched", sched_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("sched", sched_module, assigned);
     }
 }

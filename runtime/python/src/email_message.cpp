@@ -160,6 +160,11 @@ namespace neos::python_runtime::detail::email_message_module
         void make_email_message()
         {
             static module_writer const& w = writer("email.message");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.message", "BytesIO", import_attribute("io", "BytesIO"));
+            define("email.message", "StringIO", import_attribute("io", "StringIO"));
+            define("email.message", "compat32", import_attribute("email._policybase", "compat32"));
+            define("email.message", "decode_b", import_attribute("email._encoded_words", "decode_b"));
             // Copyright (C) 2001-2007 Python Software Foundation
             // Author: Barry Warsaw
             // Contact: email-sig@python.org
@@ -410,7 +415,7 @@ namespace neos::python_runtime::detail::email_message_module
                 // 
                 // I.e. def walk(self): ...
             define("email.message", "Message", w.make_class("Message", {  }, {
-                { "__init__", w.method("Message", "__init__", { py_positional("policy", Mod<"email._policybase">().attr("compat32")) }, [](arguments a) -> py
+                { "__init__", w.method("Message", "__init__", { py_positional("policy", G<"email.message.compat32">()) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py policy = a[1];
@@ -444,7 +449,7 @@ namespace neos::python_runtime::detail::email_message_module
                         py g;
                         Generator = M("email.generator", "Generator");
                         policy = (policy.is_none() ? self.attr("policy") : policy);
-                        fp = (Mod<"io">().attr("StringIO"))();
+                        fp = (G<"email.message.StringIO">())();
                         g = Generator.call({ fp }, { { "mangle_from_", boolean(false) }, { "maxheaderlen", maxheaderlen }, { "policy", policy } });
                         g.method("flatten", { self }, { { "unixfrom", unixfrom } });
                         return fp.method("getvalue");
@@ -464,7 +469,7 @@ namespace neos::python_runtime::detail::email_message_module
                         py g;
                         BytesGenerator = M("email.generator", "BytesGenerator");
                         policy = (policy.is_none() ? self.attr("policy") : policy);
-                        fp = (Mod<"io">().attr("BytesIO"))();
+                        fp = (G<"email.message.BytesIO">())();
                         g = BytesGenerator.call({ fp }, { { "mangle_from_", boolean(false) }, { "policy", policy } });
                         g.method("flatten", { self }, { { "unixfrom", unixfrom } });
                         return fp.method("getvalue");
@@ -638,7 +643,7 @@ namespace neos::python_runtime::detail::email_message_module
                         {
                             // XXX: this is a bit of a hack; decode_b should probably be factored
                             // out somewhere, but I haven't figured out where yet.
-                            auto const items17 = unpack((Mod<"email._encoded_words">().attr("decode_b"))(py{ make_bytes(std::string{ "", 0 }) }.method("join", { bpayload.method("splitlines") })), 2);
+                            auto const items17 = unpack((G<"email.message.decode_b">())(py{ make_bytes(std::string{ "", 0 }) }.method("join", { bpayload.method("splitlines") })), 2);
                             value = items17[0];
                             defects = items17[1];
                             for (py const& item : iterate{ defects })
@@ -1952,13 +1957,9 @@ namespace neos::python_runtime::detail::email_message_module
                 aAttributes.emplace_back("binascii", py{ fn_import("binascii") }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("quopri", py{ fn_import("quopri") }.release());
-                aAttributes.emplace_back("BytesIO", import_attribute("io", "BytesIO").release());
-                aAttributes.emplace_back("StringIO", import_attribute("io", "StringIO").release());
                 aAttributes.emplace_back("utils", import_attribute("email", "utils").release());
                 aAttributes.emplace_back("errors", import_attribute("email", "errors").release());
-                aAttributes.emplace_back("compat32", import_attribute("email._policybase", "compat32").release());
                 aAttributes.emplace_back("_charset", import_attribute("email", "charset").release());
-                aAttributes.emplace_back("decode_b", import_attribute("email._encoded_words", "decode_b").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -1967,6 +1968,14 @@ namespace neos::python_runtime::detail::email_message_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.message", email_message_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.message", email_message_module, assigned);
     }
 }

@@ -160,6 +160,12 @@ namespace neos::python_runtime::detail::wsgiref_handlers_module
         void make_wsgiref_handlers()
         {
             static module_writer const& w = writer("wsgiref.handlers");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("wsgiref.handlers", "FileWrapper", import_attribute("wsgiref.util", "FileWrapper"));
+            define("wsgiref.handlers", "guess_scheme", import_attribute("wsgiref.util", "guess_scheme"));
+            define("wsgiref.handlers", "is_hop_by_hop", import_attribute("wsgiref.util", "is_hop_by_hop"));
+            define("wsgiref.handlers", "Headers", import_attribute("wsgiref.headers", "Headers"));
+            define("wsgiref.handlers", "_name_disallowed_re", import_attribute("wsgiref.headers", "_name_disallowed_re"));
             define("wsgiref.handlers", "__all__", py_list({ S<"BaseHandler">(), S<"SimpleHandler">(), S<"BaseCGIHandler">(), S<"CGIHandler">(), S<"IISCGIHandler">(), S<"read_environ">() }));
             // Weekday and month names for HTTP date/time formatting; always English!
             define("wsgiref.handlers", "_weekdayname", py_list({ S<"Mon">(), S<"Tue">(), S<"Wed">(), S<"Thu">(), S<"Fri">(), S<"Sat">(), S<"Sun">() }));
@@ -299,8 +305,8 @@ namespace neos::python_runtime::detail::wsgiref_handlers_module
                 { "http_version", S<"1.0">() },
                 { "server_software", none() },
                 { "os_environ", (G<"wsgiref.handlers.read_environ">())() },
-                { "wsgi_file_wrapper", Mod<"wsgiref.util">().attr("FileWrapper") },
-                { "headers_class", Mod<"wsgiref.headers">().attr("Headers") },
+                { "wsgi_file_wrapper", G<"wsgiref.handlers.FileWrapper">() },
+                { "headers_class", G<"wsgiref.handlers.Headers">() },
                 { "traceback_limit", none() },
                 { "error_status", S<"500 Internal Server Error">() },
                 { "error_headers", py_list({ py_tuple({ S<"Content-Type">(), S<"text/plain">() }) }) },
@@ -423,7 +429,7 @@ namespace neos::python_runtime::detail::wsgiref_handlers_module
                 { "get_scheme", w.method("BaseHandler", "get_scheme", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (Mod<"wsgiref.util">().attr("guess_scheme"))(self.attr("environ"));
+                        return (G<"wsgiref.handlers.guess_scheme">())(self.attr("environ"));
                     }) },
                 { "set_content_length", w.method("BaseHandler", "set_content_length", {  }, [](arguments a) -> py
                     {
@@ -515,7 +521,7 @@ namespace neos::python_runtime::detail::wsgiref_handlers_module
                                 val = items13[1];
                                 name = self.method("_convert_string_type", { name, S<"Header name">() });
                                 val = self.method("_convert_string_type", { val, S<"Header value">() });
-                                if ((Mod<"wsgiref.util">().attr("is_hop_by_hop"))(name).truthy())
+                                if ((G<"wsgiref.handlers.is_hop_by_hop">())(name).truthy())
                                     py_raise(B<"AssertionError">()(S(std::string{ "Hop-by-hop header, '" } + name.str() + ": " + val.str() + "', not allowed")));
                             }
                         }
@@ -525,7 +531,7 @@ namespace neos::python_runtime::detail::wsgiref_handlers_module
                     {
                         py self = a[0];
                         py status = a[1];
-                        if ((Mod<"wsgiref.headers">().attr("_name_disallowed_re")).method("search", { status }).truthy())
+                        if ((G<"wsgiref.handlers._name_disallowed_re">()).method("search", { status }).truthy())
                         {
                             py_raise((B<"ValueError">())(S<"Control characters are not allowed in status">()));
                         }
@@ -881,11 +887,6 @@ namespace neos::python_runtime::detail::wsgiref_handlers_module
                 }
                 if (auto const doc = wsgiref_handlers_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("FileWrapper", import_attribute("wsgiref.util", "FileWrapper").release());
-                aAttributes.emplace_back("guess_scheme", import_attribute("wsgiref.util", "guess_scheme").release());
-                aAttributes.emplace_back("is_hop_by_hop", import_attribute("wsgiref.util", "is_hop_by_hop").release());
-                aAttributes.emplace_back("Headers", import_attribute("wsgiref.headers", "Headers").release());
-                aAttributes.emplace_back("_name_disallowed_re", import_attribute("wsgiref.headers", "_name_disallowed_re").release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
@@ -897,6 +898,14 @@ namespace neos::python_runtime::detail::wsgiref_handlers_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("wsgiref.handlers", wsgiref_handlers_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("wsgiref.handlers", wsgiref_handlers_module, assigned);
     }
 }

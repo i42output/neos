@@ -31,9 +31,10 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Lib/string.py (string.Template's pattern) and Modules/binascii.c
-  (a2b_qp and b2a_qp)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the
-  Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python (and C) to
-  C++ for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
+  (a2b_qp, b2a_qp, a2b_uu and b2a_uu)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They
+  are used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated
+  from Python (and C) to C++ for the neos Python runtime plugin and adapted to its object model (see
+  runtime/python/NOTICE).
 */
 
 // The modules string, struct, binascii and base64 (CPython 3.13's behaviour and messages)
@@ -1498,6 +1499,94 @@ namespace neos::python_runtime
                         if (a[1] != nullptr && !to_index(a[1], value))
                             return nullptr;
                         return make_int(crc32(data, static_cast<std::uint32_t>(value)));
+                    } },
+                // (Modules/binascii.c's binascii_a2b_uu_impl: a uuencoded line (its first character the data's length))
+                { "a2b_uu", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string text;
+                        if (!parse_arguments("a2b_uu", aArgs, aKwargs, { "data" }, 1u, 1u, a) || !binary_argument(a[0], text, true))
+                            return nullptr;
+                        if (text.empty())
+                            return binascii_error("Missing length byte");
+                        auto const* data = reinterpret_cast<unsigned char const*>(text.data());
+                        long long length = static_cast<long long>(text.size());
+                        long long binaryLength = (*data++ - ' ') & 077;
+                        --length;
+                        std::string result;
+                        result.reserve(static_cast<std::size_t>(binaryLength));
+                        int leftbits = 0;
+                        unsigned int leftchar = 0u;
+                        for (; binaryLength > 0; --length, ++data)
+                        {
+                            // (no more data, or the line's end: spaces eaten at the end of the line)
+                            unsigned char c = length > 0 ? *data : 0u;
+                            if (c == '\n' || c == '\r' || length <= 0)
+                                c = 0u;
+                            else
+                            {
+                                // (64, not 63: some uuencoders write '`' for a zero)
+                                if (c < ' ' || c > ' ' + 64)
+                                    return binascii_error("Illegal char");
+                                c = static_cast<unsigned char>((c - ' ') & 077);
+                            }
+                            leftchar = (leftchar << 6) | c;
+                            leftbits += 6;
+                            if (leftbits >= 8)
+                            {
+                                leftbits -= 8;
+                                result += static_cast<char>((leftchar >> leftbits) & 0xFFu);
+                                leftchar &= (1u << leftbits) - 1u;
+                                --binaryLength;
+                            }
+                        }
+                        // (anything left on the line: whitespace (or '`' padding) only)
+                        while (length-- > 0)
+                        {
+                            auto const c = *data++;
+                            if (c != ' ' && c != ' ' + 64 && c != '\n' && c != '\r')
+                                return binascii_error("Trailing garbage");
+                        }
+                        return make_bytes(std::move(result));
+                    } },
+                // (Modules/binascii.c's binascii_b2a_uu_impl: a uuencoded line of at most 45 bytes)
+                { "b2a_uu", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string data;
+                        if (!parse_arguments("b2a_uu", aArgs, aKwargs, { "data", "backtick" }, 1u, 1u, a) || !binary_argument(a[0], data, false))
+                            return nullptr;
+                        if (aArgs.size() > 1u)
+                            return error("TypeError", "b2a_uu() takes exactly 1 positional argument (" + std::to_string(aArgs.size()) + " given)");
+                        bool backtick = false;
+                        if (a[1] != nullptr)
+                        {
+                            auto const t = truth(a[1]);
+                            if (t < 0)
+                                return nullptr;
+                            backtick = t == 1;
+                        }
+                        if (data.size() > 45u)
+                            return binascii_error("At most 45 bytes at once");
+                        std::string result;
+                        result += backtick && data.empty() ? '`' : static_cast<char>(' ' + data.size());
+                        int leftbits = 0;
+                        unsigned int leftchar = 0u;
+                        auto const* bytes = reinterpret_cast<unsigned char const*>(data.data());
+                        for (long long length = static_cast<long long>(data.size()); length > 0 || leftbits != 0; --length, ++bytes)
+                        {
+                            // (the data, then padding)
+                            leftchar = length > 0 ? (leftchar << 8) | *bytes : leftchar << 8;
+                            leftbits += 8;
+                            while (leftbits >= 6)
+                            {
+                                auto const c = static_cast<unsigned char>((leftchar >> (leftbits - 6)) & 0x3Fu);
+                                leftbits -= 6;
+                                result += backtick && c == 0u ? '`' : static_cast<char>(c + ' ');
+                            }
+                        }
+                        result += '\n';
+                        return make_bytes(std::move(result));
                     } },
                 { "crc_hqx", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {

@@ -160,11 +160,13 @@ namespace neos::python_runtime::detail::email_mime_application_module
         void make_email_mime_application()
         {
             static module_writer const& w = writer("email.mime.application");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.mime.application", "MIMENonMultipart", import_attribute("email.mime.nonmultipart", "MIMENonMultipart"));
             // Copyright (C) 2001-2006 Python Software Foundation
             // Author: Keith Dart
             // Contact: email-sig@python.org
             define("email.mime.application", "__all__", py_list({ S<"MIMEApplication">() }));
-            define("email.mime.application", "MIMEApplication", w.make_class("MIMEApplication", { Mod<"email.mime.nonmultipart">().attr("MIMENonMultipart") }, {
+            define("email.mime.application", "MIMEApplication", w.make_class("MIMEApplication", { G<"email.mime.application.MIMENonMultipart">() }, {
                 { "__init__", w.method("MIMEApplication", "__init__", { py_positional("_data"), py_positional("_subtype", S<"octet-stream">()), py_positional("_encoder", Mod<"email.encoders">().attr("encode_base64")), py_keyword("policy", none()) }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -177,7 +179,7 @@ namespace neos::python_runtime::detail::email_mime_application_module
                         {
                             py_raise((B<"TypeError">())(S<"Invalid application MIME subtype">()));
                         }
-                        call_ex((Mod<"email.mime.nonmultipart">().attr("MIMENonMultipart")).attr("__init__"), { self, S<"application">(), _subtype }, py{}, _params, { { "policy", policy } });
+                        call_ex((G<"email.mime.application.MIMENonMultipart">()).attr("__init__"), { self, S<"application">(), _subtype }, py{}, _params, { { "policy", policy } });
                         self.method("set_payload", { _data });
                         _encoder(self);
                         return none();
@@ -197,7 +199,6 @@ namespace neos::python_runtime::detail::email_mime_application_module
                 if (auto const doc = email_mime_application_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("encoders", import_attribute("email", "encoders").release());
-                aAttributes.emplace_back("MIMENonMultipart", import_attribute("email.mime.nonmultipart", "MIMENonMultipart").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -206,6 +207,14 @@ namespace neos::python_runtime::detail::email_mime_application_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.mime.application", email_mime_application_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.mime.application", email_mime_application_module, assigned);
     }
 }

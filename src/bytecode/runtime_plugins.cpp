@@ -499,6 +499,35 @@ namespace neos
                     registry::instance().program_end();
                 }
 
+                namespace
+                {
+                    // (the size of the calling thread's next string result: see set_string_result)
+                    struct string_result_size
+                    {
+                        char const* string = nullptr;
+                        std::size_t size = 0u;
+                    };
+                    thread_local string_result_size tStringResult;
+                }
+
+                std::string_view string_result(char const* aString)
+                {
+                    if (aString == nullptr)
+                        return {};
+                    auto& r = tStringResult;
+                    if (r.string != nullptr && r.string == aString)
+                    {
+                        r.string = nullptr;
+                        return std::string_view{ aString, r.size };
+                    }
+                    return std::string_view{ aString };
+                }
+
+                void set_string_result(char const* aString, std::size_t aSize)
+                {
+                    tStringResult = string_result_size{ aString, aString != nullptr ? aSize : 0u };
+                }
+
                 bool available()
                 {
 #if defined(NEOS_HAVE_LIBFFI)
@@ -660,7 +689,7 @@ namespace neos
                     case NEOS_RT_SIZE: aBuffer[0] = static_cast<value>(static_cast<std::size_t>(r.integral)); break;
                     case NEOS_RT_F32: { std::uint32_t bits; std::memcpy(&bits, &r.f32, sizeof(bits)); aBuffer[0] = static_cast<value>(bits); break; }
                     case NEOS_RT_F64: { value bits; std::memcpy(&bits, &r.f64, sizeof(bits)); aBuffer[0] = bits; break; }
-                    case NEOS_RT_STRING: aBuffer[0] = static_cast<value>(aMarshaller.allocateString(r.string != nullptr ? std::string_view{ r.string } : std::string_view{})); break;
+                    case NEOS_RT_STRING: aBuffer[0] = static_cast<value>(aMarshaller.allocateString(string_result(r.string))); break;
                     case NEOS_RT_OBJECT: aBuffer[0] = static_cast<value>(aMarshaller.objectHandle(r.object)); break;
                     case NEOS_RT_INTEGER:
                         {

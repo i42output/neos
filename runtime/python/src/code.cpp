@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::code_module
         void make_code()
         {
             static module_writer const& w = writer("code");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("code", "CommandCompiler", import_attribute("codeop", "CommandCompiler"));
             // Inspired by similar code by Jeff Epler and Fredrik Lundh.
             define("code", "__all__", py_list({ S<"InteractiveInterpreter">(), S<"InteractiveConsole">(), S<"interact">(), S<"compile_command">() }));
             define("code", "InteractiveInterpreter", w.make_class("InteractiveInterpreter", {  }, {
@@ -172,7 +174,7 @@ namespace neos::python_runtime::detail::code_module
                             locals = dict_of({ { S<"__name__">(), S<"__console__">() }, { S<"__doc__">(), none() } });
                         }
                         self.set_attr("locals", locals);
-                        self.set_attr("compile", (Mod<"codeop">().attr("CommandCompiler"))());
+                        self.set_attr("compile", (G<"code.CommandCompiler">())());
                         return none();
                     }) },
                 { "runsource", w.method("InteractiveInterpreter", "runsource", { py_positional("source"), py_positional("filename", S<"<input>">()), py_positional("symbol", S<"single">()) }, [](arguments a) -> py
@@ -678,7 +680,6 @@ namespace neos::python_runtime::detail::code_module
                 aAttributes.emplace_back("builtins", py{ fn_import("builtins") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("traceback", py{ fn_import("traceback") }.release());
-                aAttributes.emplace_back("CommandCompiler", import_attribute("codeop", "CommandCompiler").release());
                 aAttributes.emplace_back("compile_command", import_attribute("codeop", "compile_command").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
@@ -688,6 +689,14 @@ namespace neos::python_runtime::detail::code_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("code", code_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("code", code_module, assigned);
     }
 }

@@ -48,6 +48,7 @@
 #include <string>
 #include <vector>
 #include "objects.hpp"
+#include "values.hpp"
 
 namespace neos::python_runtime
 {
@@ -2931,6 +2932,234 @@ namespace neos::python_runtime
                 return call(s.enumType, ref{ make_tuple({ make_str(aName), new_reference(basesTuple.get()), new_reference(ns.get()) }) }.get(), kw.get());
             }
 
+            // (Lib/enum.py's _is_descriptor, _is_dunder, _is_sunder, _is_private, _old_convert_ and _test_simple_enum (CPython 3.13.18's))
+            bool enum_helpers(std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                auto const result = py_guarded([&]()
+                {
+                    auto const add = [&](char const* aName, char const* aDoc, std::vector<py_parameter> aParameters, std::function<py(std::vector<py> const&)> aBody)
+                    {
+                        std::string const name{ aName };
+                        aAttributes.emplace_back(name, make_native_function(name, name, aDoc, "enum", [name, aParameters, aBody](std::vector<py> const& aArgs, object* aKwargs) -> py
+                            {
+                                return aBody(py_bind(name, aParameters, aArgs, aKwargs));
+                            }).release());
+                    };
+                    auto const text = [](py const& aName) -> std::u32string
+                    {
+                        // (the name's characters (its code points), for its indexing)
+                        std::u32string result;
+                        for (py const& c : aName.items())
+                            result += static_cast<char32_t>(builtin("ord")(c).as_index());
+                        return result;
+                    };
+                    add("_is_descriptor", "\n    Returns True if obj is a descriptor, False otherwise.\n    ", { py_positional("obj") }, [](std::vector<py> const& a) -> py
+                        {
+                            if (isinstance(a[0], import_attribute("functools", "partial")))
+                                return py::boolean(false);
+                            for (auto attribute : { "__get__", "__set__", "__delete__" })
+                                if (builtin("hasattr")(a[0], py{ attribute }).truthy())
+                                    return py::boolean(true);
+                            return py::boolean(false);
+                        });
+                    add("_is_dunder", "\n    Returns True if a __dunder__ name, False otherwise.\n    ", { py_positional("name") }, [text](std::vector<py> const& a) -> py
+                        {
+                            auto const n = text(a[0]);
+                            return py::boolean(n.size() > 4u && n.substr(0u, 2u) == U"__" && n.substr(n.size() - 2u) == U"__" && n[2] != U'_' && n[n.size() - 3u] != U'_');
+                        });
+                    add("_is_sunder", "\n    Returns True if a _sunder_ name, False otherwise.\n    ", { py_positional("name") }, [text](std::vector<py> const& a) -> py
+                        {
+                            auto const n = text(a[0]);
+                            return py::boolean(n.size() > 2u && n[0] == U'_' && n.back() == U'_' && n[1] != U'_' && n[n.size() - 2u] != U'_');
+                        });
+                    add("_is_private", "", { py_positional("cls_name"), py_positional("name") }, [text](std::vector<py> const& a) -> py
+                        {
+                            auto const pattern = U"_" + text(builtin("str")(a[0])) + U"__";
+                            auto const n = text(a[1]);
+                            return py::boolean(n.size() > pattern.size() && n.starts_with(pattern) && (n.back() != U'_' || n[n.size() - 2u] != U'_'));
+                        });
+                    add("_old_convert_", "\n    Create a new Enum subclass that replaces a collection of global constants\n    ",
+                        { py_positional("etype"), py_positional("name"), py_positional("module"), py_positional("filter"), py_positional("source", py::none()), 
+                        py_keyword("boundary", py::none()) }, [](std::vector<py> const& a) -> py
+                        {
+                            py const moduleGlobals = import_attribute("sys", "modules")[a[2]].attr("__dict__");
+                            py const source = a[4].truthy() ? a[4].attr("__dict__") : moduleGlobals;
+                            // (sorted by value, then name; by name if the values do not compare)
+                            std::vector<py> members;
+                            for (py const& item : source.method("items").items())
+                                if (a[3](item[py{ 0 }]).truthy())
+                                    members.push_back(py_tuple({ item[py{ 0 }], item[py{ 1 }] }));
+                            py sorted;
+                            try
+                            {
+                                std::vector<py> keyed;
+                                for (auto const& m : members)
+                                    keyed.push_back(py_tuple({ m[py{ 1 }], m[py{ 0 }], m }));
+                                sorted = builtin("sorted")(py_list(keyed));
+                            }
+                            catch (raised const&)
+                            {
+                                if (!caught({ "TypeError" }))
+                                    throw;
+                                std::vector<py> keyed;
+                                for (auto const& m : members)
+                                    keyed.push_back(py_tuple({ m[py{ 0 }], m }));
+                                sorted = builtin("sorted")(py_list(keyed));
+                            }
+                            std::vector<py> ordered;
+                            for (py const& k : sorted.items())
+                                ordered.push_back(k[py{ -1 }]);
+                            py const boundary = a[5].truthy() ? a[5] : import_attribute("enum", "KEEP");
+                            return a[0].call({ a[1], py_list(ordered) }, { { "module", a[2] }, { "boundary", boundary } });
+                        });
+                    add("_test_simple_enum", "\n    A function that can be used to test an enum created with :func:`_simple_enum`\n    against the version created by subclassing :class:`Enum`::\n\n"
+                        "        >>> from enum import Enum, _simple_enum, _test_simple_enum\n        >>> @_simple_enum(Enum)\n        ... class Color:\n"
+                        "        ...     RED = auto()\n        ...     GREEN = auto()\n        ...     BLUE = auto()\n        >>> class CheckedColor(Enum):\n"
+                        "        ...     RED = auto()\n        ...     GREEN = auto()\n        ...     BLUE = auto()\n        >>> _test_simple_enum(CheckedColor, Color)\n\n"
+                        "    If differences are found, a :exc:`TypeError` is raised.\n    ",
+                        { py_positional("checked_enum"), py_positional("simple_enum") }, [](std::vector<py> const& a) -> py
+                        {
+                            py const& checkedEnum = a[0];
+                            py const& simpleEnum = a[1];
+                            std::vector<std::string> failed;
+                            auto const keys_of = [](py const& aDict)
+                            {
+                                std::vector<py> keys;
+                                for (py const& k : aDict.method("keys").items())
+                                    keys.push_back(k);
+                                return keys;
+                            };
+                            auto const contains = [](std::vector<py> const& aKeys, py const& aKey)
+                            {
+                                return std::any_of(aKeys.begin(), aKeys.end(), [&](py const& k) { return k == aKey; });
+                            };
+                            auto const pad = [](std::string aText, std::size_t aWidth)
+                            {
+                                // ("%-30s": the characters' count)
+                                std::size_t characters = 0u;
+                                for (auto c : aText)
+                                    if ((static_cast<unsigned char>(c) & 0xC0u) != 0x80u)
+                                        ++characters;
+                                if (characters < aWidth)
+                                    aText.append(aWidth - characters, ' ');
+                                return aText;
+                            };
+                            py const checkedDict = checkedEnum.attr("__dict__");
+                            py const simpleDict = simpleEnum.attr("__dict__");
+                            if (checkedDict != simpleDict)
+                            {
+                                auto const checkedKeys = keys_of(checkedDict);
+                                auto const simpleKeys = keys_of(simpleDict);
+                                std::vector<py> memberNames;
+                                for (py const& e : { checkedEnum, simpleEnum })
+                                    for (py const& k : e.attr("_member_map_").method("keys").items())
+                                        if (!contains(memberNames, k))
+                                            memberNames.push_back(k);
+                                std::vector<py> allKeys;
+                                for (auto const* keys : { &checkedKeys, &simpleKeys })
+                                    for (auto const& k : *keys)
+                                        if (!contains(allKeys, k))
+                                            allKeys.push_back(k);
+                                static char const* const sKnown[] = { "__module__", "_member_map_", "_value2member_map_", "__doc__", "__static_attributes__", "__firstlineno__" };
+                                for (auto const& key : allKeys)
+                                {
+                                    if (std::any_of(std::begin(sKnown), std::end(sKnown), [&](char const* k) { return key == py{ k }; }))
+                                        continue;   // (keys known to be different, or very long)
+                                    if (contains(memberNames, key))
+                                        continue;   // (members are checked below)
+                                    if (!contains(simpleKeys, key))
+                                        failed.push_back("missing key: " + key.repr());
+                                    else if (!contains(checkedKeys, key))
+                                        failed.push_back("extra key:   " + key.repr());
+                                    else
+                                    {
+                                        py const checkedValue = checkedDict[key];
+                                        py const simpleValue = simpleDict[key];
+                                        if (builtin("callable")(checkedValue).truthy() || isinstance(checkedValue, builtin("property")))
+                                            continue;
+                                        if (checkedValue != simpleValue)
+                                            failed.push_back(key.repr() + ":\n         checked -> " + checkedValue.repr() + "\n         simple  -> " + simpleValue.repr());
+                                    }
+                                }
+                                std::sort(failed.begin(), failed.end());
+                                for (auto const& name : memberNames)
+                                {
+                                    std::vector<std::string> failedMember;
+                                    if (!contains(simpleKeys, name))
+                                        failed.push_back("missing member from simple enum: " + name.repr());
+                                    else if (!contains(checkedKeys, name))
+                                        failed.push_back("extra member in simple enum: " + name.repr());
+                                    else
+                                    {
+                                        py const checkedMemberDict = checkedEnum[name].attr("__dict__");
+                                        py const simpleMemberDict = simpleEnum[name].attr("__dict__");
+                                        auto const checkedMemberKeys = keys_of(checkedMemberDict);
+                                        auto const simpleMemberKeys = keys_of(simpleMemberDict);
+                                        std::vector<py> memberKeys;
+                                        for (auto const* keys : { &checkedMemberKeys, &simpleMemberKeys })
+                                            for (auto const& k : *keys)
+                                                if (!contains(memberKeys, k))
+                                                    memberKeys.push_back(k);
+                                        for (auto const& key : memberKeys)
+                                        {
+                                            if (key == py{ "__module__" } || key == py{ "__objclass__" } || key == py{ "_inverted_" })
+                                                continue;   // (keys known to be different or absent)
+                                            if (!contains(simpleMemberKeys, key))
+                                                failedMember.push_back("missing key " + key.repr() + " not in the simple enum member " + name.repr());
+                                            else if (!contains(checkedMemberKeys, key))
+                                                failedMember.push_back("extra key " + key.repr() + " in simple enum member " + name.repr());
+                                            else
+                                            {
+                                                py const checkedValue = checkedMemberDict[key];
+                                                py const simpleValue = simpleMemberDict[key];
+                                                if (checkedValue != simpleValue)
+                                                    failedMember.push_back(key.repr() + ":\n         checked member -> " + checkedValue.repr() + "\n         simple member  -> " + 
+                                                        simpleValue.repr());
+                                            }
+                                        }
+                                    }
+                                    if (!failedMember.empty())
+                                    {
+                                        std::string joined;
+                                        for (auto const& f : failedMember)
+                                            joined += (joined.empty() ? "" : "\n      ") + f;
+                                        failed.push_back(name.repr() + " member mismatch:\n      " + joined);
+                                    }
+                                }
+                                for (auto method : { "__str__", "__repr__", "__reduce_ex__", "__format__", "__getnewargs_ex__", "__getnewargs__", "__reduce_ex__", "__reduce__" })
+                                {
+                                    py const m{ method };
+                                    bool const inSimple = contains(simpleKeys, m);
+                                    bool const inChecked = contains(checkedKeys, m);
+                                    if (inSimple || inChecked)
+                                        continue;   // (in both: functions cannot be compared; in one: caught above)
+                                    // (inherited: compared)
+                                    py checkedMethod = builtin("getattr")(checkedEnum, m, py::none());
+                                    py simpleMethod = builtin("getattr")(simpleEnum, m, py::none());
+                                    if (builtin("hasattr")(checkedMethod, py{ "__func__" }).truthy())
+                                    {
+                                        checkedMethod = checkedMethod.attr("__func__");
+                                        simpleMethod = simpleMethod.attr("__func__");
+                                    }
+                                    if (checkedMethod != simpleMethod)
+                                        failed.push_back(m.repr() + ":  " + pad("checked -> " + checkedMethod.repr(), 30u) + " simple -> " + simpleMethod.repr());
+                                }
+                            }
+                            if (!failed.empty())
+                            {
+                                std::string joined;
+                                for (auto const& f : failed)
+                                    joined += (joined.empty() ? "" : "\n   ") + f;
+                                py_raise("TypeError", "enum mismatch:\n   " + joined);
+                            }
+                            return py::none();
+                        });
+                    return py::none();
+                });
+                release(result);
+                return result != nullptr;
+            }
+
             bool enum_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
                 static builtin_entry const sReprs[] =
@@ -3094,6 +3323,8 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("_auto_null", new_reference(s.autoNull));
                 for (auto const& f : sEnumFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                if (!enum_helpers(aAttributes))
+                    return false;
                 aAttributes.emplace_back("__all__", make_list({ make_str("EnumType"), make_str("EnumMeta"), make_str("EnumDict"), make_str("Enum"), make_str("IntEnum"),
                     make_str("StrEnum"), make_str("Flag"), make_str("IntFlag"), make_str("ReprEnum"), make_str("auto"), make_str("unique"), make_str("property"),
                     make_str("verify"), make_str("member"), make_str("nonmember"), make_str("FlagBoundary"), make_str("STRICT"), make_str("CONFORM"), make_str("EJECT"),

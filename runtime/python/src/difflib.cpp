@@ -147,8 +147,12 @@ namespace neos::python_runtime::detail::difflib_module
         void make_difflib()
         {
             static module_writer const& w = writer("difflib");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("difflib", "_nlargest", import_attribute("heapq", "nlargest"));
+            define("difflib", "_namedtuple", import_attribute("collections", "namedtuple"));
+            define("difflib", "GenericAlias", import_attribute("types", "GenericAlias"));
             define("difflib", "__all__", py_list({ S<"get_close_matches">(), S<"ndiff">(), S<"restore">(), S<"SequenceMatcher">(), S<"Differ">(), S<"IS_CHARACTER_JUNK">(), S<"IS_LINE_JUNK">(), S<"context_diff">(), S<"unified_diff">(), S<"diff_bytes">(), S<"HtmlDiff">(), S<"Match">() }));
-            define("difflib", "Match", (Mod<"collections">().attr("namedtuple"))(S<"Match">(), S<"a b size">()));
+            define("difflib", "Match", (G<"difflib._namedtuple">())(S<"Match">(), S<"a b size">()));
             define("difflib", "_calculate_ratio", w.function("_calculate_ratio", "_calculate_ratio", { py_positional("matches"), py_positional("length") }, [](arguments a) -> py
                 {
                     py matches_ = a[0];
@@ -768,7 +772,7 @@ namespace neos::python_runtime::detail::difflib_module
                         // shorter sequence
                         return (G<"difflib._calculate_ratio">())((B<"min">())(la, lb), la + lb);
                     }) },
-                { "__class_getitem__", (B<"classmethod">())(Mod<"types">().attr("GenericAlias")) }, }));
+                { "__class_getitem__", (B<"classmethod">())(G<"difflib.GenericAlias">()) }, }));
 
             define("difflib", "get_close_matches", w.function("get_close_matches", "get_close_matches", { py_positional("word"), py_positional("possibilities"), py_positional("n", I<3>()), py_positional("cutoff", F<0.6>()) }, [](arguments a) -> py
                 {
@@ -800,7 +804,7 @@ namespace neos::python_runtime::detail::difflib_module
                         }
                     }
                     // Move the best scorers to head of list
-                    result = (Mod<"heapq">().attr("nlargest"))(n, result);
+                    result = (G<"difflib._nlargest">())(n, result);
                     // Strip scores for the best n matches
                     return [&]() -> py { py const comprehension52 = py_list(); py score; py x; for (py const& item : iterate{ result }) { auto const items53 = unpack(item, 2); score = items53[0]; x = items53[1]; comprehension52.method("append", { x }); } return comprehension52; }();
                 }));
@@ -2393,9 +2397,6 @@ namespace neos::python_runtime::detail::difflib_module
                 }
                 if (auto const doc = difflib_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("_nlargest", import_attribute("heapq", "nlargest").release());
-                aAttributes.emplace_back("_namedtuple", import_attribute("collections", "namedtuple").release());
-                aAttributes.emplace_back("GenericAlias", import_attribute("types", "GenericAlias").release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
@@ -2405,6 +2406,14 @@ namespace neos::python_runtime::detail::difflib_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("difflib", difflib_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("difflib", difflib_module, assigned);
     }
 }

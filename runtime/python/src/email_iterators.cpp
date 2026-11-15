@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::email_iterators_module
         void make_email_iterators()
         {
             static module_writer const& w = writer("email.iterators");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.iterators", "StringIO", import_attribute("io", "StringIO"));
             // Copyright (C) 2001-2006 Python Software Foundation
             // Author: Barry Warsaw
             // Contact: email-sig@python.org
@@ -200,7 +202,7 @@ namespace neos::python_runtime::detail::email_iterators_module
                             payload = subpart.method("get_payload", {  }, { { "decode", decode } });
                             if (isinstance(payload, B<"str">()))
                             {
-                                yield_from((Mod<"io">().attr("StringIO"))(payload));
+                                yield_from((G<"email.iterators.StringIO">())(payload));
                             }
                         }
                         return none();
@@ -277,7 +279,6 @@ namespace neos::python_runtime::detail::email_iterators_module
                 if (auto const doc = email_iterators_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
-                aAttributes.emplace_back("StringIO", import_attribute("io", "StringIO").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -286,6 +287,14 @@ namespace neos::python_runtime::detail::email_iterators_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.iterators", email_iterators_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.iterators", email_iterators_module, assigned);
     }
 }

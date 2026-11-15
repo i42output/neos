@@ -160,6 +160,10 @@ namespace neos::python_runtime::detail::email_base64mime_module
         void make_email_base64mime()
         {
             static module_writer const& w = writer("email.base64mime");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.base64mime", "b64encode", import_attribute("base64", "b64encode"));
+            define("email.base64mime", "b2a_base64", import_attribute("binascii", "b2a_base64"));
+            define("email.base64mime", "a2b_base64", import_attribute("binascii", "a2b_base64"));
             // Copyright (C) 2002-2007 Python Software Foundation
             // Author: Ben Gertzfield
             // Contact: email-sig@python.org
@@ -201,7 +205,7 @@ namespace neos::python_runtime::detail::email_base64mime_module
                     {
                         header_bytes = header_bytes.method("encode", { charset });
                     }
-                    encoded = (Mod<"base64">().attr("b64encode"))(header_bytes).method("decode", { S<"ascii">() });
+                    encoded = (G<"email.base64mime.b64encode">())(header_bytes).method("decode", { S<"ascii">() });
                     return (S<"=?%s?b?%s?=">()) % py_tuple({ charset, encoded });
                 }));
 
@@ -225,7 +229,7 @@ namespace neos::python_runtime::detail::email_base64mime_module
                         i = item;
                         // BAW: should encode() inherit b2a_base64()'s dubious behavior in
                         // adding a newline to the encoded string?
-                        enc = (Mod<"binascii">().attr("b2a_base64"))(s[B<"slice">()(i, i + max_unencoded, none())]).method("decode", { S<"ascii">() });
+                        enc = (G<"email.base64mime.b2a_base64">())(s[B<"slice">()(i, i + max_unencoded, none())]).method("decode", { S<"ascii">() });
                         if ((enc.method("endswith", { G<"email.base64mime.NL">() }).truthy() && (eol != (G<"email.base64mime.NL">()))))
                         {
                             enc = enc[B<"slice">()(none(), I<-1>(), none())] + eol;
@@ -244,11 +248,11 @@ namespace neos::python_runtime::detail::email_base64mime_module
                     }
                     else if (isinstance(string, B<"str">()))
                     {
-                        return (Mod<"binascii">().attr("a2b_base64"))(string.method("encode", { S<"raw-unicode-escape">() }));
+                        return (G<"email.base64mime.a2b_base64">())(string.method("encode", { S<"raw-unicode-escape">() }));
                     }
                     else
                     {
-                        return (Mod<"binascii">().attr("a2b_base64"))(string);
+                        return (G<"email.base64mime.a2b_base64">())(string);
                     }
                     return none();
                 }));
@@ -270,9 +274,6 @@ namespace neos::python_runtime::detail::email_base64mime_module
                 }
                 if (auto const doc = email_base64mime_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("b64encode", import_attribute("base64", "b64encode").release());
-                aAttributes.emplace_back("b2a_base64", import_attribute("binascii", "b2a_base64").release());
-                aAttributes.emplace_back("a2b_base64", import_attribute("binascii", "a2b_base64").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -281,6 +282,14 @@ namespace neos::python_runtime::detail::email_base64mime_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.base64mime", email_base64mime_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.base64mime", email_base64mime_module, assigned);
     }
 }

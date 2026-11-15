@@ -148,12 +148,16 @@ namespace neos::python_runtime::detail::tomllib__types_module
         void make_tomllib__types()
         {
             static module_writer const& w = writer("tomllib._types");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("tomllib._types", "Any", import_attribute("typing", "Any"));
+            define("tomllib._types", "Callable", import_attribute("typing", "Callable"));
+            define("tomllib._types", "Tuple", import_attribute("typing", "Tuple"));
             // SPDX-License-Identifier: MIT
             // SPDX-FileCopyrightText: 2021 Taneli Hukkinen
             // Licensed to PSF under a Contributor Agreement.
             // Type annotations
-            define("tomllib._types", "ParseFloat", (Mod<"typing">().attr("Callable"))[py_tuple({ py_list({ B<"str">() }), Mod<"typing">().attr("Any") })]);
-            define("tomllib._types", "Key", (Mod<"typing">().attr("Tuple"))[py_tuple({ B<"str">(), B<"Ellipsis">() })]);
+            define("tomllib._types", "ParseFloat", (G<"tomllib._types.Callable">())[py_tuple({ py_list({ B<"str">() }), G<"tomllib._types.Any">() })]);
+            define("tomllib._types", "Key", (G<"tomllib._types.Tuple">())[py_tuple({ B<"str">(), B<"Ellipsis">() })]);
             define("tomllib._types", "Pos", B<"int">());
         }
 
@@ -169,9 +173,6 @@ namespace neos::python_runtime::detail::tomllib__types_module
                 }
                 if (auto const doc = tomllib_types_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("Any", import_attribute("typing", "Any").release());
-                aAttributes.emplace_back("Callable", import_attribute("typing", "Callable").release());
-                aAttributes.emplace_back("Tuple", import_attribute("typing", "Tuple").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -180,6 +181,14 @@ namespace neos::python_runtime::detail::tomllib__types_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("tomllib._types", tomllib__types_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("tomllib._types", tomllib__types_module, assigned);
     }
 }

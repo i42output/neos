@@ -245,11 +245,23 @@ namespace neos::python_runtime
             {
                 if (aCode.program != nullptr)
                     return aCode.program;
+                // (the compiler's options: the mode, then sys.path's directories (each on a line of its own), where its imports' modules
+                // are found)
+                std::string options = aCode.mode == "eval" ? "eval" : "exec";
+                options += '\n';
+                if (ref const path{ module_attribute("sys", "path") }; path && kind_of(builtin_value(path.get())) == NEOS_PY_LIST)
+                {
+                    for (auto const entry : as<list_object>(builtin_value(path.get()))->items)
+                        if (kind_of(entry) == NEOS_PY_STR && as<str_object>(entry)->value.find('\n') == std::string::npos)
+                            options += as<str_object>(entry)->value + '\n';
+                }
+                else
+                    clear_error();
                 static std::mutex sMutex;
                 static std::map<std::pair<std::string, std::string>, void*> sPrograms;
                 {
                     std::scoped_lock lock{ sMutex };
-                    if (auto const existing = sPrograms.find({ aCode.mode, aCode.source }); existing != sPrograms.end())
+                    if (auto const existing = sPrograms.find({ options, aCode.source }); existing != sPrograms.end())
                         return aCode.program = existing->second;
                 }
                 auto const* h = host();
@@ -262,7 +274,7 @@ namespace neos::python_runtime
                 if (!host_unrestricted(aCode.mode == "eval" ? "eval" : "exec"))
                     return nullptr;
                 char const* failure = nullptr;
-                auto const program = h->load("python", aCode.source.c_str(), aCode.filename.c_str(), aCode.mode == "eval" ? "eval" : "exec", &failure);
+                auto const program = h->load("python", aCode.source.c_str(), aCode.filename.c_str(), options.c_str(), &failure);
                 if (program == nullptr)
                 {
                     // (a program that runs without the neos compiler (an executable image): source cannot be compiled)
@@ -282,7 +294,7 @@ namespace neos::python_runtime
                     return nullptr;
                 }
                 std::scoped_lock lock{ sMutex };
-                sPrograms[{ aCode.mode, aCode.source }] = program;
+                sPrograms[{ options, aCode.source }] = program;
                 return aCode.program = program;
             }
 
@@ -446,6 +458,69 @@ namespace neos::python_runtime
             return nullptr;
         }
 
+        namespace
+        {
+            struct exec_state
+            {
+                void* program = nullptr;
+                std::vector<exec_namespace> namespaces;
+            };
+        }
+
+        void* main_program_context()
+        {
+            // (the main program: running (null), or the program that another switched from)
+            if (tProgram == nullptr)
+                return host()->thread_context();
+            return tMainProgram != nullptr ? tMainProgram : tFirstMain;
+        }
+
+        void thread_main_program(void* aMain)
+        {
+            tProgram = nullptr;
+            tMainProgram = aMain;
+            if (tFirstMain == nullptr)
+                tFirstMain = aMain;
+        }
+
+        std::size_t exec_depth()
+        {
+            return tNamespaces.size();
+        }
+
+        void* exec_suspend(std::size_t aDepth, void* aResumer)
+        {
+            auto* const state = new exec_state{ current_program(), {} };
+            if (aDepth < tNamespaces.size())
+            {
+                state->namespaces.assign(tNamespaces.begin() + static_cast<std::ptrdiff_t>(aDepth), tNamespaces.end());
+                tNamespaces.resize(aDepth);
+            }
+            // (the host's context is the resumer's again (neos_rt_host::coroutine_resume restores it))
+            tProgram = aResumer;
+            return state;
+        }
+
+        void exec_resume(void* aState)
+        {
+            auto* const state = static_cast<exec_state*>(aState);
+            tNamespaces.insert(tNamespaces.end(), state->namespaces.begin(), state->namespaces.end());
+            // (the host's context is the body's when it is resumed (neos_rt_host::coroutine_resume))
+            tProgram = state->program;
+            delete state;
+        }
+
+        void exec_discard(void* aState)
+        {
+            auto* const state = static_cast<exec_state*>(aState);
+            for (auto const& ns : state->namespaces)
+            {
+                release(ns.result);
+                release(ns.globals);
+            }
+            delete state;
+        }
+
         void exec_leave()
         {
             if (tNamespaces.empty())
@@ -569,6 +644,13 @@ namespace neos::python_runtime
         bool namespace_registered(char const* aName)
         {
             return namespace_getters().contains(module_key(aName));
+        }
+
+        // (a module's namespace (globals()'s) has been made, or its getter registered (support.cpp))
+        bool namespace_exists(char const* aName)
+        {
+            auto const key = module_key(aName);
+            return namespace_getters().contains(key) || module_namespaces().contains(key);
         }
 
         // python::register_namespace(module, getter): the getter of a module's names (its namespace's)
@@ -710,6 +792,19 @@ namespace neos::python_runtime
                 return aValue;
             }
             return fn_exec_lookup(aName);
+        }
+
+        // python::global_read(module, name, value): a global of a module that is imported at run time, whose variable can be unbound (a name 
+        // that the module does not bind, e.g. __warningregistry__ that warnings.warn sets in its namespace): its value, else its namespace's 
+        // (python::global_lookup's: the module's, then the builtins)
+        object* fn_global_read(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+            {
+                retain(aValue);
+                return aValue;
+            }
+            return fn_global_lookup(aModule, aName);
         }
 
         // python::exec_store(name, value): a name that code that exec runs binds (its locals', or its globals')
@@ -955,6 +1050,17 @@ namespace neos::python_runtime
             }
 
             // (import_get_module and import_find_and_load: an absolute name's module (its parent's first))
+            bool is_package(py const& aModule);
+
+            // (a package of the runtime's: one of its modules is in it (e.g. xml, whose xml.etree is))
+            bool runtime_package(std::string const& aName)
+            {
+                auto const prefix = aName + ".";
+                auto const& registered = modules();
+                auto const sub = registered.lower_bound(prefix);
+                return sub != registered.end() && sub->first.starts_with(prefix);
+            }
+
             py find_and_load(std::string const& aName)
             {
                 py const modules = import_attribute("sys", "modules");
@@ -976,6 +1082,9 @@ namespace neos::python_runtime
                     parent = find_and_load(aName.substr(0u, dot));
                 if (auto m = existing(); !m.empty())
                     return m;
+                // (its parent is not a package: ModuleNotFoundError, as CPython's _find_and_load_unlocked's)
+                if (!parent.empty() && !is_package(parent) && !runtime_package(aName.substr(0u, dot)))
+                    module_not_found("No module named " + key.repr() + "; " + py{ aName.substr(0u, dot) }.repr() + " is not a package", aName);
                 if (!module_name(aName))
                     module_not_found("No module named " + key.repr(), aName);
                 try
@@ -987,7 +1096,12 @@ namespace neos::python_runtime
                     // (its traceback: without the import statement's frame (as CPython's remove_importlib_frames))
                     py const e = py_take_exception();
                     py tb = e.attr("__traceback__");
-                    while (!tb.is_none() && tb.attr("tb_frame").attr("f_code").attr("co_filename").str() != "<string>")
+                    auto const importer = [](py const& aEntry)
+                    {
+                        py const frame = aEntry.attr("tb_frame");
+                        return !frame.is_none() && frame.attr("f_code").attr("co_filename").str() == "<string>";
+                    };
+                    while (!tb.is_none() && !importer(tb))
                         tb = tb.attr("tb_next");
                     if (!tb.is_none())
                         e.method("with_traceback", { tb.attr("tb_next") });

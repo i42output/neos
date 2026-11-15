@@ -148,6 +148,15 @@ namespace neos::python_runtime::detail::tomllib__parser_module
         void make_tomllib__parser()
         {
             static module_writer const& w = writer("tomllib._parser");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("tomllib._parser", "MappingProxyType", import_attribute("types", "MappingProxyType"));
+            define("tomllib._parser", "NamedTuple", import_attribute("typing", "NamedTuple"));
+            define("tomllib._parser", "RE_DATETIME", import_attribute("tomllib._re", "RE_DATETIME"));
+            define("tomllib._parser", "RE_LOCALTIME", import_attribute("tomllib._re", "RE_LOCALTIME"));
+            define("tomllib._parser", "RE_NUMBER", import_attribute("tomllib._re", "RE_NUMBER"));
+            define("tomllib._parser", "match_to_datetime", import_attribute("tomllib._re", "match_to_datetime"));
+            define("tomllib._parser", "match_to_localtime", import_attribute("tomllib._re", "match_to_localtime"));
+            define("tomllib._parser", "match_to_number", import_attribute("tomllib._re", "match_to_number"));
             // SPDX-License-Identifier: MIT
             // SPDX-FileCopyrightText: 2021 Taneli Hukkinen
             // Licensed to PSF under a Contributor Agreement.
@@ -170,7 +179,7 @@ namespace neos::python_runtime::detail::tomllib__parser_module
             define("tomllib._parser", "BARE_KEY_CHARS", (B<"frozenset">())(((Mod<"string">().attr("ascii_letters")) + (Mod<"string">().attr("digits"))) + (S<"-_">())));
             define("tomllib._parser", "KEY_INITIAL_CHARS", (G<"tomllib._parser.BARE_KEY_CHARS">()) | (B<"frozenset">())(S<"\"'">()));
             define("tomllib._parser", "HEXDIGIT_CHARS", (B<"frozenset">())(Mod<"string">().attr("hexdigits")));
-            define("tomllib._parser", "BASIC_STR_ESCAPE_REPLACEMENTS", (Mod<"types">().attr("MappingProxyType"))(dict_of({ { S<"\\b">(), S<"\b">() }, { S<"\\t">(), S<"\t">() }, { S<"\\n">(), S<"\n">() }, { S<"\\f">(), S<"\f">() }, { S<"\\r">(), S<"\r">() }, { S<"\\\"">(), S<"\"">() }, { S<"\\\\">(), S<"\\">() } })));
+            define("tomllib._parser", "BASIC_STR_ESCAPE_REPLACEMENTS", (G<"tomllib._parser.MappingProxyType">())(dict_of({ { S<"\\b">(), S<"\b">() }, { S<"\\t">(), S<"\t">() }, { S<"\\n">(), S<"\n">() }, { S<"\\f">(), S<"\f">() }, { S<"\\r">(), S<"\r">() }, { S<"\\\"">(), S<"\"">() }, { S<"\\\\">(), S<"\\">() } })));
             define("tomllib._parser", "TOMLDecodeError", w.make_class("TOMLDecodeError", { B<"ValueError">() }, {
  }));
 
@@ -496,7 +505,7 @@ namespace neos::python_runtime::detail::tomllib__parser_module
                         return none();
                     }) }, }));
 
-            define("tomllib._parser", "Output", w.make_class("Output", { Mod<"typing">().attr("NamedTuple") }, {
+            define("tomllib._parser", "Output", w.make_class("Output", { G<"tomllib._parser.NamedTuple">() }, {
                 { "__annotations__", dict_of({ { S<"data">(), S<"NestedDict">() }, { S<"flags">(), S<"Flags">() } }) }, }));
 
             define("tomllib._parser", "skip_chars", w.function("skip_chars", "skip_chars", { py_positional("src"), py_positional("pos"), py_positional("chars") }, [](arguments a) -> py
@@ -1286,12 +1295,12 @@ namespace neos::python_runtime::detail::tomllib__parser_module
                         return (G<"tomllib._parser.parse_inline_table">())(src, pos, parse_float);
                     }
                     // Dates and times
-                    datetime_match = (Mod<"tomllib._re">().attr("RE_DATETIME")).method("match", { src, pos });
+                    datetime_match = (G<"tomllib._parser.RE_DATETIME">()).method("match", { src, pos });
                     if (datetime_match.truthy())
                     {
                         try
                         {
-                            datetime_obj = (Mod<"tomllib._re">().attr("match_to_datetime"))(datetime_match);
+                            datetime_obj = (G<"tomllib._parser.match_to_datetime">())(datetime_match);
                         }
                         catch (raised const&)
                         {
@@ -1307,18 +1316,18 @@ namespace neos::python_runtime::detail::tomllib__parser_module
                         }
                         return py_tuple({ datetime_match.method("end"), datetime_obj });
                     }
-                    localtime_match = (Mod<"tomllib._re">().attr("RE_LOCALTIME")).method("match", { src, pos });
+                    localtime_match = (G<"tomllib._parser.RE_LOCALTIME">()).method("match", { src, pos });
                     if (localtime_match.truthy())
                     {
-                        return py_tuple({ localtime_match.method("end"), (Mod<"tomllib._re">().attr("match_to_localtime"))(localtime_match) });
+                        return py_tuple({ localtime_match.method("end"), (G<"tomllib._parser.match_to_localtime">())(localtime_match) });
                     }
                     // Integers and "normal" floats.
                     // The regex will greedily match any type starting with a decimal
                     // char, so needs to be located after handling of dates and times.
-                    number_match = (Mod<"tomllib._re">().attr("RE_NUMBER")).method("match", { src, pos });
+                    number_match = (G<"tomllib._parser.RE_NUMBER">()).method("match", { src, pos });
                     if (number_match.truthy())
                     {
-                        return py_tuple({ number_match.method("end"), (Mod<"tomllib._re">().attr("match_to_number"))(number_match, parse_float) });
+                        return py_tuple({ number_match.method("end"), (G<"tomllib._parser.match_to_number">())(number_match, parse_float) });
                     }
                     // Special floats
                     first_three = src[B<"slice">()(pos, pos + (I<3>()), none())];
@@ -1409,17 +1418,9 @@ namespace neos::python_runtime::detail::tomllib__parser_module
                 aAttributes.emplace_back("Iterable", import_attribute("collections.abc", "Iterable").release());
                 aAttributes.emplace_back("string", py{ fn_import("string") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
-                aAttributes.emplace_back("MappingProxyType", import_attribute("types", "MappingProxyType").release());
                 aAttributes.emplace_back("Any", import_attribute("typing", "Any").release());
                 aAttributes.emplace_back("BinaryIO", import_attribute("typing", "BinaryIO").release());
-                aAttributes.emplace_back("NamedTuple", import_attribute("typing", "NamedTuple").release());
                 aAttributes.emplace_back("Final", import_attribute("typing", "Final").release());
-                aAttributes.emplace_back("RE_DATETIME", import_attribute("tomllib._re", "RE_DATETIME").release());
-                aAttributes.emplace_back("RE_LOCALTIME", import_attribute("tomllib._re", "RE_LOCALTIME").release());
-                aAttributes.emplace_back("RE_NUMBER", import_attribute("tomllib._re", "RE_NUMBER").release());
-                aAttributes.emplace_back("match_to_datetime", import_attribute("tomllib._re", "match_to_datetime").release());
-                aAttributes.emplace_back("match_to_localtime", import_attribute("tomllib._re", "match_to_localtime").release());
-                aAttributes.emplace_back("match_to_number", import_attribute("tomllib._re", "match_to_number").release());
                 aAttributes.emplace_back("Key", import_attribute("tomllib._types", "Key").release());
                 aAttributes.emplace_back("ParseFloat", import_attribute("tomllib._types", "ParseFloat").release());
                 aAttributes.emplace_back("Pos", import_attribute("tomllib._types", "Pos").release());
@@ -1431,6 +1432,14 @@ namespace neos::python_runtime::detail::tomllib__parser_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("tomllib._parser", tomllib__parser_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("tomllib._parser", tomllib__parser_module, assigned);
     }
 }

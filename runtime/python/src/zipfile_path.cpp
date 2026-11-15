@@ -148,6 +148,8 @@ namespace neos::python_runtime::detail::zipfile__path_module
         void make_zipfile__path()
         {
             static module_writer const& w = writer("zipfile._path");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("zipfile._path", "Translator", import_attribute("zipfile._path.glob", "Translator"));
             define("zipfile._path", "__all__", py_list({ S<"Path">() }));
             define("zipfile._path", "_parents", w.function("_parents", "_parents", { py_positional("path") }, [](arguments a) -> py
                 {
@@ -612,7 +614,7 @@ namespace neos::python_runtime::detail::zipfile__path_module
                             py_raise((B<"ValueError">())(S(std::string{ "Unacceptable pattern: " } + pattern.repr())));
                         }
                         prefix = (Mod<"re">().attr("escape"))(self.attr("at"));
-                        tr = (Mod<"zipfile._path.glob">().attr("Translator")).call({  }, { { "seps", S<"/">() } });
+                        tr = (G<"zipfile._path.Translator">()).call({  }, { { "seps", S<"/">() } });
                         matches_ = (Mod<"re">().attr("compile"))(prefix + tr.method("translate", { pattern })).attr("fullmatch");
                         return (B<"map">())(self.attr("_next"), (B<"filter">())(matches_, self.attr("root").method("namelist")));
                     }) },
@@ -693,7 +695,6 @@ namespace neos::python_runtime::detail::zipfile__path_module
                 aAttributes.emplace_back("stat", py{ fn_import("stat") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("zipfile", py{ fn_import("zipfile") }.release());
-                aAttributes.emplace_back("Translator", import_attribute("zipfile._path.glob", "Translator").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -702,6 +703,14 @@ namespace neos::python_runtime::detail::zipfile__path_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("zipfile._path", zipfile__path_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("zipfile._path", zipfile__path_module, assigned);
     }
 }

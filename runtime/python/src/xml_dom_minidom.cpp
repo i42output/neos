@@ -160,6 +160,11 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
         void make_xml_dom_minidom()
         {
             static module_writer const& w = writer("xml.dom.minidom");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xml.dom.minidom", "EMPTY_NAMESPACE", import_attribute("xml.dom", "EMPTY_NAMESPACE"));
+            define("xml.dom.minidom", "EMPTY_PREFIX", import_attribute("xml.dom", "EMPTY_PREFIX"));
+            define("xml.dom.minidom", "DOMImplementationLS", import_attribute("xml.dom.xmlbuilder", "DOMImplementationLS"));
+            define("xml.dom.minidom", "DocumentLS", import_attribute("xml.dom.xmlbuilder", "DocumentLS"));
             // This is used by the ID-cache invalidation checks; the list isn't
             // actually complete, since the nodes being checked will never be the
             // DOCUMENT_NODE or DOCUMENT_FRAGMENT_NODE.  (The node being checked is
@@ -181,7 +186,7 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
                 { "ownerDocument", none() },
                 { "nextSibling", none() },
                 { "previousSibling", none() },
-                { "prefix", Mod<"xml.dom">().attr("EMPTY_PREFIX") },
+                { "prefix", G<"xml.dom.minidom.EMPTY_PREFIX">() },
                 { "__bool__", w.method("Node", "__bool__", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -808,7 +813,7 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
                 { "specified", boolean(false) },
                 { "_is_id", boolean(false) },
                 { "_child_node_types", py_tuple({ (G<"xml.dom.minidom.Node">()).attr("TEXT_NODE"), (G<"xml.dom.minidom.Node">()).attr("ENTITY_REFERENCE_NODE") }) },
-                { "__init__", w.method("Attr", "__init__", { py_positional("qName"), py_positional("namespaceURI", Mod<"xml.dom">().attr("EMPTY_NAMESPACE")), py_positional("localName", none()), py_positional("prefix", none()) }, [](arguments a) -> py
+                { "__init__", w.method("Attr", "__init__", { py_positional("qName"), py_positional("namespaceURI", G<"xml.dom.minidom.EMPTY_NAMESPACE">()), py_positional("localName", none()), py_positional("prefix", none()) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py qName = a[1];
@@ -1516,7 +1521,7 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
                 { "schemaType", G<"xml.dom.minidom._no_type">() },
                 { "_magic_id_nodes", I<0>() },
                 { "_child_node_types", py_tuple({ (G<"xml.dom.minidom.Node">()).attr("ELEMENT_NODE"), (G<"xml.dom.minidom.Node">()).attr("PROCESSING_INSTRUCTION_NODE"), (G<"xml.dom.minidom.Node">()).attr("COMMENT_NODE"), (G<"xml.dom.minidom.Node">()).attr("TEXT_NODE"), (G<"xml.dom.minidom.Node">()).attr("CDATA_SECTION_NODE"), (G<"xml.dom.minidom.Node">()).attr("ENTITY_REFERENCE_NODE") }) },
-                { "__init__", w.method("Element", "__init__", { py_positional("tagName"), py_positional("namespaceURI", Mod<"xml.dom">().attr("EMPTY_NAMESPACE")), py_positional("prefix", none()), py_positional("localName", none()) }, [](arguments a) -> py
+                { "__init__", w.method("Element", "__init__", { py_positional("tagName"), py_positional("namespaceURI", G<"xml.dom.minidom.EMPTY_NAMESPACE">()), py_positional("prefix", none()), py_positional("localName", none()) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py tagName = a[1];
@@ -2965,7 +2970,7 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
 
                 // DOM Level 3 (WD 9 April 2002)
                 // internal
-            define("xml.dom.minidom", "DOMImplementation", w.make_class("DOMImplementation", { Mod<"xml.dom.xmlbuilder">().attr("DOMImplementationLS") }, {
+            define("xml.dom.minidom", "DOMImplementation", w.make_class("DOMImplementation", { G<"xml.dom.minidom.DOMImplementationLS">() }, {
                 { "_features", py_list({ py_tuple({ S<"core">(), S<"1.0">() }), py_tuple({ S<"core">(), S<"2.0">() }), py_tuple({ S<"core">(), none() }), py_tuple({ S<"xml">(), S<"1.0">() }), py_tuple({ S<"xml">(), S<"2.0">() }), py_tuple({ S<"xml">(), none() }), py_tuple({ S<"ls-load">(), S<"3.0">() }), py_tuple({ S<"ls-load">(), none() }) }) },
                 { "hasFeature", w.method("DOMImplementation", "hasFeature", { py_positional("feature"), py_positional("version") }, [](arguments a) -> py
                     {
@@ -3150,7 +3155,7 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
                 // A couple of implementation-specific helpers to create node types
                 // not supported by the W3C DOM specs:
                 // DOM Level 3 (WD 9 April 2002)
-            define("xml.dom.minidom", "Document", w.make_class("Document", { G<"xml.dom.minidom.Node">(), Mod<"xml.dom.xmlbuilder">().attr("DocumentLS") }, {
+            define("xml.dom.minidom", "Document", w.make_class("Document", { G<"xml.dom.minidom.Node">(), G<"xml.dom.minidom.DocumentLS">() }, {
                 { "__slots__", py_tuple({ S<"_elem_info">(), S<"doctype">(), S<"_id_search_stack">(), S<"childNodes">(), S<"_id_cache">() }) },
                 { "_child_node_types", py_tuple({ (G<"xml.dom.minidom.Node">()).attr("ELEMENT_NODE"), (G<"xml.dom.minidom.Node">()).attr("PROCESSING_INSTRUCTION_NODE"), (G<"xml.dom.minidom.Node">()).attr("COMMENT_NODE"), (G<"xml.dom.minidom.Node">()).attr("DOCUMENT_TYPE_NODE") }) },
                 { "implementation", (G<"xml.dom.minidom.DOMImplementation">())() },
@@ -3666,7 +3671,7 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
                         {
                             py_raise((Mod<"xml.dom">().attr("NotSupportedErr"))(S<"renameNode() only applies to element and attribute nodes">()));
                         }
-                        if (namespaceURI != (Mod<"xml.dom">().attr("EMPTY_NAMESPACE")))
+                        if (namespaceURI != (G<"xml.dom.minidom.EMPTY_NAMESPACE">()))
                         {
                             if (name.contains((S<":">())))
                             {
@@ -3985,8 +3990,6 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("io", py{ fn_import("io") }.release());
                 aAttributes.emplace_back("xml", py{ fn_import("xml") }.release());
-                aAttributes.emplace_back("EMPTY_NAMESPACE", import_attribute("xml.dom", "EMPTY_NAMESPACE").release());
-                aAttributes.emplace_back("EMPTY_PREFIX", import_attribute("xml.dom", "EMPTY_PREFIX").release());
                 aAttributes.emplace_back("XMLNS_NAMESPACE", import_attribute("xml.dom", "XMLNS_NAMESPACE").release());
                 aAttributes.emplace_back("domreg", import_attribute("xml.dom", "domreg").release());
                 {
@@ -3996,8 +3999,6 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
                         if (auto const text = n.str(); all || !text.starts_with("_"))
                             aAttributes.emplace_back(text, m.attr(text.c_str()).release());
                 }
-                aAttributes.emplace_back("DOMImplementationLS", import_attribute("xml.dom.xmlbuilder", "DOMImplementationLS").release());
-                aAttributes.emplace_back("DocumentLS", import_attribute("xml.dom.xmlbuilder", "DocumentLS").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -4006,6 +4007,14 @@ namespace neos::python_runtime::detail::xml_dom_minidom_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.dom.minidom", xml_dom_minidom_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.dom.minidom", xml_dom_minidom_module, assigned);
     }
 }

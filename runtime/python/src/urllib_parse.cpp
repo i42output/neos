@@ -147,6 +147,8 @@ namespace neos::python_runtime::detail::urllib_parse_module
         void make_urllib_parse()
         {
             static module_writer const& w = writer("urllib.parse");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("urllib.parse", "namedtuple", import_attribute("collections", "namedtuple"));
             define("urllib.parse", "__all__", py_list({ S<"urlparse">(), S<"urlunparse">(), S<"urljoin">(), S<"urldefrag">(), S<"urlsplit">(), S<"urlunsplit">(), S<"urlencode">(), S<"parse_qs">(), S<"parse_qsl">(), S<"quote">(), S<"quote_plus">(), S<"quote_from_bytes">(), S<"unquote">(), S<"unquote_plus">(), S<"unquote_to_bytes">(), S<"DefragResult">(), S<"ParseResult">(), S<"SplitResult">(), S<"DefragResultBytes">(), S<"ParseResultBytes">(), S<"SplitResultBytes">() }));
             // A classification of schemes.
             // The empty string classifies URLs with no scheme specified,
@@ -464,9 +466,9 @@ namespace neos::python_runtime::detail::urllib_parse_module
                         return py_tuple({ hostname, port });
                     })) }, }));
 
-            define("urllib.parse", "_DefragResultBase", (Mod<"collections">().attr("namedtuple"))(S<"DefragResult">(), S<"url fragment">()));
-            define("urllib.parse", "_SplitResultBase", (Mod<"collections">().attr("namedtuple"))(S<"SplitResult">(), S<"scheme netloc path query fragment">()));
-            define("urllib.parse", "_ParseResultBase", (Mod<"collections">().attr("namedtuple"))(S<"ParseResult">(), S<"scheme netloc path params query fragment">()));
+            define("urllib.parse", "_DefragResultBase", (G<"urllib.parse.namedtuple">())(S<"DefragResult">(), S<"url fragment">()));
+            define("urllib.parse", "_SplitResultBase", (G<"urllib.parse.namedtuple">())(S<"SplitResult">(), S<"scheme netloc path query fragment">()));
+            define("urllib.parse", "_ParseResultBase", (G<"urllib.parse.namedtuple">())(S<"ParseResult">(), S<"scheme netloc path params query fragment">()));
             (G<"urllib.parse._DefragResultBase">()).set_attr("__doc__", S<"\nDefragResult(url, fragment)\n\nA 2-tuple that contains the url without fragment identifier and the fragment\nidentifier as a separate argument.\n">());
             (G<"urllib.parse._DefragResultBase">()).attr("url").set_attr("__doc__", S<"The URL with no fragment identifier.">());
             (G<"urllib.parse._DefragResultBase">()).attr("fragment").set_attr("__doc__", S<"\nFragment identifier separated from URL, that allows indirect identification of a\nsecondary resource by reference to a primary resource and additional identifying\ninformation.\n">());
@@ -1934,7 +1936,6 @@ namespace neos::python_runtime::detail::urllib_parse_module
                 }
                 if (auto const doc = urllib_parse_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("namedtuple", import_attribute("collections", "namedtuple").release());
                 aAttributes.emplace_back("functools", py{ fn_import("functools") }.release());
                 aAttributes.emplace_back("math", py{ fn_import("math") }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
@@ -1949,6 +1950,14 @@ namespace neos::python_runtime::detail::urllib_parse_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("urllib.parse", urllib_parse_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("urllib.parse", urllib_parse_module, assigned);
     }
 }

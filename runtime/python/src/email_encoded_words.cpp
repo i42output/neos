@@ -160,6 +160,9 @@ namespace neos::python_runtime::detail::email__encoded_words_module
         void make_email__encoded_words()
         {
             static module_writer const& w = writer("email._encoded_words");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email._encoded_words", "ascii_letters", import_attribute("string", "ascii_letters"));
+            define("email._encoded_words", "digits", import_attribute("string", "digits"));
             // An ecoded word looks like this:
             // 
             // =?charset[*lang]?cte?encoded_string?=
@@ -212,7 +215,7 @@ namespace neos::python_runtime::detail::email__encoded_words_module
 
             // dict mapping bytes to their encoded form
             define("email._encoded_words", "_QByteMap", w.make_class("_QByteMap", { B<"dict">() }, {
-                { "safe", (py{ make_bytes(std::string{ "\x2d\x21\x2a\x2b\x2f", 5 }) } + (Mod<"string">().attr("ascii_letters")).method("encode", { S<"ascii">() })) + (Mod<"string">().attr("digits")).method("encode", { S<"ascii">() }) },
+                { "safe", (py{ make_bytes(std::string{ "\x2d\x21\x2a\x2b\x2f", 5 }) } + (G<"email._encoded_words.ascii_letters">()).method("encode", { S<"ascii">() })) + (G<"email._encoded_words.digits">()).method("encode", { S<"ascii">() }) },
                 { "__missing__", w.method("_QByteMap", "__missing__", { py_positional("key") }, [](arguments a) -> py
                     {
                         py self = a[0];
@@ -433,8 +436,6 @@ namespace neos::python_runtime::detail::email__encoded_words_module
                 aAttributes.emplace_back("base64", py{ fn_import("base64") }.release());
                 aAttributes.emplace_back("binascii", py{ fn_import("binascii") }.release());
                 aAttributes.emplace_back("functools", py{ fn_import("functools") }.release());
-                aAttributes.emplace_back("ascii_letters", import_attribute("string", "ascii_letters").release());
-                aAttributes.emplace_back("digits", import_attribute("string", "digits").release());
                 aAttributes.emplace_back("errors", import_attribute("email", "errors").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
@@ -444,6 +445,14 @@ namespace neos::python_runtime::detail::email__encoded_words_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email._encoded_words", email__encoded_words_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email._encoded_words", email__encoded_words_module, assigned);
     }
 }

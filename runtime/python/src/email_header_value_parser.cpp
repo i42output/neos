@@ -160,6 +160,9 @@ namespace neos::python_runtime::detail::email__header_value_parser_module
         void make_email__header_value_parser()
         {
             static module_writer const& w = writer("email._header_value_parser");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email._header_value_parser", "hexdigits", import_attribute("string", "hexdigits"));
+            define("email._header_value_parser", "itemgetter", import_attribute("operator", "itemgetter"));
             // 
             // Useful constants and functions
             // 
@@ -1088,7 +1091,7 @@ namespace neos::python_runtime::detail::email__header_value_parser_module
                                 auto const items35 = unpack(item, 2);
                                 name = items35[0];
                                 parts = items35[1];
-                                parts = (B<"sorted">()).call({ parts }, { { "key", (Mod<"operator">().attr("itemgetter"))(I<0>()) } });
+                                parts = (B<"sorted">()).call({ parts }, { { "key", (G<"email._header_value_parser.itemgetter">())(I<0>()) } });
                                 first_param = parts[I<0>()][I<1>()];
                                 charset = first_param.attr("charset");
                                 // Our arbitrary error recovery is to ignore duplicate parameters,
@@ -1518,7 +1521,7 @@ namespace neos::python_runtime::detail::email__header_value_parser_module
                         py_raise((Mod<"email.errors">().attr("HeaderParseError"))((S<"expected encoded word but found {}">()).method("format", { value })));
                     }
                     remstr = (S<"">()).method("join", { remainder });
-                    if (((py{ remstr.size() } > (I<1>())) && (Mod<"string">().attr("hexdigits")).contains(remstr[I<0>()]) && (Mod<"string">().attr("hexdigits")).contains(remstr[I<1>()]) && (tok.method("count", { S<"?">() }) < (I<2>()))))
+                    if (((py{ remstr.size() } > (I<1>())) && (G<"email._header_value_parser.hexdigits">()).contains(remstr[I<0>()]) && (G<"email._header_value_parser.hexdigits">()).contains(remstr[I<1>()]) && (tok.method("count", { S<"?">() }) < (I<2>()))))
                     {
                         // The ? after the CTE was followed by an encoded word escape (=XX).
                         auto const items47 = B<"list">()(remstr.method("split", { S<"?=">(), I<1>() })).items();
@@ -4816,8 +4819,6 @@ namespace neos::python_runtime::detail::email__header_value_parser_module
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
-                aAttributes.emplace_back("hexdigits", import_attribute("string", "hexdigits").release());
-                aAttributes.emplace_back("itemgetter", import_attribute("operator", "itemgetter").release());
                 aAttributes.emplace_back("_ew", import_attribute("email", "_encoded_words").release());
                 aAttributes.emplace_back("errors", import_attribute("email", "errors").release());
                 aAttributes.emplace_back("utils", import_attribute("email", "utils").release());
@@ -4829,6 +4830,14 @@ namespace neos::python_runtime::detail::email__header_value_parser_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email._header_value_parser", email__header_value_parser_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email._header_value_parser", email__header_value_parser_module, assigned);
     }
 }

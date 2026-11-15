@@ -160,6 +160,29 @@ namespace neos::python_runtime::detail::urllib_request_module
         void make_urllib_request()
         {
             static module_writer const& w = writer("urllib.request");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("urllib.request", "URLError", import_attribute("urllib.error", "URLError"));
+            define("urllib.request", "HTTPError", import_attribute("urllib.error", "HTTPError"));
+            define("urllib.request", "ContentTooShortError", import_attribute("urllib.error", "ContentTooShortError"));
+            define("urllib.request", "urlparse", import_attribute("urllib.parse", "urlparse"));
+            define("urllib.request", "urlsplit", import_attribute("urllib.parse", "urlsplit"));
+            define("urllib.request", "urljoin", import_attribute("urllib.parse", "urljoin"));
+            define("urllib.request", "unwrap", import_attribute("urllib.parse", "unwrap"));
+            define("urllib.request", "quote", import_attribute("urllib.parse", "quote"));
+            define("urllib.request", "unquote", import_attribute("urllib.parse", "unquote"));
+            define("urllib.request", "_splittype", import_attribute("urllib.parse", "_splittype"));
+            define("urllib.request", "_splithost", import_attribute("urllib.parse", "_splithost"));
+            define("urllib.request", "_splitport", import_attribute("urllib.parse", "_splitport"));
+            define("urllib.request", "_splituser", import_attribute("urllib.parse", "_splituser"));
+            define("urllib.request", "_splitpasswd", import_attribute("urllib.parse", "_splitpasswd"));
+            define("urllib.request", "_splitattr", import_attribute("urllib.parse", "_splitattr"));
+            define("urllib.request", "_splitquery", import_attribute("urllib.parse", "_splitquery"));
+            define("urllib.request", "_splitvalue", import_attribute("urllib.parse", "_splitvalue"));
+            define("urllib.request", "_splittag", import_attribute("urllib.parse", "_splittag"));
+            define("urllib.request", "_to_bytes", import_attribute("urllib.parse", "_to_bytes"));
+            define("urllib.request", "unquote_to_bytes", import_attribute("urllib.parse", "unquote_to_bytes"));
+            define("urllib.request", "urlunparse", import_attribute("urllib.parse", "urlunparse"));
+            define("urllib.request", "addclosehook", import_attribute("urllib.response", "addclosehook"));
             // XXX issues:
             // If an authentication error handler that tries to perform
             // authentication for some reason but fails, how should the error be
@@ -232,7 +255,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     py size;
                     py tfp;
                     py url_type;
-                    auto const items2 = unpack((Mod<"urllib.parse">().attr("_splittype"))(url), 2);
+                    auto const items2 = unpack((G<"urllib.request._splittype">())(url), 2);
                     url_type = items2[0];
                     path = items2[1];
                     {
@@ -327,7 +350,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     }
                     if (((size >= (I<0>())) && (read < size)))
                     {
-                        py_raise((Mod<"urllib.error">().attr("ContentTooShortError"))((S<"retrieval incomplete: got only %i out of %i bytes">()) % py_tuple({ read, size }), result));
+                        py_raise((G<"urllib.request.ContentTooShortError">())((S<"retrieval incomplete: got only %i out of %i bytes">()) % py_tuple({ read, size }), result));
                     }
                     return result;
                 }));
@@ -368,7 +391,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     py host;
                     py url;
                     url = request.attr("full_url");
-                    host = (Mod<"urllib.parse">().attr("urlparse"))(url)[I<1>()];
+                    host = (G<"urllib.request.urlparse">())(url)[I<1>()];
                     if (host == (S<"">()))
                     {
                         host = request.method("get_header", { S<"Host">(), S<"">() });
@@ -427,8 +450,8 @@ namespace neos::python_runtime::detail::urllib_request_module
                     {
                         py self = a[0];
                         py url = a[1];
-                        self.set_attr("_full_url", (Mod<"urllib.parse">().attr("unwrap"))(url));
-                        auto const items10 = unpack((Mod<"urllib.parse">().attr("_splittag"))(self.attr("_full_url")), 2);
+                        self.set_attr("_full_url", (G<"urllib.request.unwrap">())(url));
+                        auto const items10 = unpack((G<"urllib.request._splittag">())(self.attr("_full_url")), 2);
                         self.set_attr("_full_url", items10[0]);
                         self.set_attr("fragment", items10[1]);
                         self.method("_parse");
@@ -471,19 +494,19 @@ namespace neos::python_runtime::detail::urllib_request_module
                     {
                         py self = a[0];
                         py rest;
-                        auto const items11 = unpack((Mod<"urllib.parse">().attr("_splittype"))(self.attr("_full_url")), 2);
+                        auto const items11 = unpack((G<"urllib.request._splittype">())(self.attr("_full_url")), 2);
                         self.set_attr("type", items11[0]);
                         rest = items11[1];
                         if (self.attr("type").is_none())
                         {
                             py_raise((B<"ValueError">())((S<"unknown url type: %r">()) % self.attr("full_url")));
                         }
-                        auto const items12 = unpack((Mod<"urllib.parse">().attr("_splithost"))(rest), 2);
+                        auto const items12 = unpack((G<"urllib.request._splithost">())(rest), 2);
                         self.set_attr("host", items12[0]);
                         self.set_attr("selector", items12[1]);
                         if (self.attr("host").truthy())
                         {
-                            self.set_attr("host", (Mod<"urllib.parse">().attr("unquote"))(self.attr("host")));
+                            self.set_attr("host", (G<"urllib.request.unquote">())(self.attr("host")));
                         }
                         return none();
                     }) },
@@ -942,7 +965,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py code = a[3];
                         py msg = a[4];
                         py hdrs = a[5];
-                        py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), code, msg, hdrs, fp));
+                        py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), code, msg, hdrs, fp));
                     }) }, }));
 
                 // maximum number of redirections to any single URL
@@ -971,7 +994,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         m = req.method("get_method");
                         if (!([&]() -> py { py const t = [&]() -> py { py const t = boolean(py_tuple({ I<301>(), I<302>(), I<303>(), I<307>(), I<308>() }).contains(code)); return !t.truthy() ? t : boolean(py_tuple({ S<"GET">(), S<"HEAD">() }).contains(m)); }(); return t.truthy() ? t : [&]() -> py { py const t = boolean(py_tuple({ I<301>(), I<302>(), I<303>() }).contains(code)); return !t.truthy() ? t : boolean(m == (S<"POST">())); }(); }()).truthy())
                         {
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), code, msg, headers, fp));
+                            py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), code, msg, headers, fp));
                         }
                         // Strictly (according to RFC 2616), 301 or 302 in response to
                         // a POST MUST NOT cause a redirection without confirmation
@@ -1011,24 +1034,24 @@ namespace neos::python_runtime::detail::urllib_request_module
                             return none();
                         }
                         // fix a possible malformed URL
-                        urlparts = (Mod<"urllib.parse">().attr("urlparse"))(newurl);
+                        urlparts = (G<"urllib.request.urlparse">())(newurl);
                         // For security reasons we don't allow redirection to anything other
                         // than http, https or ftp.
                         if (!py_tuple({ S<"http">(), S<"https">(), S<"ftp">(), S<"">() }).contains(urlparts.attr("scheme")))
                         {
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
+                            py_raise((G<"urllib.request.HTTPError">())(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
                         }
                         if (((!urlparts.attr("path").truthy()) && urlparts.attr("netloc").truthy()))
                         {
                             urlparts = (B<"list">())(urlparts);
                             urlparts.set_item(I<2>(), S<"/">());
                         }
-                        newurl = (Mod<"urllib.parse">().attr("urlunparse"))(urlparts);
+                        newurl = (G<"urllib.request.urlunparse">())(urlparts);
                         // http.client.parse_headers() decodes as ISO-8859-1.  Recover the
                         // original bytes and percent-encode non-ASCII bytes, and any special
                         // characters such as the space.
-                        newurl = (Mod<"urllib.parse">().attr("quote")).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
-                        newurl = (Mod<"urllib.parse">().attr("urljoin"))(req.attr("full_url"), newurl);
+                        newurl = (G<"urllib.request.quote">()).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
+                        newurl = (G<"urllib.request.urljoin">())(req.attr("full_url"), newurl);
                         // XXX Probably want to forget about the state of the current
                         // request, although that might interact poorly with other
                         // handlers that also use handler-specific request attributes
@@ -1046,7 +1069,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             new_.set_attr("redirect_dict", value26);
                             if (((visited.method("get", { newurl, I<0>() }) >= self.attr("max_repeats")) || (py{ visited.size() } >= self.attr("max_redirections"))))
                             {
-                                py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
+                                py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
                             }
                         }
                         else
@@ -1088,24 +1111,24 @@ namespace neos::python_runtime::detail::urllib_request_module
                             return none();
                         }
                         // fix a possible malformed URL
-                        urlparts = (Mod<"urllib.parse">().attr("urlparse"))(newurl);
+                        urlparts = (G<"urllib.request.urlparse">())(newurl);
                         // For security reasons we don't allow redirection to anything other
                         // than http, https or ftp.
                         if (!py_tuple({ S<"http">(), S<"https">(), S<"ftp">(), S<"">() }).contains(urlparts.attr("scheme")))
                         {
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
+                            py_raise((G<"urllib.request.HTTPError">())(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
                         }
                         if (((!urlparts.attr("path").truthy()) && urlparts.attr("netloc").truthy()))
                         {
                             urlparts = (B<"list">())(urlparts);
                             urlparts.set_item(I<2>(), S<"/">());
                         }
-                        newurl = (Mod<"urllib.parse">().attr("urlunparse"))(urlparts);
+                        newurl = (G<"urllib.request.urlunparse">())(urlparts);
                         // http.client.parse_headers() decodes as ISO-8859-1.  Recover the
                         // original bytes and percent-encode non-ASCII bytes, and any special
                         // characters such as the space.
-                        newurl = (Mod<"urllib.parse">().attr("quote")).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
-                        newurl = (Mod<"urllib.parse">().attr("urljoin"))(req.attr("full_url"), newurl);
+                        newurl = (G<"urllib.request.quote">()).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
+                        newurl = (G<"urllib.request.urljoin">())(req.attr("full_url"), newurl);
                         // XXX Probably want to forget about the state of the current
                         // request, although that might interact poorly with other
                         // handlers that also use handler-specific request attributes
@@ -1123,7 +1146,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             new_.set_attr("redirect_dict", value26);
                             if (((visited.method("get", { newurl, I<0>() }) >= self.attr("max_repeats")) || (py{ visited.size() } >= self.attr("max_redirections"))))
                             {
-                                py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
+                                py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
                             }
                         }
                         else
@@ -1165,24 +1188,24 @@ namespace neos::python_runtime::detail::urllib_request_module
                             return none();
                         }
                         // fix a possible malformed URL
-                        urlparts = (Mod<"urllib.parse">().attr("urlparse"))(newurl);
+                        urlparts = (G<"urllib.request.urlparse">())(newurl);
                         // For security reasons we don't allow redirection to anything other
                         // than http, https or ftp.
                         if (!py_tuple({ S<"http">(), S<"https">(), S<"ftp">(), S<"">() }).contains(urlparts.attr("scheme")))
                         {
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
+                            py_raise((G<"urllib.request.HTTPError">())(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
                         }
                         if (((!urlparts.attr("path").truthy()) && urlparts.attr("netloc").truthy()))
                         {
                             urlparts = (B<"list">())(urlparts);
                             urlparts.set_item(I<2>(), S<"/">());
                         }
-                        newurl = (Mod<"urllib.parse">().attr("urlunparse"))(urlparts);
+                        newurl = (G<"urllib.request.urlunparse">())(urlparts);
                         // http.client.parse_headers() decodes as ISO-8859-1.  Recover the
                         // original bytes and percent-encode non-ASCII bytes, and any special
                         // characters such as the space.
-                        newurl = (Mod<"urllib.parse">().attr("quote")).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
-                        newurl = (Mod<"urllib.parse">().attr("urljoin"))(req.attr("full_url"), newurl);
+                        newurl = (G<"urllib.request.quote">()).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
+                        newurl = (G<"urllib.request.urljoin">())(req.attr("full_url"), newurl);
                         // XXX Probably want to forget about the state of the current
                         // request, although that might interact poorly with other
                         // handlers that also use handler-specific request attributes
@@ -1200,7 +1223,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             new_.set_attr("redirect_dict", value26);
                             if (((visited.method("get", { newurl, I<0>() }) >= self.attr("max_repeats")) || (py{ visited.size() } >= self.attr("max_redirections"))))
                             {
-                                py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
+                                py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
                             }
                         }
                         else
@@ -1242,24 +1265,24 @@ namespace neos::python_runtime::detail::urllib_request_module
                             return none();
                         }
                         // fix a possible malformed URL
-                        urlparts = (Mod<"urllib.parse">().attr("urlparse"))(newurl);
+                        urlparts = (G<"urllib.request.urlparse">())(newurl);
                         // For security reasons we don't allow redirection to anything other
                         // than http, https or ftp.
                         if (!py_tuple({ S<"http">(), S<"https">(), S<"ftp">(), S<"">() }).contains(urlparts.attr("scheme")))
                         {
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
+                            py_raise((G<"urllib.request.HTTPError">())(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
                         }
                         if (((!urlparts.attr("path").truthy()) && urlparts.attr("netloc").truthy()))
                         {
                             urlparts = (B<"list">())(urlparts);
                             urlparts.set_item(I<2>(), S<"/">());
                         }
-                        newurl = (Mod<"urllib.parse">().attr("urlunparse"))(urlparts);
+                        newurl = (G<"urllib.request.urlunparse">())(urlparts);
                         // http.client.parse_headers() decodes as ISO-8859-1.  Recover the
                         // original bytes and percent-encode non-ASCII bytes, and any special
                         // characters such as the space.
-                        newurl = (Mod<"urllib.parse">().attr("quote")).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
-                        newurl = (Mod<"urllib.parse">().attr("urljoin"))(req.attr("full_url"), newurl);
+                        newurl = (G<"urllib.request.quote">()).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
+                        newurl = (G<"urllib.request.urljoin">())(req.attr("full_url"), newurl);
                         // XXX Probably want to forget about the state of the current
                         // request, although that might interact poorly with other
                         // handlers that also use handler-specific request attributes
@@ -1277,7 +1300,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             new_.set_attr("redirect_dict", value26);
                             if (((visited.method("get", { newurl, I<0>() }) >= self.attr("max_repeats")) || (py{ visited.size() } >= self.attr("max_redirections"))))
                             {
-                                py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
+                                py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
                             }
                         }
                         else
@@ -1319,24 +1342,24 @@ namespace neos::python_runtime::detail::urllib_request_module
                             return none();
                         }
                         // fix a possible malformed URL
-                        urlparts = (Mod<"urllib.parse">().attr("urlparse"))(newurl);
+                        urlparts = (G<"urllib.request.urlparse">())(newurl);
                         // For security reasons we don't allow redirection to anything other
                         // than http, https or ftp.
                         if (!py_tuple({ S<"http">(), S<"https">(), S<"ftp">(), S<"">() }).contains(urlparts.attr("scheme")))
                         {
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
+                            py_raise((G<"urllib.request.HTTPError">())(newurl, code, (S<"%s - Redirection to url '%s' is not allowed">()) % py_tuple({ msg, newurl }), headers, fp));
                         }
                         if (((!urlparts.attr("path").truthy()) && urlparts.attr("netloc").truthy()))
                         {
                             urlparts = (B<"list">())(urlparts);
                             urlparts.set_item(I<2>(), S<"/">());
                         }
-                        newurl = (Mod<"urllib.parse">().attr("urlunparse"))(urlparts);
+                        newurl = (G<"urllib.request.urlunparse">())(urlparts);
                         // http.client.parse_headers() decodes as ISO-8859-1.  Recover the
                         // original bytes and percent-encode non-ASCII bytes, and any special
                         // characters such as the space.
-                        newurl = (Mod<"urllib.parse">().attr("quote")).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
-                        newurl = (Mod<"urllib.parse">().attr("urljoin"))(req.attr("full_url"), newurl);
+                        newurl = (G<"urllib.request.quote">()).call({ newurl }, { { "encoding", S<"iso-8859-1">() }, { "safe", Mod<"string">().attr("punctuation") } });
+                        newurl = (G<"urllib.request.urljoin">())(req.attr("full_url"), newurl);
                         // XXX Probably want to forget about the state of the current
                         // request, although that might interact poorly with other
                         // handlers that also use handler-specific request attributes
@@ -1354,7 +1377,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             new_.set_attr("redirect_dict", value26);
                             if (((visited.method("get", { newurl, I<0>() }) >= self.attr("max_repeats")) || (py{ visited.size() } >= self.attr("max_redirections"))))
                             {
-                                py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
+                                py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), code, self.attr("inf_msg") + msg, headers, fp));
                             }
                         }
                         else
@@ -1385,7 +1408,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     py scheme;
                     py user;
                     py userinfo;
-                    auto const items28 = unpack((Mod<"urllib.parse">().attr("_splittype"))(proxy), 2);
+                    auto const items28 = unpack((G<"urllib.request._splittype">())(proxy), 2);
                     scheme = items28[0];
                     r_scheme = items28[1];
                     if (!r_scheme.method("startswith", { S<"/">() }).truthy())
@@ -1418,12 +1441,12 @@ namespace neos::python_runtime::detail::urllib_request_module
                         }
                         authority = r_scheme[B<"slice">()(I<2>(), end, none())];
                     }
-                    auto const items29 = unpack((Mod<"urllib.parse">().attr("_splituser"))(authority), 2);
+                    auto const items29 = unpack((G<"urllib.request._splituser">())(authority), 2);
                     userinfo = items29[0];
                     hostport = items29[1];
                     if (!userinfo.is_none())
                     {
-                        auto const items30 = unpack((Mod<"urllib.parse">().attr("_splitpasswd"))(userinfo), 2);
+                        auto const items30 = unpack((G<"urllib.request._splitpasswd">())(userinfo), 2);
                         user = items30[0];
                         password = items30[1];
                     }
@@ -1498,11 +1521,11 @@ namespace neos::python_runtime::detail::urllib_request_module
                         }
                         if ((user.truthy() && password.truthy()))
                         {
-                            user_pass = (S<"%s:%s">()) % py_tuple({ (Mod<"urllib.parse">().attr("unquote"))(user), (Mod<"urllib.parse">().attr("unquote"))(password) });
+                            user_pass = (S<"%s:%s">()) % py_tuple({ (G<"urllib.request.unquote">())(user), (G<"urllib.request.unquote">())(password) });
                             creds = (Mod<"base64">().attr("b64encode"))(user_pass.method("encode")).method("decode", { S<"ascii">() });
                             req.method("add_header", { S<"Proxy-authorization">(), (S<"Basic ">()) + creds });
                         }
-                        hostport = (Mod<"urllib.parse">().attr("unquote"))(hostport);
+                        hostport = (G<"urllib.request.unquote">())(hostport);
                         req.method("set_proxy", { hostport, proxy_type });
                         if (((orig_type == proxy_type) || (orig_type == (S<"https">()))))
                         {
@@ -1600,7 +1623,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py port;
                         py scheme;
                         // note HTTP URLs do not have a userinfo component
-                        parts = (Mod<"urllib.parse">().attr("urlsplit"))(uri);
+                        parts = (G<"urllib.request.urlsplit">())(uri);
                         if (parts[I<1>()].truthy())
                         {
                             // URI
@@ -1615,7 +1638,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             authority = uri;
                             path = S<"/">();
                         }
-                        auto const items41 = unpack((Mod<"urllib.parse">().attr("_splitport"))(authority), 2);
+                        auto const items41 = unpack((G<"urllib.request._splitport">())(authority), 2);
                         host = items41[0];
                         port = items41[1];
                         if ((default_port.truthy() && port.is_none() && (!scheme.is_none())))
@@ -1635,7 +1658,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py default_port = a[2];
                         py parts;
                         py scheme;
-                        parts = (Mod<"urllib.parse">().attr("urlsplit"))(uri);
+                        parts = (G<"urllib.request.urlsplit">())(uri);
                         scheme = (parts[I<1>()].truthy() ? parts[I<0>()] : none());
                         return B<"tuple">()(((py_list() + py_list({ [&]() -> py { py const t = scheme; return t.truthy() ? t : none(); }() })) + B<"list">()(self.method("reduce_uri", { uri, default_port }))));
                     }) },
@@ -2067,7 +2090,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             // prompting for the information. Crap. This isn't great
                             // but it's better than the current 'repeat until recursion
                             // depth exceeded' approach <wink>
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(req.attr("full_url"), I<401>(), S<"digest auth failed">(), headers, none()));
+                            py_raise((G<"urllib.request.HTTPError">())(req.attr("full_url"), I<401>(), S<"digest auth failed">(), headers, none()));
                         }
                         else
                         {
@@ -2226,7 +2249,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         else
                         {
                             // XXX handle auth-int.
-                            py_raise((Mod<"urllib.error">().attr("URLError"))((S<"qop '%s' is not supported.">()) % qop));
+                            py_raise((G<"urllib.request.URLError">())((S<"qop '%s' is not supported.">()) % qop));
                         }
                         // XXX should the partial digests be encoded too?
                         base = (S<"username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", response=\"%s\"">()) % py_tuple({ user, realm, nonce, req.attr("selector"), respdig });
@@ -2301,7 +2324,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py headers = a[5];
                         py host;
                         py retry;
-                        host = (Mod<"urllib.parse">().attr("urlparse"))(req.attr("full_url"))[I<1>()];
+                        host = (G<"urllib.request.urlparse">())(req.attr("full_url"))[I<1>()];
                         retry = self.method("http_error_auth_reqed", { S<"www-authenticate">(), host, req, headers });
                         self.method("reset_retry_count");
                         return retry;
@@ -2364,7 +2387,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         host = request.attr("host");
                         if (!host.truthy())
                         {
-                            py_raise((Mod<"urllib.error">().attr("URLError"))(S<"no host given">()));
+                            py_raise((G<"urllib.request.URLError">())(S<"no host given">()));
                         }
                         if (!request.attr("data").is_none())
                         {
@@ -2394,10 +2417,10 @@ namespace neos::python_runtime::detail::urllib_request_module
                         sel_host = host;
                         if (request.method("has_proxy").truthy())
                         {
-                            auto const items60 = unpack((Mod<"urllib.parse">().attr("_splittype"))(request.attr("selector")), 2);
+                            auto const items60 = unpack((G<"urllib.request._splittype">())(request.attr("selector")), 2);
                             scheme = items60[0];
                             sel = items60[1];
-                            auto const items61 = unpack((Mod<"urllib.parse">().attr("_splithost"))(sel), 2);
+                            auto const items61 = unpack((G<"urllib.request._splithost">())(sel), 2);
                             sel_host = items61[0];
                             sel_path = items61[1];
                         }
@@ -2434,7 +2457,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         host = req.attr("host");
                         if (!host.truthy())
                         {
-                            py_raise((Mod<"urllib.error">().attr("URLError"))(S<"no host given">()));
+                            py_raise((G<"urllib.request.URLError">())(S<"no host given">()));
                         }
                         // will parse host:port
                         h = call_ex(http_class, { host }, py{}, http_conn_args, { { "timeout", req.attr("timeout") } });
@@ -2476,7 +2499,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                                 if (matches(handler67.exception, B<"OSError">()))
                                 {
                                     err = handler67.exception;
-                                    py_raise((Mod<"urllib.error">().attr("URLError"))(err));
+                                    py_raise((G<"urllib.request.URLError">())(err));
                                 }
                                 else
                                     py_reraise(handler67.exception);
@@ -2608,7 +2631,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py req = a[1];
                         py type;
                         type = req.attr("type");
-                        py_raise((Mod<"urllib.error">().attr("URLError"))((S<"unknown url type: %s">()) % type));
+                        py_raise((G<"urllib.request.URLError">())((S<"unknown url type: %s">()) % type));
                     }) }, }));
 
             define("urllib.request", "parse_keqv_list", w.function("parse_keqv_list", "parse_keqv_list", { py_positional("l") }, [](arguments a) -> py
@@ -2704,7 +2727,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             if (!self.method("get_names").contains(req.attr("host")))
                             {
-                                py_raise((Mod<"urllib.error">().attr("URLError"))(S<"file:// scheme is supported only on localhost">()));
+                                py_raise((G<"urllib.request.URLError">())(S<"file:// scheme is supported only on localhost">()));
                             }
                         }
                         else
@@ -2767,7 +2790,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             headers = email.method("message_from_string", { (S<"Content-type: %s\nContent-length: %d\nLast-modified: %s\n">()) % py_tuple({ [&]() -> py { py const t = mtype; return t.truthy() ? t : S<"text/plain">(); }(), size, modified }) });
                             if (host.truthy())
                             {
-                                auto const items75 = unpack((Mod<"urllib.parse">().attr("_splitport"))(host), 2);
+                                auto const items75 = unpack((G<"urllib.request._splitport">())(host), 2);
                                 host = items75[0];
                                 port = items75[1];
                             }
@@ -2790,12 +2813,12 @@ namespace neos::python_runtime::detail::urllib_request_module
                             if (matches(handler74.exception, B<"OSError">()))
                             {
                                 exp = handler74.exception;
-                                py_raise((Mod<"urllib.error">().attr("URLError"))(exp));
+                                py_raise((G<"urllib.request.URLError">())(exp));
                             }
                             else
                                 py_reraise(handler74.exception);
                         }
-                        py_raise((Mod<"urllib.error">().attr("URLError"))(S<"file not on local host">()));
+                        py_raise((G<"urllib.request.URLError">())(S<"file not on local host">()));
                     }) }, }));
 
             define("urllib.request", "_safe_gethostbyname", w.function("_safe_gethostbyname", "_safe_gethostbyname", { py_positional("host") }, [](arguments a) -> py
@@ -2848,9 +2871,9 @@ namespace neos::python_runtime::detail::urllib_request_module
                         host = req.attr("host");
                         if (!host.truthy())
                         {
-                            py_raise((Mod<"urllib.error">().attr("URLError"))(S<"ftp error: no host given">()));
+                            py_raise((G<"urllib.request.URLError">())(S<"ftp error: no host given">()));
                         }
-                        auto const items77 = unpack((Mod<"urllib.parse">().attr("_splitport"))(host), 2);
+                        auto const items77 = unpack((G<"urllib.request._splitport">())(host), 2);
                         host = items77[0];
                         port = items77[1];
                         if (port.is_none())
@@ -2862,12 +2885,12 @@ namespace neos::python_runtime::detail::urllib_request_module
                             port = (B<"int">())(port);
                         }
                         // username/password handling
-                        auto const items78 = unpack((Mod<"urllib.parse">().attr("_splituser"))(host), 2);
+                        auto const items78 = unpack((G<"urllib.request._splituser">())(host), 2);
                         user = items78[0];
                         host = items78[1];
                         if (user.truthy())
                         {
-                            auto const items79 = unpack((Mod<"urllib.parse">().attr("_splitpasswd"))(user), 2);
+                            auto const items79 = unpack((G<"urllib.request._splitpasswd">())(user), 2);
                             user = items79[0];
                             passwd = items79[1];
                         }
@@ -2875,7 +2898,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             passwd = none();
                         }
-                        host = (Mod<"urllib.parse">().attr("unquote"))(host);
+                        host = (G<"urllib.request.unquote">())(host);
                         user = [&]() -> py { py const t = user; return t.truthy() ? t : S<"">(); }();
                         passwd = [&]() -> py { py const t = passwd; return t.truthy() ? t : S<"">(); }();
                         try
@@ -2888,16 +2911,16 @@ namespace neos::python_runtime::detail::urllib_request_module
                             if (matches(handler80.exception, B<"OSError">()))
                             {
                                 msg = handler80.exception;
-                                py_raise((Mod<"urllib.error">().attr("URLError"))(msg));
+                                py_raise((G<"urllib.request.URLError">())(msg));
                             }
                             else
                                 py_reraise(handler80.exception);
                         }
-                        auto const items81 = unpack((Mod<"urllib.parse">().attr("_splitattr"))(req.attr("selector")), 2);
+                        auto const items81 = unpack((G<"urllib.request._splitattr">())(req.attr("selector")), 2);
                         path = items81[0];
                         attrs = items81[1];
                         dirs = path.method("split", { S<"/">() });
-                        dirs = (B<"list">())((B<"map">())(Mod<"urllib.parse">().attr("unquote"), dirs));
+                        dirs = (B<"list">())((B<"map">())(G<"urllib.request.unquote">(), dirs));
                         auto const items82 = unpack(py_tuple({ dirs[B<"slice">()(none(), I<-1>(), none())], dirs[I<-1>()] }), 2);
                         dirs = items82[0];
                         file = items82[1];
@@ -2913,7 +2936,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             for (py const& item : iterate{ attrs })
                             {
                                 attr = item;
-                                auto const items85 = unpack((Mod<"urllib.parse">().attr("_splitvalue"))(attr), 2);
+                                auto const items85 = unpack((G<"urllib.request._splitvalue">())(attr), 2);
                                 attr = items85[0];
                                 value = items85[1];
                                 if (((attr.method("lower") == (S<"type">())) && py_tuple({ S<"a">(), S<"A">(), S<"i">(), S<"I">(), S<"d">(), S<"D">() }).contains(value)))
@@ -2949,7 +2972,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                                 }
                                 if (isinstance(exp, ftplib.attr("all_errors")))
                                 {
-                                    fn_raise_from((Mod<"urllib.error">().attr("URLError"))(exp).get(), exp.get());
+                                    fn_raise_from((G<"urllib.request.URLError">())(exp).get(), exp.get());
                                     throw raised{};
                                 }
                                 py_reraise(handler83.exception);
@@ -3104,7 +3127,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             py_raise((B<"ValueError">())(S<"Control characters not allowed in data: mediatype">()));
                         }
                         // even base64 encoded data URLs might be quoted so unquote in any case:
-                        data = (Mod<"urllib.parse">().attr("unquote_to_bytes"))(data);
+                        data = (G<"urllib.request.unquote_to_bytes">())(data);
                         if (mediatype.method("endswith", { S<";base64">() }).truthy())
                         {
                             data = (Mod<"base64">().attr("decodebytes"))(data);
@@ -3141,7 +3164,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     }
                     encoding = (Mod<"sys">().attr("getfilesystemencoding"))();
                     errors = (Mod<"sys">().attr("getfilesystemencodeerrors"))();
-                    return (Mod<"urllib.parse">().attr("unquote")).call({ pathname }, { { "encoding", encoding }, { "errors", errors } });
+                    return (G<"urllib.request.unquote">()).call({ pathname }, { { "encoding", encoding }, { "errors", errors } });
                 }));
 
             define("urllib.request", "pathname2url", w.function("pathname2url", "pathname2url", { py_positional("pathname") }, [](arguments a) -> py
@@ -3157,7 +3180,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     }
                     encoding = (Mod<"sys">().attr("getfilesystemencoding"))();
                     errors = (Mod<"sys">().attr("getfilesystemencodeerrors"))();
-                    return (Mod<"urllib.parse">().attr("quote")).call({ pathname }, { { "encoding", encoding }, { "errors", errors } });
+                    return (G<"urllib.request.quote">()).call({ pathname }, { { "encoding", encoding }, { "errors", errors } });
                 }));
 
 #endif
@@ -3271,8 +3294,8 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py selector;
                         py url;
                         py urltype;
-                        fullurl = (Mod<"urllib.parse">().attr("unwrap"))((Mod<"urllib.parse">().attr("_to_bytes"))(fullurl));
-                        fullurl = (Mod<"urllib.parse">().attr("quote")).call({ fullurl }, { { "safe", S<"%/:=&?~#+!$,;'@()*[]|">() } });
+                        fullurl = (G<"urllib.request.unwrap">())((G<"urllib.request._to_bytes">())(fullurl));
+                        fullurl = (G<"urllib.request.quote">()).call({ fullurl }, { { "safe", S<"%/:=&?~#+!$,;'@()*[]|">() } });
                         if ((self.attr("tempcache").truthy() && self.attr("tempcache").contains(fullurl)))
                         {
                             auto const items97 = unpack(self.attr("tempcache")[fullurl], 2);
@@ -3281,7 +3304,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             fp = (B<"open">())(filename, S<"rb">());
                             return (Mod<"urllib.response">().attr("addinfourl"))(fp, headers, fullurl);
                         }
-                        auto const items98 = unpack((Mod<"urllib.parse">().attr("_splittype"))(fullurl), 2);
+                        auto const items98 = unpack((G<"urllib.request._splittype">())(fullurl), 2);
                         urltype = items98[0];
                         url = items98[1];
                         if (!urltype.truthy())
@@ -3291,10 +3314,10 @@ namespace neos::python_runtime::detail::urllib_request_module
                         if (self.attr("proxies").contains(urltype))
                         {
                             proxy = self.attr("proxies")[urltype];
-                            auto const items99 = unpack((Mod<"urllib.parse">().attr("_splittype"))(proxy), 2);
+                            auto const items99 = unpack((G<"urllib.request._splittype">())(proxy), 2);
                             urltype = items99[0];
                             proxyhost = items99[1];
-                            auto const items100 = unpack((Mod<"urllib.parse">().attr("_splithost"))(proxyhost), 2);
+                            auto const items100 = unpack((G<"urllib.request._splithost">())(proxyhost), 2);
                             host = items100[0];
                             selector = items100[1];
                             url = py_tuple({ host, fullurl });
@@ -3331,7 +3354,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         catch (raised const&)
                         {
                             pyclass::handler_scope handler101;
-                            if (matches(handler101.exception, py_tuple({ Mod<"urllib.error">().attr("HTTPError"), Mod<"urllib.error">().attr("URLError") })))
+                            if (matches(handler101.exception, py_tuple({ G<"urllib.request.HTTPError">(), G<"urllib.request.URLError">() })))
                             {
                                 py_reraise(handler101.exception);
                             }
@@ -3353,7 +3376,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py data = a[2];
                         py type;
                         py url;
-                        auto const items102 = unpack((Mod<"urllib.parse">().attr("_splittype"))(fullurl), 2);
+                        auto const items102 = unpack((G<"urllib.request._splittype">())(fullurl), 2);
                         type = items102[0];
                         url = items102[1];
                         py_raise((B<"OSError">())(S<"url error">(), S<"unknown url type">(), type));
@@ -3366,7 +3389,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py data = a[3];
                         py type;
                         py url;
-                        auto const items103 = unpack((Mod<"urllib.parse">().attr("_splittype"))(fullurl), 2);
+                        auto const items103 = unpack((G<"urllib.request._splittype">())(fullurl), 2);
                         type = items103[0];
                         url = items103[1];
                         py_raise((B<"OSError">())(S<"url error">(), (S<"invalid proxy for %s">()) % type, proxy));
@@ -3394,12 +3417,12 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py tfp;
                         py type;
                         py url1;
-                        url = (Mod<"urllib.parse">().attr("unwrap"))((Mod<"urllib.parse">().attr("_to_bytes"))(url));
+                        url = (G<"urllib.request.unwrap">())((G<"urllib.request._to_bytes">())(url));
                         if ((self.attr("tempcache").truthy() && self.attr("tempcache").contains(url)))
                         {
                             return self.attr("tempcache")[url];
                         }
-                        auto const items104 = unpack((Mod<"urllib.parse">().attr("_splittype"))(url), 2);
+                        auto const items104 = unpack((G<"urllib.request._splittype">())(url), 2);
                         type = items104[0];
                         url1 = items104[1];
                         if ((filename.is_none() && ([&]() -> py { py const t = boolean(!type.truthy()); return t.truthy() ? t : boolean(type == (S<"file">())); }()).truthy()))
@@ -3409,7 +3432,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                                 fp = self.method("open_local_file", { url1 });
                                 hdrs = fp.method("info");
                                 fp.method("close");
-                                return py_tuple({ (G<"urllib.request.url2pathname">())((Mod<"urllib.parse">().attr("_splithost"))(url1)[I<1>()]), hdrs });
+                                return py_tuple({ (G<"urllib.request.url2pathname">())((G<"urllib.request._splithost">())(url1)[I<1>()]), hdrs });
                             }
                             catch (raised const&)
                             {
@@ -3435,16 +3458,16 @@ namespace neos::python_runtime::detail::urllib_request_module
                                 }
                                 else
                                 {
-                                    auto const items107 = unpack((Mod<"urllib.parse">().attr("_splittype"))(url), 2);
+                                    auto const items107 = unpack((G<"urllib.request._splittype">())(url), 2);
                                     garbage = items107[0];
                                     path = items107[1];
-                                    auto const items108 = unpack((Mod<"urllib.parse">().attr("_splithost"))([&]() -> py { py const t = path; return t.truthy() ? t : S<"">(); }()), 2);
+                                    auto const items108 = unpack((G<"urllib.request._splithost">())([&]() -> py { py const t = path; return t.truthy() ? t : S<"">(); }()), 2);
                                     garbage = items108[0];
                                     path = items108[1];
-                                    auto const items109 = unpack((Mod<"urllib.parse">().attr("_splitquery"))([&]() -> py { py const t = path; return t.truthy() ? t : S<"">(); }()), 2);
+                                    auto const items109 = unpack((G<"urllib.request._splitquery">())([&]() -> py { py const t = path; return t.truthy() ? t : S<"">(); }()), 2);
                                     path = items109[0];
                                     garbage = items109[1];
-                                    auto const items110 = unpack((Mod<"urllib.parse">().attr("_splitattr"))([&]() -> py { py const t = path; return t.truthy() ? t : S<"">(); }()), 2);
+                                    auto const items110 = unpack((G<"urllib.request._splitattr">())([&]() -> py { py const t = path; return t.truthy() ? t : S<"">(); }()), 2);
                                     path = items110[0];
                                     garbage = items110[1];
                                     suffix = (Mod<"os">().attr("path")).method("splitext", { path })[I<1>()];
@@ -3514,7 +3537,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         // raise exception if actual size does not match content-length header
                         if (((size >= (I<0>())) && (read < size)))
                         {
-                            py_raise((Mod<"urllib.error">().attr("ContentTooShortError"))((S<"retrieval incomplete: got only %i out of %i bytes">()) % py_tuple({ read, size }), result));
+                            py_raise((G<"urllib.request.ContentTooShortError">())((S<"retrieval incomplete: got only %i out of %i bytes">()) % py_tuple({ read, size }), result));
                         }
                         return result;
                     }) },
@@ -3542,15 +3565,15 @@ namespace neos::python_runtime::detail::urllib_request_module
                         proxy_passwd = none();
                         if (isinstance(url, B<"str">()))
                         {
-                            auto const items114 = unpack((Mod<"urllib.parse">().attr("_splithost"))(url), 2);
+                            auto const items114 = unpack((G<"urllib.request._splithost">())(url), 2);
                             host = items114[0];
                             selector = items114[1];
                             if (host.truthy())
                             {
-                                auto const items115 = unpack((Mod<"urllib.parse">().attr("_splituser"))(host), 2);
+                                auto const items115 = unpack((G<"urllib.request._splituser">())(host), 2);
                                 user_passwd = items115[0];
                                 host = items115[1];
-                                host = (Mod<"urllib.parse">().attr("unquote"))(host);
+                                host = (G<"urllib.request.unquote">())(host);
                             }
                             realhost = host;
                         }
@@ -3560,11 +3583,11 @@ namespace neos::python_runtime::detail::urllib_request_module
                             host = items116[0];
                             selector = items116[1];
                             // check whether the proxy contains authorization information
-                            auto const items117 = unpack((Mod<"urllib.parse">().attr("_splituser"))(host), 2);
+                            auto const items117 = unpack((G<"urllib.request._splituser">())(host), 2);
                             proxy_passwd = items117[0];
                             host = items117[1];
                             // now we proceed with the url we want to obtain
-                            auto const items118 = unpack((Mod<"urllib.parse">().attr("_splittype"))(selector), 2);
+                            auto const items118 = unpack((G<"urllib.request._splittype">())(selector), 2);
                             urltype = items118[0];
                             rest = items118[1];
                             url = rest;
@@ -3575,12 +3598,12 @@ namespace neos::python_runtime::detail::urllib_request_module
                             }
                             else
                             {
-                                auto const items119 = unpack((Mod<"urllib.parse">().attr("_splithost"))(rest), 2);
+                                auto const items119 = unpack((G<"urllib.request._splithost">())(rest), 2);
                                 realhost = items119[0];
                                 rest = items119[1];
                                 if (realhost.truthy())
                                 {
-                                    auto const items120 = unpack((Mod<"urllib.parse">().attr("_splituser"))(realhost), 2);
+                                    auto const items120 = unpack((G<"urllib.request._splituser">())(realhost), 2);
                                     user_passwd = items120[0];
                                     realhost = items120[1];
                                 }
@@ -3600,7 +3623,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         }
                         if (proxy_passwd.truthy())
                         {
-                            proxy_passwd = (Mod<"urllib.parse">().attr("unquote"))(proxy_passwd);
+                            proxy_passwd = (G<"urllib.request.unquote">())(proxy_passwd);
                             proxy_auth = (Mod<"base64">().attr("b64encode"))(proxy_passwd.method("encode")).method("decode", { S<"ascii">() });
                         }
                         else
@@ -3609,7 +3632,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         }
                         if (user_passwd.truthy())
                         {
-                            user_passwd = (Mod<"urllib.parse">().attr("unquote"))(user_passwd);
+                            user_passwd = (G<"urllib.request.unquote">())(user_passwd);
                             auth = (Mod<"base64">().attr("b64encode"))(user_passwd.method("encode")).method("decode", { S<"ascii">() });
                         }
                         else
@@ -3659,7 +3682,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             if (matches(handler123.exception, Mod<"http.client">().attr("BadStatusLine")))
                             {
                                 // something went wrong with the HTTP status line
-                                py_raise((Mod<"urllib.error">().attr("URLError"))(S<"http protocol error: bad status line">()));
+                                py_raise((G<"urllib.request.URLError">())(S<"http protocol error: bad status line">()));
                             }
                             else
                                 py_reraise(handler123.exception);
@@ -3724,7 +3747,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py errmsg = a[4];
                         py headers = a[5];
                         fp.method("close");
-                        py_raise((Mod<"urllib.error">().attr("HTTPError"))(url, errcode, errmsg, headers, none()));
+                        py_raise((G<"urllib.request.HTTPError">())(url, errcode, errmsg, headers, none()));
                     }) },
                 { "open_file", w.method("URLopener", "open_file", { py_positional("url") }, [](arguments a) -> py
                     {
@@ -3732,7 +3755,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py url = a[1];
                         if (!isinstance(url, B<"str">()))
                         {
-                            py_raise((Mod<"urllib.error">().attr("URLError"))(S<"file error: proxy support for file protocol currently not implemented">()));
+                            py_raise((G<"urllib.request.URLError">())(S<"file error: proxy support for file protocol currently not implemented">()));
                         }
                         if (((url[B<"slice">()(none(), I<2>(), none())] == (S<"//">())) && (url[B<"slice">()(I<2>(), I<3>(), none())] != (S<"/">())) && (url[B<"slice">()(I<2>(), I<12>(), none())].method("lower") != (S<"localhost/">()))))
                         {
@@ -3763,7 +3786,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py urlfile;
                         email = module_of("email");
                         mimetypes = module_of("mimetypes");
-                        auto const items124 = unpack((Mod<"urllib.parse">().attr("_splithost"))(url), 2);
+                        auto const items124 = unpack((G<"urllib.request._splithost">())(url), 2);
                         host = items124[0];
                         file = items124[1];
                         localname = (G<"urllib.request.url2pathname">())(file);
@@ -3777,7 +3800,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             if (matches(handler125.exception, B<"OSError">()))
                             {
                                 e = handler125.exception;
-                                py_raise((Mod<"urllib.error">().attr("URLError"))(e.attr("strerror"), e.attr("filename")));
+                                py_raise((G<"urllib.request.URLError">())(e.attr("strerror"), e.attr("filename")));
                             }
                             else
                                 py_reraise(handler125.exception);
@@ -3795,7 +3818,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             }
                             return (Mod<"urllib.response">().attr("addinfourl"))((B<"open">())(localname, S<"rb">()), headers, urlfile);
                         }
-                        auto const items126 = unpack((Mod<"urllib.parse">().attr("_splitport"))(host), 2);
+                        auto const items126 = unpack((G<"urllib.request._splitport">())(host), 2);
                         host = items126[0];
                         port = items126[1];
                         if (((!port.truthy()) && (py_tuple({ (G<"urllib.request.localhost">())() }) + (G<"urllib.request.thishost">())()).contains((Mod<"socket">().attr("gethostbyname"))(host))))
@@ -3811,7 +3834,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             }
                             return (Mod<"urllib.response">().attr("addinfourl"))((B<"open">())(localname, S<"rb">()), headers, urlfile);
                         }
-                        py_raise((Mod<"urllib.error">().attr("URLError"))(S<"local file error: not on local host">()));
+                        py_raise((G<"urllib.request.URLError">())(S<"local file error: not on local host">()));
                     }) },
                 { "open_ftp", w.method("URLopener", "open_ftp", { py_positional("url") }, [](arguments a) -> py
                     {
@@ -3840,25 +3863,25 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py value;
                         if (!isinstance(url, B<"str">()))
                         {
-                            py_raise((Mod<"urllib.error">().attr("URLError"))(S<"ftp error: proxy support for ftp protocol currently not implemented">()));
+                            py_raise((G<"urllib.request.URLError">())(S<"ftp error: proxy support for ftp protocol currently not implemented">()));
                         }
                         mimetypes = module_of("mimetypes");
-                        auto const items127 = unpack((Mod<"urllib.parse">().attr("_splithost"))(url), 2);
+                        auto const items127 = unpack((G<"urllib.request._splithost">())(url), 2);
                         host = items127[0];
                         path = items127[1];
                         if (!host.truthy())
                         {
-                            py_raise((Mod<"urllib.error">().attr("URLError"))(S<"ftp error: no host given">()));
+                            py_raise((G<"urllib.request.URLError">())(S<"ftp error: no host given">()));
                         }
-                        auto const items128 = unpack((Mod<"urllib.parse">().attr("_splitport"))(host), 2);
+                        auto const items128 = unpack((G<"urllib.request._splitport">())(host), 2);
                         host = items128[0];
                         port = items128[1];
-                        auto const items129 = unpack((Mod<"urllib.parse">().attr("_splituser"))(host), 2);
+                        auto const items129 = unpack((G<"urllib.request._splituser">())(host), 2);
                         user = items129[0];
                         host = items129[1];
                         if (user.truthy())
                         {
-                            auto const items130 = unpack((Mod<"urllib.parse">().attr("_splitpasswd"))(user), 2);
+                            auto const items130 = unpack((G<"urllib.request._splitpasswd">())(user), 2);
                             user = items130[0];
                             passwd = items130[1];
                         }
@@ -3866,9 +3889,9 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             passwd = none();
                         }
-                        host = (Mod<"urllib.parse">().attr("unquote"))(host);
-                        user = (Mod<"urllib.parse">().attr("unquote"))([&]() -> py { py const t = user; return t.truthy() ? t : S<"">(); }());
-                        passwd = (Mod<"urllib.parse">().attr("unquote"))([&]() -> py { py const t = passwd; return t.truthy() ? t : S<"">(); }());
+                        host = (G<"urllib.request.unquote">())(host);
+                        user = (G<"urllib.request.unquote">())([&]() -> py { py const t = user; return t.truthy() ? t : S<"">(); }());
+                        passwd = (G<"urllib.request.unquote">())([&]() -> py { py const t = passwd; return t.truthy() ? t : S<"">(); }());
                         host = (Mod<"socket">().attr("gethostbyname"))(host);
                         if (!port.truthy())
                         {
@@ -3879,10 +3902,10 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             port = (B<"int">())(port);
                         }
-                        auto const items131 = unpack((Mod<"urllib.parse">().attr("_splitattr"))(path), 2);
+                        auto const items131 = unpack((G<"urllib.request._splitattr">())(path), 2);
                         path = items131[0];
                         attrs = items131[1];
-                        path = (Mod<"urllib.parse">().attr("unquote"))(path);
+                        path = (G<"urllib.request.unquote">())(path);
                         dirs = path.method("split", { S<"/">() });
                         auto const items132 = unpack(py_tuple({ dirs[B<"slice">()(none(), I<-1>(), none())], dirs[I<-1>()] }), 2);
                         dirs = items132[0];
@@ -3928,7 +3951,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             for (py const& item : iterate{ attrs })
                             {
                                 attr = item;
-                                auto const items136 = unpack((Mod<"urllib.parse">().attr("_splitvalue"))(attr), 2);
+                                auto const items136 = unpack((G<"urllib.request._splitvalue">())(attr), 2);
                                 attr = items136[0];
                                 value = items136[1];
                                 if (((attr.method("lower") == (S<"type">())) && py_tuple({ S<"a">(), S<"A">(), S<"i">(), S<"I">(), S<"d">(), S<"D">() }).contains(value)))
@@ -3958,7 +3981,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             if (matches(handler134.exception, (G<"urllib.request.ftperrors">())()))
                             {
                                 exp = handler134.exception;
-                                fn_raise_from((Mod<"urllib.error">().attr("URLError"))(S(std::string{ "ftp error: " } + exp.str())).get(), exp.get());
+                                fn_raise_from((G<"urllib.request.URLError">())(S(std::string{ "ftp error: " } + exp.str())).get(), exp.get());
                                 throw raised{};
                             }
                             else
@@ -3979,7 +4002,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py type;
                         if (!isinstance(url, B<"str">()))
                         {
-                            py_raise((Mod<"urllib.error">().attr("URLError"))(S<"data error: proxy support for data protocol currently not implemented">()));
+                            py_raise((G<"urllib.request.URLError">())(S<"data error: proxy support for data protocol currently not implemented">()));
                         }
                         // ignore POSTed data
                         // 
@@ -4028,7 +4051,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         }
                         else
                         {
-                            data = (Mod<"urllib.parse">().attr("unquote"))(data);
+                            data = (G<"urllib.request.unquote">())(data);
                         }
                         msg.method("append", { (S<"Content-Length: %d">()) % py{ data.size() } });
                         msg.method("append", { S<"">() });
@@ -4140,15 +4163,15 @@ namespace neos::python_runtime::detail::urllib_request_module
                         }
                         fp.method("close");
                         // In case the server sent a relative URL, join with original:
-                        newurl = (Mod<"urllib.parse">().attr("urljoin"))((self.attr("type") + (S<":">())) + url, newurl);
-                        urlparts = (Mod<"urllib.parse">().attr("urlparse"))(newurl);
+                        newurl = (G<"urllib.request.urljoin">())((self.attr("type") + (S<":">())) + url, newurl);
+                        urlparts = (G<"urllib.request.urlparse">())(newurl);
                         // For security reasons, we don't allow redirection to anything other
                         // than http, https and ftp.
                         // We are using newer HTTPError with older redirect_internal method
                         // This older method will get deprecated in 3.3
                         if (!py_tuple({ S<"http">(), S<"https">(), S<"ftp">(), S<"">() }).contains(urlparts.attr("scheme")))
                         {
-                            py_raise((Mod<"urllib.error">().attr("HTTPError"))(newurl, errcode, errmsg + ((S<" Redirection to url '%s' is not allowed.">()) % newurl), headers, fp));
+                            py_raise((G<"urllib.request.HTTPError">())(newurl, errcode, errmsg + ((S<" Redirection to url '%s' is not allowed.">()) % newurl), headers, fp));
                         }
                         return self.method("open", { newurl });
                     }) },
@@ -4322,15 +4345,15 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py selector;
                         py urltype;
                         py user;
-                        auto const items144 = unpack((Mod<"urllib.parse">().attr("_splithost"))(url), 2);
+                        auto const items144 = unpack((G<"urllib.request._splithost">())(url), 2);
                         host = items144[0];
                         selector = items144[1];
                         newurl = ((S<"http://">()) + host) + selector;
                         proxy = self.attr("proxies")[S<"http">()];
-                        auto const items145 = unpack((Mod<"urllib.parse">().attr("_splittype"))(proxy), 2);
+                        auto const items145 = unpack((G<"urllib.request._splittype">())(proxy), 2);
                         urltype = items145[0];
                         proxyhost = items145[1];
-                        auto const items146 = unpack((Mod<"urllib.parse">().attr("_splithost"))(proxyhost), 2);
+                        auto const items146 = unpack((G<"urllib.request._splithost">())(proxyhost), 2);
                         proxyhost = items146[0];
                         proxyselector = items146[1];
                         i = proxyhost.method("find", { S<"@">() }) + (I<1>());
@@ -4342,7 +4365,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             return none();
                         }
-                        proxyhost = (S<"%s:%s@%s">()) % py_tuple({ (Mod<"urllib.parse">().attr("quote")).call({ user }, { { "safe", S<"">() } }), (Mod<"urllib.parse">().attr("quote")).call({ passwd }, { { "safe", S<"">() } }), proxyhost });
+                        proxyhost = (S<"%s:%s@%s">()) % py_tuple({ (G<"urllib.request.quote">()).call({ user }, { { "safe", S<"">() } }), (G<"urllib.request.quote">()).call({ passwd }, { { "safe", S<"">() } }), proxyhost });
                         self.attr("proxies").set_item(S<"http">(), ((S<"http://">()) + proxyhost) + proxyselector);
                         if (data.is_none())
                         {
@@ -4370,15 +4393,15 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py selector;
                         py urltype;
                         py user;
-                        auto const items148 = unpack((Mod<"urllib.parse">().attr("_splithost"))(url), 2);
+                        auto const items148 = unpack((G<"urllib.request._splithost">())(url), 2);
                         host = items148[0];
                         selector = items148[1];
                         newurl = ((S<"https://">()) + host) + selector;
                         proxy = self.attr("proxies")[S<"https">()];
-                        auto const items149 = unpack((Mod<"urllib.parse">().attr("_splittype"))(proxy), 2);
+                        auto const items149 = unpack((G<"urllib.request._splittype">())(proxy), 2);
                         urltype = items149[0];
                         proxyhost = items149[1];
-                        auto const items150 = unpack((Mod<"urllib.parse">().attr("_splithost"))(proxyhost), 2);
+                        auto const items150 = unpack((G<"urllib.request._splithost">())(proxyhost), 2);
                         proxyhost = items150[0];
                         proxyselector = items150[1];
                         i = proxyhost.method("find", { S<"@">() }) + (I<1>());
@@ -4390,7 +4413,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             return none();
                         }
-                        proxyhost = (S<"%s:%s@%s">()) % py_tuple({ (Mod<"urllib.parse">().attr("quote")).call({ user }, { { "safe", S<"">() } }), (Mod<"urllib.parse">().attr("quote")).call({ passwd }, { { "safe", S<"">() } }), proxyhost });
+                        proxyhost = (S<"%s:%s@%s">()) % py_tuple({ (G<"urllib.request.quote">()).call({ user }, { { "safe", S<"">() } }), (G<"urllib.request.quote">()).call({ passwd }, { { "safe", S<"">() } }), proxyhost });
                         self.attr("proxies").set_item(S<"https">(), ((S<"https://">()) + proxyhost) + proxyselector);
                         if (data.is_none())
                         {
@@ -4414,7 +4437,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py passwd;
                         py selector;
                         py user;
-                        auto const items152 = unpack((Mod<"urllib.parse">().attr("_splithost"))(url), 2);
+                        auto const items152 = unpack((G<"urllib.request._splithost">())(url), 2);
                         host = items152[0];
                         selector = items152[1];
                         i = host.method("find", { S<"@">() }) + (I<1>());
@@ -4426,7 +4449,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             return none();
                         }
-                        host = (S<"%s:%s@%s">()) % py_tuple({ (Mod<"urllib.parse">().attr("quote")).call({ user }, { { "safe", S<"">() } }), (Mod<"urllib.parse">().attr("quote")).call({ passwd }, { { "safe", S<"">() } }), host });
+                        host = (S<"%s:%s@%s">()) % py_tuple({ (G<"urllib.request.quote">()).call({ user }, { { "safe", S<"">() } }), (G<"urllib.request.quote">()).call({ passwd }, { { "safe", S<"">() } }), host });
                         newurl = ((S<"http://">()) + host) + selector;
                         if (data.is_none())
                         {
@@ -4450,7 +4473,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         py passwd;
                         py selector;
                         py user;
-                        auto const items154 = unpack((Mod<"urllib.parse">().attr("_splithost"))(url), 2);
+                        auto const items154 = unpack((G<"urllib.request._splithost">())(url), 2);
                         host = items154[0];
                         selector = items154[1];
                         i = host.method("find", { S<"@">() }) + (I<1>());
@@ -4462,7 +4485,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                         {
                             return none();
                         }
-                        host = (S<"%s:%s@%s">()) % py_tuple({ (Mod<"urllib.parse">().attr("quote")).call({ user }, { { "safe", S<"">() } }), (Mod<"urllib.parse">().attr("quote")).call({ passwd }, { { "safe", S<"">() } }), host });
+                        host = (S<"%s:%s@%s">()) % py_tuple({ (G<"urllib.request.quote">()).call({ user }, { { "safe", S<"">() } }), (G<"urllib.request.quote">()).call({ passwd }, { { "safe", S<"">() } }), host });
                         newurl = ((S<"https://">()) + host) + selector;
                         if (data.is_none())
                         {
@@ -4696,7 +4719,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                                     reason = handler161.exception;
                                     if ((B<"str">())(reason)[B<"slice">()(none(), I<3>(), none())] != (S<"550">()))
                                     {
-                                        fn_raise_from((Mod<"urllib.error">().attr("URLError"))(S(std::string{ "ftp error: " } + reason.str())).get(), reason.get());
+                                        fn_raise_from((G<"urllib.request.URLError">())(S(std::string{ "ftp error: " } + reason.str())).get(), reason.get());
                                         throw raised{};
                                     }
                                 }
@@ -4728,7 +4751,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                                             if (matches(handler164.exception, ftplib.attr("error_perm")))
                                             {
                                                 reason = handler164.exception;
-                                                fn_raise_from((Mod<"urllib.error">().attr("URLError"))((S<"ftp error: %r">()) % reason).get(), reason.get());
+                                                fn_raise_from((G<"urllib.request.URLError">())((S<"ftp error: %r">()) % reason).get(), reason.get());
                                                 throw raised{};
                                             }
                                             else
@@ -4757,7 +4780,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                             retrlen = items165[1];
                         }
                         self.set_attr("busy", I<1>());
-                        ftpobj = (Mod<"urllib.response">().attr("addclosehook"))(conn.method("makefile", { S<"rb">() }), self.attr("file_close"));
+                        ftpobj = (G<"urllib.request.addclosehook">())(conn.method("makefile", { S<"rb">() }), self.attr("file_close"));
                         {
                             py const target166 = self;
                             target166.set_attr("refcount", inplace(NEOS_PY_ADD, target166.attr("refcount"), I<1>()));
@@ -4925,7 +4948,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     }
                     host = host.method("lower");
                     // strip port off host
-                    auto const items174 = unpack((Mod<"urllib.parse">().attr("_splitport"))(host), 2);
+                    auto const items174 = unpack((G<"urllib.request._splitport">())(host), 2);
                     hostonly = items174[0];
                     port = items174[1];
                     // check if the host ends with any of the DNS suffixes
@@ -4972,7 +4995,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     fnmatch = M("fnmatch", "fnmatch");
                     AddressValueError = M("ipaddress", "AddressValueError");
                     IPv4Address = M("ipaddress", "IPv4Address");
-                    auto const items176 = unpack((Mod<"urllib.parse">().attr("_splitport"))(host), 2);
+                    auto const items176 = unpack((G<"urllib.request._splitport">())(host), 2);
                     hostonly = items176[0];
                     port = items176[1];
                     ip2num = w.function("ip2num", "_proxy_bypass_macosx_sysconf.<locals>.ip2num", { py_positional("ipAddr") }, [](arguments a) -> py
@@ -5059,7 +5082,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                     py proxy_override;
                     py test;
                     fnmatch = M("fnmatch", "fnmatch");
-                    auto const items179 = unpack((Mod<"urllib.parse">().attr("_splitport"))(host), 2);
+                    auto const items179 = unpack((G<"urllib.request._splitport">())(host), 2);
                     host = items179[0];
                     _ = items179[1];
                     proxy_override = override.method("split", { S<";">() });
@@ -5308,29 +5331,7 @@ namespace neos::python_runtime::detail::urllib_request_module
                 aAttributes.emplace_back("tempfile", py{ fn_import("tempfile") }.release());
                 aAttributes.emplace_back("contextlib", py{ fn_import("contextlib") }.release());
                 aAttributes.emplace_back("warnings", py{ fn_import("warnings") }.release());
-                aAttributes.emplace_back("URLError", import_attribute("urllib.error", "URLError").release());
-                aAttributes.emplace_back("HTTPError", import_attribute("urllib.error", "HTTPError").release());
-                aAttributes.emplace_back("ContentTooShortError", import_attribute("urllib.error", "ContentTooShortError").release());
-                aAttributes.emplace_back("urlparse", import_attribute("urllib.parse", "urlparse").release());
-                aAttributes.emplace_back("urlsplit", import_attribute("urllib.parse", "urlsplit").release());
-                aAttributes.emplace_back("urljoin", import_attribute("urllib.parse", "urljoin").release());
-                aAttributes.emplace_back("unwrap", import_attribute("urllib.parse", "unwrap").release());
-                aAttributes.emplace_back("quote", import_attribute("urllib.parse", "quote").release());
-                aAttributes.emplace_back("unquote", import_attribute("urllib.parse", "unquote").release());
-                aAttributes.emplace_back("_splittype", import_attribute("urllib.parse", "_splittype").release());
-                aAttributes.emplace_back("_splithost", import_attribute("urllib.parse", "_splithost").release());
-                aAttributes.emplace_back("_splitport", import_attribute("urllib.parse", "_splitport").release());
-                aAttributes.emplace_back("_splituser", import_attribute("urllib.parse", "_splituser").release());
-                aAttributes.emplace_back("_splitpasswd", import_attribute("urllib.parse", "_splitpasswd").release());
-                aAttributes.emplace_back("_splitattr", import_attribute("urllib.parse", "_splitattr").release());
-                aAttributes.emplace_back("_splitquery", import_attribute("urllib.parse", "_splitquery").release());
-                aAttributes.emplace_back("_splitvalue", import_attribute("urllib.parse", "_splitvalue").release());
-                aAttributes.emplace_back("_splittag", import_attribute("urllib.parse", "_splittag").release());
-                aAttributes.emplace_back("_to_bytes", import_attribute("urllib.parse", "_to_bytes").release());
-                aAttributes.emplace_back("unquote_to_bytes", import_attribute("urllib.parse", "unquote_to_bytes").release());
-                aAttributes.emplace_back("urlunparse", import_attribute("urllib.parse", "urlunparse").release());
                 aAttributes.emplace_back("addinfourl", import_attribute("urllib.response", "addinfourl").release());
-                aAttributes.emplace_back("addclosehook", import_attribute("urllib.response", "addclosehook").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -5339,6 +5340,14 @@ namespace neos::python_runtime::detail::urllib_request_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("urllib.request", urllib_request_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("urllib.request", urllib_request_module, assigned);
     }
 }

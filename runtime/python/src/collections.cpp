@@ -541,6 +541,46 @@ namespace neos::python_runtime
                         }
                         return none();
                     } },
+                // (pop(key[, default]) and setdefault(key, default=None): their arguments can be keywords (OrderedDict's own, not dict's))
+                { "pop", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::vector<object*> const rest{ aArgs.begin() + 1, aArgs.end() };
+                        if (!parse_arguments("pop", rest, aKwargs, { "key", "default" }, 1u, 0u, a))
+                            return nullptr;
+                        auto const value = builtin_value(aArgs[0]);
+                        auto const position = dict_find(value, a[0]);
+                        if (position == -2)
+                            return nullptr;
+                        if (position < 0)
+                        {
+                            if (a[1] != nullptr)
+                                return new_reference(a[1]);
+                            raise_key_error(a[0]);
+                            return nullptr;
+                        }
+                        auto& d = *as<dict_object>(value);
+                        auto const result = new_reference(d.items[static_cast<std::size_t>(position)].second);
+                        dict_erase(d, static_cast<std::size_t>(position));
+                        return result;
+                    } },
+                { "setdefault", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::vector<object*> const rest{ aArgs.begin() + 1, aArgs.end() };
+                        if (!parse_arguments("setdefault", rest, aKwargs, { "key", "default" }, 1u, 0u, a))
+                            return nullptr;
+                        auto const value = builtin_value(aArgs[0]);
+                        auto const position = dict_find(value, a[0]);
+                        if (position == -2)
+                            return nullptr;
+                        if (position >= 0)
+                            return new_reference(as<dict_object>(value)->items[static_cast<std::size_t>(position)].second);
+                        auto const deflt = a[1] != nullptr ? a[1] : none();
+                        if (dict_set(value, a[0], deflt) != 0)
+                            return nullptr;
+                        return new_reference(deflt);
+                    } },
                 { "popitem", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
@@ -2422,6 +2462,21 @@ namespace neos::python_runtime
             }
 
             inline bool const sCollections = register_module("collections", collections_module);
+            // (CPython's C module _collections: collections's deque, defaultdict and OrderedDict, and deque's iterator types)
+            inline bool const sCollectionsC = register_module("_collections", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                if (!c_module_attributes("collections", "_collections", { "OrderedDict", "defaultdict", "deque" }, aAttributes))
+                    return false;
+                ref const noArguments{ make_tuple() };
+                ref const empty{ call(aAttributes.back().second, noArguments.get(), nullptr) };     // (a deque)
+                ref const forward{ empty ? iter(empty.get()) : nullptr };
+                ref const backward{ empty ? call_method_named(empty.get(), "__reversed__", {}) : nullptr };
+                if (!forward || !backward)
+                    return false;
+                aAttributes.emplace_back("_deque_iterator", class_of(forward.get()));
+                aAttributes.emplace_back("_deque_reverse_iterator", class_of(backward.get()));
+                return true;
+            });
         }
     }
 }

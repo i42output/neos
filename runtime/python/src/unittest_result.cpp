@@ -149,12 +149,14 @@ namespace neos::python_runtime::detail::unittest_result_module
         void make_unittest_result()
         {
             static module_writer const& w = writer("unittest.result");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.result", "wraps", import_attribute("functools", "wraps"));
             define("unittest.result", "__unittest", boolean(true));
             define("unittest.result", "failfast", w.function("failfast", "failfast", { py_positional("method") }, [](arguments a) -> py
                 {
                     auto const method = std::make_shared<py>(a[0]);
                     py inner;
-                    inner = (Mod<"functools">().attr("wraps"))((*method))(w.function("inner", "failfast.<locals>.inner", { py_positional("self") }, [method](arguments a) -> py
+                    inner = (G<"unittest.result.wraps">())((*method))(w.function("inner", "failfast.<locals>.inner", { py_positional("self") }, [method](arguments a) -> py
     {
         py self = a[0];
         py args = a[1];
@@ -531,7 +533,6 @@ namespace neos::python_runtime::detail::unittest_result_module
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("traceback", py{ fn_import("traceback") }.release());
                 aAttributes.emplace_back("util", py{ fn_import("unittest.util") }.release());
-                aAttributes.emplace_back("wraps", import_attribute("functools", "wraps").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -540,6 +541,14 @@ namespace neos::python_runtime::detail::unittest_result_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.result", unittest_result_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.result", unittest_result_module, assigned);
     }
 }

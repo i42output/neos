@@ -900,6 +900,33 @@ namespace neos::python_runtime
             }
 
             inline bool const sLocale = register_module("locale", locale_module);
+            // (CPython's C module _locale: locale's functions and constants that it takes from _locale (those of the platform: e.g. no 
+            // nl_langinfo on Windows))
+            inline bool const sLocaleC = register_module("_locale", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                ref const m{ fn_import("locale") };
+                if (!m)
+                    return false;
+                for (auto name : {
+                    "ABDAY_1", "ABDAY_2", "ABDAY_3", "ABDAY_4", "ABDAY_5", "ABDAY_6", "ABDAY_7", "ABMON_1", "ABMON_10", "ABMON_11", "ABMON_12",
+                    "ABMON_2", "ABMON_3", "ABMON_4", "ABMON_5", "ABMON_6", "ABMON_7", "ABMON_8", "ABMON_9", "ALT_DIGITS", "AM_STR", "CHAR_MAX",
+                    "CODESET", "CRNCYSTR", "DAY_1", "DAY_2", "DAY_3", "DAY_4", "DAY_5", "DAY_6", "DAY_7", "D_FMT", "D_T_FMT", "ERA", "ERA_D_FMT",
+                    "ERA_D_T_FMT", "ERA_T_FMT", "Error", "LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+                    "MON_1", "MON_10", "MON_11", "MON_12", "MON_2", "MON_3", "MON_4", "MON_5", "MON_6", "MON_7", "MON_8", "MON_9", "NOEXPR",
+                    "PM_STR", "RADIXCHAR", "THOUSEP", "T_FMT", "T_FMT_AMPM", "YESEXPR", "bind_textdomain_codeset", "bindtextdomain", "dcgettext",
+                    "dgettext", "getencoding", "gettext", "localeconv", "nl_langinfo", "setlocale", "strcoll", "strxfrm", "textdomain"
+                    })
+                {
+                    auto const value = getattr(m.get(), name);
+                    if (value == nullptr)
+                    {
+                        clear_error();
+                        continue;
+                    }
+                    aAttributes.emplace_back(name, value);
+                }
+                return true;
+            });
         }
     }
 }

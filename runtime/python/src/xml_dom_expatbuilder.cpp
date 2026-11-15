@@ -160,6 +160,15 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
         void make_xml_dom_expatbuilder()
         {
             static module_writer const& w = writer("xml.dom.expatbuilder");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xml.dom.expatbuilder", "Node", import_attribute("xml.dom", "Node"));
+            define("xml.dom.expatbuilder", "EMPTY_NAMESPACE", import_attribute("xml.dom", "EMPTY_NAMESPACE"));
+            define("xml.dom.expatbuilder", "EMPTY_PREFIX", import_attribute("xml.dom", "EMPTY_PREFIX"));
+            define("xml.dom.expatbuilder", "XMLNS_NAMESPACE", import_attribute("xml.dom", "XMLNS_NAMESPACE"));
+            define("xml.dom.expatbuilder", "_append_child", import_attribute("xml.dom.minidom", "_append_child"));
+            define("xml.dom.expatbuilder", "_set_attribute_node", import_attribute("xml.dom.minidom", "_set_attribute_node"));
+            define("xml.dom.expatbuilder", "_XML_WHITESPACE", import_attribute("xml.dom.minidom", "_XML_WHITESPACE"));
+            define("xml.dom.expatbuilder", "NodeFilter", import_attribute("xml.dom.NodeFilter", "NodeFilter"));
             // Warning!
             // 
             // This module is tightly bound to the implementation details of the
@@ -182,9 +191,9 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
             // with None rather than a truth test; this avoids searching for and
             // calling any methods on the node object if it exists.  (A rather
             // nice speedup is achieved this way as well!)
-            define("xml.dom.expatbuilder", "TEXT_NODE", (Mod<"xml.dom">().attr("Node")).attr("TEXT_NODE"));
-            define("xml.dom.expatbuilder", "CDATA_SECTION_NODE", (Mod<"xml.dom">().attr("Node")).attr("CDATA_SECTION_NODE"));
-            define("xml.dom.expatbuilder", "DOCUMENT_NODE", (Mod<"xml.dom">().attr("Node")).attr("DOCUMENT_NODE"));
+            define("xml.dom.expatbuilder", "TEXT_NODE", (G<"xml.dom.expatbuilder.Node">()).attr("TEXT_NODE"));
+            define("xml.dom.expatbuilder", "CDATA_SECTION_NODE", (G<"xml.dom.expatbuilder.Node">()).attr("CDATA_SECTION_NODE"));
+            define("xml.dom.expatbuilder", "DOCUMENT_NODE", (G<"xml.dom.expatbuilder.Node">()).attr("DOCUMENT_NODE"));
             define("xml.dom.expatbuilder", "FILTER_ACCEPT", (Mod<"xml.dom.xmlbuilder">().attr("DOMBuilderFilter")).attr("FILTER_ACCEPT"));
             define("xml.dom.expatbuilder", "FILTER_REJECT", (Mod<"xml.dom.xmlbuilder">().attr("DOMBuilderFilter")).attr("FILTER_REJECT"));
             define("xml.dom.expatbuilder", "FILTER_SKIP", (Mod<"xml.dom.xmlbuilder">().attr("DOMBuilderFilter")).attr("FILTER_SKIP"));
@@ -340,7 +349,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         auto const items5 = unpack(parts, 2);
                         uri = items5[0];
                         localname = items5[1];
-                        prefix = Mod<"xml.dom">().attr("EMPTY_PREFIX");
+                        prefix = G<"xml.dom.expatbuilder.EMPTY_PREFIX">();
                         py const value6 = intern(localname, localname);
                         qname = value6;
                         localname = value6;
@@ -402,7 +411,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                 { "reset", w.method("ExpatBuilder", "reset", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        self.set_attr("document", (G<"xml.dom.expatbuilder.theDOMImplementation">()).method("createDocument", { Mod<"xml.dom">().attr("EMPTY_NAMESPACE"), none(), none() }));
+                        self.set_attr("document", (G<"xml.dom.expatbuilder.theDOMImplementation">()).method("createDocument", { G<"xml.dom.expatbuilder.EMPTY_NAMESPACE">(), none(), none() }));
                         self.set_attr("curNode", self.attr("document"));
                         self.set_attr("_elem_info", self.attr("document").attr("_elem_info"));
                         self.set_attr("_cdata", boolean(false));
@@ -530,7 +539,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         py doctype;
                         doctype = self.attr("document").attr("implementation").method("createDocumentType", { doctypeName, publicId, systemId });
                         doctype.set_attr("ownerDocument", self.attr("document"));
-                        (Mod<"xml.dom.minidom">().attr("_append_child"))(self.attr("document"), doctype);
+                        (G<"xml.dom.expatbuilder._append_child">())(self.attr("document"), doctype);
                         self.attr("document").set_attr("doctype", doctype);
                         if ((self.attr("_filter").truthy() && (self.attr("_filter").method("acceptNode", { doctype }) == (G<"xml.dom.expatbuilder.FILTER_REJECT">()))))
                         {
@@ -574,7 +583,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         py data = a[2];
                         py node;
                         node = self.attr("document").method("createProcessingInstruction", { target, data });
-                        (Mod<"xml.dom.minidom">().attr("_append_child"))(self.attr("curNode"), node);
+                        (G<"xml.dom.expatbuilder._append_child">())(self.attr("curNode"), node);
                         if ((self.attr("_filter").truthy() && (self.attr("_filter").method("acceptNode", { node }) == (G<"xml.dom.expatbuilder.FILTER_REJECT">()))))
                         {
                             self.attr("curNode").method("removeChild", { node });
@@ -612,7 +621,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                             node.set_attr("data", data);
                             node.set_attr("ownerDocument", self.attr("document"));
                         }
-                        (Mod<"xml.dom.minidom">().attr("_append_child"))(self.attr("curNode"), node);
+                        (G<"xml.dom.expatbuilder._append_child">())(self.attr("curNode"), node);
                         return none();
                     }) },
                 { "character_data_handler", w.method("ExpatBuilder", "character_data_handler", { py_positional("data") }, [](arguments a) -> py
@@ -631,7 +640,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         node = (Mod<"xml.dom.minidom">().attr("Text"))();
                         node.set_attr("data", node.attr("data") + data);
                         node.set_attr("ownerDocument", self.attr("document"));
-                        (Mod<"xml.dom.minidom">().attr("_append_child"))(self.attr("curNode"), node);
+                        (G<"xml.dom.expatbuilder._append_child">())(self.attr("curNode"), node);
                         return none();
                     }) },
                 { "entity_decl_handler", w.method("ExpatBuilder", "entity_decl_handler", { py_positional("entityName"), py_positional("is_parameter_entity"), py_positional("value"), py_positional("base"), py_positional("systemId"), py_positional("publicId"), py_positional("notationName") }, [](arguments a) -> py
@@ -692,7 +701,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         py data = a[1];
                         py node;
                         node = self.attr("document").method("createComment", { data });
-                        (Mod<"xml.dom.minidom">().attr("_append_child"))(self.attr("curNode"), node);
+                        (G<"xml.dom.expatbuilder._append_child">())(self.attr("curNode"), node);
                         if ((self.attr("_filter").truthy() && (self.attr("_filter").method("acceptNode", { node }) == (G<"xml.dom.expatbuilder.FILTER_REJECT">()))))
                         {
                             self.attr("curNode").method("removeChild", { node });
@@ -745,18 +754,18 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         py node;
                         py value;
                         node = self.attr("document").method("createElement", { name });
-                        (Mod<"xml.dom.minidom">().attr("_append_child"))(self.attr("curNode"), node);
+                        (G<"xml.dom.expatbuilder._append_child">())(self.attr("curNode"), node);
                         self.set_attr("curNode", node);
                         if (attributes.truthy())
                         {
                             for (py const& item : iterate{ (B<"range">())(I<0>(), py{ attributes.size() }, I<2>()) })
                             {
                                 i = item;
-                                a_ = (Mod<"xml.dom.minidom">().attr("Attr"))(attributes[i], Mod<"xml.dom">().attr("EMPTY_NAMESPACE"), none(), Mod<"xml.dom">().attr("EMPTY_PREFIX"));
+                                a_ = (Mod<"xml.dom.minidom">().attr("Attr"))(attributes[i], G<"xml.dom.expatbuilder.EMPTY_NAMESPACE">(), none(), G<"xml.dom.expatbuilder.EMPTY_PREFIX">());
                                 value = attributes[i + (I<1>())];
                                 a_.set_attr("value", value);
                                 a_.set_attr("ownerDocument", self.attr("document"));
-                                (Mod<"xml.dom.minidom">().attr("_set_attribute_node"))(node, a_);
+                                (G<"xml.dom.expatbuilder._set_attribute_node">())(node, a_);
                             }
                         }
                         if (!node.is(self.attr("document").attr("documentElement")))
@@ -852,7 +861,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         for (py const& item : iterate{ node.attr("childNodes") })
                         {
                             child = item;
-                            if (((child.attr("nodeType") == (G<"xml.dom.expatbuilder.TEXT_NODE">())) && (!child.attr("data").method("strip", { Mod<"xml.dom.minidom">().attr("_XML_WHITESPACE") }).truthy())))
+                            if (((child.attr("nodeType") == (G<"xml.dom.expatbuilder.TEXT_NODE">())) && (!child.attr("data").method("strip", { G<"xml.dom.expatbuilder._XML_WHITESPACE">() }).truthy())))
                             {
                                 L.method("append", { child });
                             }
@@ -1003,7 +1012,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         }
                         return none();
                     }) },
-                { "_nodetype_mask", dict_of({ { (Mod<"xml.dom">().attr("Node")).attr("ELEMENT_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_ELEMENT") }, { (Mod<"xml.dom">().attr("Node")).attr("ATTRIBUTE_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_ATTRIBUTE") }, { (Mod<"xml.dom">().attr("Node")).attr("TEXT_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_TEXT") }, { (Mod<"xml.dom">().attr("Node")).attr("CDATA_SECTION_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_CDATA_SECTION") }, { (Mod<"xml.dom">().attr("Node")).attr("ENTITY_REFERENCE_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_ENTITY_REFERENCE") }, { (Mod<"xml.dom">().attr("Node")).attr("ENTITY_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_ENTITY") }, { (Mod<"xml.dom">().attr("Node")).attr("PROCESSING_INSTRUCTION_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_PROCESSING_INSTRUCTION") }, { (Mod<"xml.dom">().attr("Node")).attr("COMMENT_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_COMMENT") }, { (Mod<"xml.dom">().attr("Node")).attr("DOCUMENT_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_DOCUMENT") }, { (Mod<"xml.dom">().attr("Node")).attr("DOCUMENT_TYPE_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_DOCUMENT_TYPE") }, { (Mod<"xml.dom">().attr("Node")).attr("DOCUMENT_FRAGMENT_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_DOCUMENT_FRAGMENT") }, { (Mod<"xml.dom">().attr("Node")).attr("NOTATION_NODE"), (Mod<"xml.dom.NodeFilter">().attr("NodeFilter")).attr("SHOW_NOTATION") } }) }, }));
+                { "_nodetype_mask", dict_of({ { (G<"xml.dom.expatbuilder.Node">()).attr("ELEMENT_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_ELEMENT") }, { (G<"xml.dom.expatbuilder.Node">()).attr("ATTRIBUTE_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_ATTRIBUTE") }, { (G<"xml.dom.expatbuilder.Node">()).attr("TEXT_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_TEXT") }, { (G<"xml.dom.expatbuilder.Node">()).attr("CDATA_SECTION_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_CDATA_SECTION") }, { (G<"xml.dom.expatbuilder.Node">()).attr("ENTITY_REFERENCE_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_ENTITY_REFERENCE") }, { (G<"xml.dom.expatbuilder.Node">()).attr("ENTITY_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_ENTITY") }, { (G<"xml.dom.expatbuilder.Node">()).attr("PROCESSING_INSTRUCTION_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_PROCESSING_INSTRUCTION") }, { (G<"xml.dom.expatbuilder.Node">()).attr("COMMENT_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_COMMENT") }, { (G<"xml.dom.expatbuilder.Node">()).attr("DOCUMENT_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_DOCUMENT") }, { (G<"xml.dom.expatbuilder.Node">()).attr("DOCUMENT_TYPE_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_DOCUMENT_TYPE") }, { (G<"xml.dom.expatbuilder.Node">()).attr("DOCUMENT_FRAGMENT_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_DOCUMENT_FRAGMENT") }, { (G<"xml.dom.expatbuilder.Node">()).attr("NOTATION_NODE"), (G<"xml.dom.expatbuilder.NodeFilter">()).attr("SHOW_NOTATION") } }) }, }));
 
             define("xml.dom.expatbuilder", "FilterCrutch", w.make_class("FilterCrutch", { B<"object">() }, {
                 { "__slots__", py_tuple({ S<"_builder">(), S<"_level">(), S<"_old_start">(), S<"_old_end">() }) },
@@ -1368,14 +1377,14 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         }
                         else
                         {
-                            uri = Mod<"xml.dom">().attr("EMPTY_NAMESPACE");
+                            uri = G<"xml.dom.expatbuilder.EMPTY_NAMESPACE">();
                             qname = name;
                             localname = none();
-                            prefix = Mod<"xml.dom">().attr("EMPTY_PREFIX");
+                            prefix = G<"xml.dom.expatbuilder.EMPTY_PREFIX">();
                         }
                         node = (Mod<"xml.dom.minidom">().attr("Element"))(qname, uri, prefix, localname);
                         node.set_attr("ownerDocument", self.attr("document"));
-                        (Mod<"xml.dom.minidom">().attr("_append_child"))(self.attr("curNode"), node);
+                        (G<"xml.dom.expatbuilder._append_child">())(self.attr("curNode"), node);
                         self.set_attr("curNode", node);
                         if (self.attr("_ns_ordered_prefixes").truthy())
                         {
@@ -1386,15 +1395,15 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                                 uri = items21[1];
                                 if (prefix.truthy())
                                 {
-                                    a_ = (Mod<"xml.dom.minidom">().attr("Attr"))((G<"xml.dom.expatbuilder._intern">())(self, (S<"xmlns:">()) + prefix), Mod<"xml.dom">().attr("XMLNS_NAMESPACE"), prefix, S<"xmlns">());
+                                    a_ = (Mod<"xml.dom.minidom">().attr("Attr"))((G<"xml.dom.expatbuilder._intern">())(self, (S<"xmlns:">()) + prefix), G<"xml.dom.expatbuilder.XMLNS_NAMESPACE">(), prefix, S<"xmlns">());
                                 }
                                 else
                                 {
-                                    a_ = (Mod<"xml.dom.minidom">().attr("Attr"))(S<"xmlns">(), Mod<"xml.dom">().attr("XMLNS_NAMESPACE"), S<"xmlns">(), Mod<"xml.dom">().attr("EMPTY_PREFIX"));
+                                    a_ = (Mod<"xml.dom.minidom">().attr("Attr"))(S<"xmlns">(), G<"xml.dom.expatbuilder.XMLNS_NAMESPACE">(), S<"xmlns">(), G<"xml.dom.expatbuilder.EMPTY_PREFIX">());
                                 }
                                 a_.set_attr("value", uri);
                                 a_.set_attr("ownerDocument", self.attr("document"));
-                                (Mod<"xml.dom.minidom">().attr("_set_attribute_node"))(node, a_);
+                                (G<"xml.dom.expatbuilder._set_attribute_node">())(node, a_);
                             }
                             del_item(self.attr("_ns_ordered_prefixes"), B<"slice">()(none(), none(), none()));
                         }
@@ -1421,9 +1430,9 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                                 }
                                 else
                                 {
-                                    a_ = (Mod<"xml.dom.minidom">().attr("Attr"))(aname, Mod<"xml.dom">().attr("EMPTY_NAMESPACE"), aname, Mod<"xml.dom">().attr("EMPTY_PREFIX"));
+                                    a_ = (Mod<"xml.dom.minidom">().attr("Attr"))(aname, G<"xml.dom.expatbuilder.EMPTY_NAMESPACE">(), aname, G<"xml.dom.expatbuilder.EMPTY_PREFIX">());
                                     _attrs.set_item(aname, a_);
-                                    _attrsNS.set_item(py_tuple({ Mod<"xml.dom">().attr("EMPTY_NAMESPACE"), aname }), a_);
+                                    _attrsNS.set_item(py_tuple({ G<"xml.dom.expatbuilder.EMPTY_NAMESPACE">(), aname }), a_);
                                 }
                                 a_.set_attr("ownerDocument", self.attr("document"));
                                 a_.set_attr("value", value);
@@ -1456,7 +1465,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                         {
                             if (!(curNode.attr("nodeName") == name))
                                 py_raise(B<"AssertionError">()(S<"element stack messed up - bad nodeName">()));
-                            if (!(curNode.attr("namespaceURI") == (Mod<"xml.dom">().attr("EMPTY_NAMESPACE"))))
+                            if (!(curNode.attr("namespaceURI") == (G<"xml.dom.expatbuilder.EMPTY_NAMESPACE">())))
                                 py_raise(B<"AssertionError">()(S<"element stack messed up - bad namespaceURI">()));
                         }
                         self.set_attr("curNode", curNode.attr("parentNode"));
@@ -1792,15 +1801,7 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("xmlbuilder", import_attribute("xml.dom", "xmlbuilder").release());
                 aAttributes.emplace_back("minidom", import_attribute("xml.dom", "minidom").release());
-                aAttributes.emplace_back("Node", import_attribute("xml.dom", "Node").release());
-                aAttributes.emplace_back("EMPTY_NAMESPACE", import_attribute("xml.dom", "EMPTY_NAMESPACE").release());
-                aAttributes.emplace_back("EMPTY_PREFIX", import_attribute("xml.dom", "EMPTY_PREFIX").release());
-                aAttributes.emplace_back("XMLNS_NAMESPACE", import_attribute("xml.dom", "XMLNS_NAMESPACE").release());
                 aAttributes.emplace_back("expat", import_attribute("xml.parsers", "expat").release());
-                aAttributes.emplace_back("_append_child", import_attribute("xml.dom.minidom", "_append_child").release());
-                aAttributes.emplace_back("_set_attribute_node", import_attribute("xml.dom.minidom", "_set_attribute_node").release());
-                aAttributes.emplace_back("_XML_WHITESPACE", import_attribute("xml.dom.minidom", "_XML_WHITESPACE").release());
-                aAttributes.emplace_back("NodeFilter", import_attribute("xml.dom.NodeFilter", "NodeFilter").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -1809,6 +1810,14 @@ namespace neos::python_runtime::detail::xml_dom_expatbuilder_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.dom.expatbuilder", xml_dom_expatbuilder_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.dom.expatbuilder", xml_dom_expatbuilder_module, assigned);
     }
 }

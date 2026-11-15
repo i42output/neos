@@ -151,6 +151,15 @@ namespace neos::python_runtime::detail::unittest_mock_module
         void make_unittest_mock()
         {
             static module_writer const& w = writer("unittest.mock");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.mock", "iscoroutinefunction", import_attribute("asyncio", "iscoroutinefunction"));
+            define("unittest.mock", "CodeType", import_attribute("types", "CodeType"));
+            define("unittest.mock", "ModuleType", import_attribute("types", "ModuleType"));
+            define("unittest.mock", "MethodType", import_attribute("types", "MethodType"));
+            define("unittest.mock", "safe_repr", import_attribute("unittest.util", "safe_repr"));
+            define("unittest.mock", "wraps", import_attribute("functools", "wraps"));
+            define("unittest.mock", "partial", import_attribute("functools", "partial"));
+            define("unittest.mock", "RLock", import_attribute("threading", "RLock"));
             // mock.py
             // Test tools for mocking and patching.
             // Maintained by Michael Foord
@@ -176,7 +185,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                     {
                         obj = (B<"getattr">())(obj, S<"__func__">());
                     }
-                    return [&]() -> py { py const t = (Mod<"asyncio">().attr("iscoroutinefunction"))(obj); return t.truthy() ? t : (Mod<"inspect">().attr("isawaitable"))(obj); }();
+                    return [&]() -> py { py const t = (G<"unittest.mock.iscoroutinefunction">())(obj); return t.truthy() ? t : (Mod<"inspect">().attr("isawaitable"))(obj); }();
                 }));
 
             define("unittest.mock", "_is_async_func", w.function("_is_async_func", "_is_async_func", { py_positional("func") }, [](arguments a) -> py
@@ -184,7 +193,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                     py func = a[0];
                     if ((B<"getattr">())(func, S<"__code__">(), none()).truthy())
                     {
-                        return (Mod<"asyncio">().attr("iscoroutinefunction"))(func);
+                        return (G<"unittest.mock.iscoroutinefunction">())(func);
                     }
                     else
                     {
@@ -263,7 +272,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                     }
                     if (eat_self.truthy())
                     {
-                        sig_func = (Mod<"functools">().attr("partial"))(func, none());
+                        sig_func = (G<"unittest.mock.partial">())(func, none());
                     }
                     else
                     {
@@ -349,7 +358,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                     {
                         return boolean(true);
                     }
-                    if (isinstance(obj, py_tuple({ B<"staticmethod">(), B<"classmethod">(), Mod<"types">().attr("MethodType") })))
+                    if (isinstance(obj, py_tuple({ B<"staticmethod">(), B<"classmethod">(), G<"unittest.mock.MethodType">() })))
                     {
                         return (G<"unittest.mock._callable">())(obj.attr("__func__"));
                     }
@@ -585,7 +594,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         // hence attribute will always be the last value in the loop
                         // Use partial(wrapper, attribute) to ensure the attribute is bound
                         // correctly.
-                        (B<"setattr">())((*mock), attribute, (Mod<"functools">().attr("partial"))(wrapper, attribute));
+                        (B<"setattr">())((*mock), attribute, (G<"unittest.mock.partial">())(wrapper, attribute));
                     }
                     return none();
                 }));
@@ -795,7 +804,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                 // See https://github.com/python/cpython/issues/98624 for why this is
                 // necessary.
             define("unittest.mock", "NonCallableMock", w.make_class("NonCallableMock", { G<"unittest.mock.Base">() }, {
-                { "_lock", (Mod<"threading">().attr("RLock"))() },
+                { "_lock", (G<"unittest.mock.RLock">())() },
                 { "__new__", w.method("NonCallableMock", "__new__", { py_positional("spec", none()), py_positional("wraps", none()), py_positional("name", none()), py_positional("spec_set", none()), py_positional("parent", none()), py_positional("_spec_state", none()), py_positional("_new_name", S<"">()), py_positional("_new_parent", none()), py_positional("_spec_as_instance", boolean(false)), py_positional("_eat_self", none()), py_positional("unsafe", boolean(false)) }, [](arguments a) -> py
                     {
                         py cls = a[0];
@@ -958,7 +967,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                                     else
                                         py_reraise(handler14.exception);
                                 }
-                                if ((Mod<"asyncio">().attr("iscoroutinefunction"))(unwrapped_attr).truthy())
+                                if ((G<"unittest.mock.iscoroutinefunction">())(unwrapped_attr).truthy())
                                 {
                                     _spec_asyncs.method("append", { attr });
                                 }
@@ -1679,7 +1688,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         py not_found;
                         py problem;
                         expected = [&]() -> py { py const comprehension30 = py_list(); py c; for (py const& item : iterate{ calls }) { c = item; comprehension30.method("append", { self.method("_call_matcher", { c }) }); } return comprehension30; }();
-                        cause = (B<"next">())([&]() -> py { py const comprehension31 = py_list(); py e; for (py const& item : iterate{ expected }) { e = item; if (!isinstance(e, B<"Exception">())) continue; comprehension31.method("append", { e }); } return comprehension31; }(), none());
+                        cause = (B<"next">())((B<"iter">())([&]() -> py { py const comprehension31 = py_list(); py e; for (py const& item : iterate{ expected }) { e = item; if (!isinstance(e, B<"Exception">())) continue; comprehension31.method("append", { e }); } return comprehension31; }()), none());
                         all_calls = (G<"unittest.mock._CallList">())([&]() -> py { py const comprehension32 = py_list(); py c; for (py const& item : iterate{ self.attr("mock_calls") }) { c = item; comprehension32.method("append", { self.method("_call_matcher", { c }) }); } return comprehension32; }());
                         if (!any_order.truthy())
                         {
@@ -1693,7 +1702,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                                 {
                                     problem = (S<"Error processing expected calls.\nErrors: {}">()).method("format", { [&]() -> py { py const comprehension33 = py_list(); py e; for (py const& item : iterate{ expected }) { e = item; comprehension33.method("append", { (isinstance(e, B<"Exception">()) ? e : none()) }); } return comprehension33; }() });
                                 }
-                                fn_raise_from((B<"AssertionError">())(S(problem.str() + "\nExpected: " + (G<"unittest.mock._CallList">())(calls).str() + "\n  Actual: " + (Mod<"unittest.util">().attr("safe_repr"))(self.attr("mock_calls")).str())).get(), cause.get());
+                                fn_raise_from((B<"AssertionError">())(S(problem.str() + "\nExpected: " + (G<"unittest.mock._CallList">())(calls).str() + "\n  Actual: " + (G<"unittest.mock.safe_repr">())(self.attr("mock_calls")).str())).get(), cause.get());
                                 throw raised{};
                             }
                             return none();
@@ -1807,7 +1816,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         {
                             return S<"">();
                         }
-                        return S(std::string{ "\nCalls: " } + (Mod<"unittest.util">().attr("safe_repr"))(self.attr("mock_calls")).str() + ".");
+                        return S(std::string{ "\nCalls: " } + (G<"unittest.mock.safe_repr">())(self.attr("mock_calls")).str() + ".");
                     }) }, }));
 
             // Denylist for forbidden attribute names in safe mode
@@ -2232,7 +2241,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                             (*func).attr("patchings").method("append", { (*self) });
                             return (*func);
                         }
-                        *patched = (Mod<"functools">().attr("wraps"))((*func))(w.function("patched", "_patch.decorate_callable.<locals>.patched", {  }, [func, patched, self](arguments a) -> py
+                        *patched = (G<"unittest.mock.wraps">())((*func))(w.function("patched", "_patch.decorate_callable.<locals>.patched", {  }, [func, patched, self](arguments a) -> py
     {
         py args = a[0];
         py keywargs = a[1];
@@ -2282,7 +2291,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                             (*func).attr("patchings").method("append", { (*self) });
                             return (*func);
                         }
-                        *patched = (Mod<"functools">().attr("wraps"))((*func))(async_function(w, "_patch.decorate_async_callable.<locals>.patched", {  }, [func, patched, self](arguments a) -> py
+                        *patched = (G<"unittest.mock.wraps">())((*func))(async_function(w, "_patch.decorate_async_callable.<locals>.patched", {  }, [func, patched, self](arguments a) -> py
     {
         py args = a[0];
         py keywargs = a[1];
@@ -2355,7 +2364,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                                 local = boolean(true);
                             }
                         }
-                        if (((G<"unittest.mock._builtins">()).contains(name) && isinstance(target, Mod<"types">().attr("ModuleType"))))
+                        if (((G<"unittest.mock._builtins">()).contains(name) && isinstance(target, G<"unittest.mock.ModuleType">())))
                         {
                             self.set_attr("create", boolean(true));
                         }
@@ -2688,7 +2697,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         else
                             py_reraise(handler60.exception);
                     }
-                    return py_tuple({ (Mod<"functools">().attr("partial"))(Mod<"pkgutil">().attr("resolve_name"), target), attribute });
+                    return py_tuple({ (G<"unittest.mock.partial">())(Mod<"pkgutil">().attr("resolve_name"), target), attribute });
                 }));
 
             define("unittest.mock", "_patch_object", w.function("_patch_object", "_patch_object", { py_positional("target"), py_positional("attribute"), py_positional("new", G<"unittest.mock.DEFAULT">()), py_positional("spec", none()), py_positional("create", boolean(false)), py_positional("spec_set", none()), py_positional("autospec", none()), py_positional("new_callable", none()), py_keyword("unsafe", boolean(false)) }, [](arguments a) -> py
@@ -2732,7 +2741,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                     py this_patcher;
                     if ((B<"type">())((*target)).is((B<"str">())))
                     {
-                        getter = (Mod<"functools">().attr("partial"))(Mod<"pkgutil">().attr("resolve_name"), (*target));
+                        getter = (G<"unittest.mock.partial">())(Mod<"pkgutil">().attr("resolve_name"), (*target));
                     }
                     else
                     {
@@ -2818,7 +2827,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         auto const self = std::make_shared<py>(a[0]);
                         auto const f = std::make_shared<py>(a[1]);
                         py _inner;
-                        _inner = (Mod<"functools">().attr("wraps"))((*f))(w.function("_inner", "_patch_dict.decorate_callable.<locals>._inner", {  }, [f, self](arguments a) -> py
+                        _inner = (G<"unittest.mock.wraps">())((*f))(w.function("_inner", "_patch_dict.decorate_callable.<locals>._inner", {  }, [f, self](arguments a) -> py
     {
         py args = a[0];
         py kw = a[1];
@@ -2853,7 +2862,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         auto const self = std::make_shared<py>(a[0]);
                         auto const f = std::make_shared<py>(a[1]);
                         py _inner;
-                        _inner = (Mod<"functools">().attr("wraps"))((*f))(async_function(w, "_patch_dict.decorate_async_callable.<locals>._inner", {  }, [f, self](arguments a) -> py
+                        _inner = (G<"unittest.mock.wraps">())((*f))(async_function(w, "_patch_dict.decorate_async_callable.<locals>._inner", {  }, [f, self](arguments a) -> py
     {
         py args = a[0];
         py kw = a[1];
@@ -3390,12 +3399,12 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         if ((G<"unittest.mock._CODE_SIG">()).truthy())
                         {
                             code_mock = (G<"unittest.mock.NonCallableMock">()).call({  }, { { "spec_set", G<"unittest.mock._CODE_ATTRS">() } });
-                            code_mock.attr("__dict__").set_item(S<"_spec_class">(), Mod<"types">().attr("CodeType"));
+                            code_mock.attr("__dict__").set_item(S<"_spec_class">(), G<"unittest.mock.CodeType">());
                             code_mock.attr("__dict__").set_item(S<"_spec_signature">(), G<"unittest.mock._CODE_SIG">());
                         }
                         else
                         {
-                            code_mock = (G<"unittest.mock.NonCallableMock">()).call({  }, { { "spec_set", Mod<"types">().attr("CodeType") } });
+                            code_mock = (G<"unittest.mock.NonCallableMock">()).call({  }, { { "spec_set", G<"unittest.mock.CodeType">() } });
                         }
                         code_mock.set_attr("co_flags", ((Mod<"inspect">().attr("CO_COROUTINE")) + (Mod<"inspect">().attr("CO_VARARGS"))) + (Mod<"inspect">().attr("CO_VARKEYWORDS")));
                         code_mock.set_attr("co_argcount", I<0>());
@@ -3454,7 +3463,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                                     py_raise(result);
                                 }
                             }
-                            else if ((Mod<"asyncio">().attr("iscoroutinefunction"))(effect).truthy())
+                            else if ((G<"unittest.mock.iscoroutinefunction">())(effect).truthy())
                             {
                                 result = py_await(call_ex(effect, {  }, args, kwargs));
                             }
@@ -3473,7 +3482,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         }
                         if (!self.attr("_mock_wraps").is_none())
                         {
-                            if ((Mod<"asyncio">().attr("iscoroutinefunction"))(self.attr("_mock_wraps")).truthy())
+                            if ((G<"unittest.mock.iscoroutinefunction">())(self.attr("_mock_wraps")).truthy())
                             {
                                 return py_await(call_ex(self.attr("_mock_wraps"), {  }, args, kwargs));
                             }
@@ -3578,7 +3587,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         py not_found;
                         py problem;
                         expected = [&]() -> py { py const comprehension87 = py_list(); py c; for (py const& item : iterate{ calls }) { c = item; comprehension87.method("append", { self.method("_call_matcher", { c }) }); } return comprehension87; }();
-                        cause = (B<"next">())([&]() -> py { py const comprehension88 = py_list(); py e; for (py const& item : iterate{ expected }) { e = item; if (!isinstance(e, B<"Exception">())) continue; comprehension88.method("append", { e }); } return comprehension88; }(), none());
+                        cause = (B<"next">())((B<"iter">())([&]() -> py { py const comprehension88 = py_list(); py e; for (py const& item : iterate{ expected }) { e = item; if (!isinstance(e, B<"Exception">())) continue; comprehension88.method("append", { e }); } return comprehension88; }()), none());
                         all_awaits = (G<"unittest.mock._CallList">())([&]() -> py { py const comprehension89 = py_list(); py c; for (py const& item : iterate{ self.attr("await_args_list") }) { c = item; comprehension89.method("append", { self.method("_call_matcher", { c }) }); } return comprehension89; }());
                         if (!any_order.truthy())
                         {
@@ -4200,7 +4209,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                             }
                             skipfirst = (G<"unittest.mock._must_skip">())(spec, entry, is_type);
                             child_kwargs.set_item(S<"_eat_self">(), skipfirst);
-                            if ((Mod<"asyncio">().attr("iscoroutinefunction"))(original).truthy())
+                            if ((G<"unittest.mock.iscoroutinefunction">())(original).truthy())
                             {
                                 child_klass = G<"unittest.mock.AsyncMock">();
                             }
@@ -4684,7 +4693,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                         py iterator = a[1];
                         py code_mock;
                         self.set_attr("iterator", iterator);
-                        code_mock = (G<"unittest.mock.NonCallableMock">()).call({  }, { { "spec_set", Mod<"types">().attr("CodeType") } });
+                        code_mock = (G<"unittest.mock.NonCallableMock">()).call({  }, { { "spec_set", G<"unittest.mock.CodeType">() } });
                         code_mock.set_attr("co_flags", Mod<"inspect">().attr("CO_ITERABLE_COROUTINE"));
                         self.attr("__dict__").set_item(S<"__code__">(), code_mock);
                         return none();
@@ -4729,15 +4738,7 @@ namespace neos::python_runtime::detail::unittest_mock_module
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("builtins", py{ fn_import("builtins") }.release());
                 aAttributes.emplace_back("pkgutil", py{ fn_import("pkgutil") }.release());
-                aAttributes.emplace_back("iscoroutinefunction", import_attribute("asyncio", "iscoroutinefunction").release());
                 aAttributes.emplace_back("threading", py{ fn_import("threading") }.release());
-                aAttributes.emplace_back("CodeType", import_attribute("types", "CodeType").release());
-                aAttributes.emplace_back("ModuleType", import_attribute("types", "ModuleType").release());
-                aAttributes.emplace_back("MethodType", import_attribute("types", "MethodType").release());
-                aAttributes.emplace_back("safe_repr", import_attribute("unittest.util", "safe_repr").release());
-                aAttributes.emplace_back("wraps", import_attribute("functools", "wraps").release());
-                aAttributes.emplace_back("partial", import_attribute("functools", "partial").release());
-                aAttributes.emplace_back("RLock", import_attribute("threading", "RLock").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -4746,6 +4747,14 @@ namespace neos::python_runtime::detail::unittest_mock_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.mock", unittest_mock_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.mock", unittest_mock_module, assigned);
     }
 }

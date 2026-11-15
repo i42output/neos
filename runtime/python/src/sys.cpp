@@ -40,6 +40,7 @@
 // The sys module (CPython 3.13's: its attributes other than those of objects.cpp's sys)
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <set>
@@ -57,6 +58,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        void set_structseq_not_instantiable(structseq_descriptor const& aDescriptor);    // (structseq.cpp)
+
         namespace
         {
             long long sRecursionLimit = 1000;
@@ -179,6 +182,10 @@ namespace neos::python_runtime
                             return nullptr;
                         if (limit < 1)
                             return error("ValueError", "recursion limit must be greater or equal than 1");
+                        // (not at or below the current depth (the program's frames, its module's included), as CPython's)
+                        if (auto const frames = capture_frames(); frames != nullptr && static_cast<long long>(frames->size()) >= limit)
+                            return error("RecursionError", "cannot set the recursion limit to " + std::to_string(limit) + " at the recursion depth " +
+                                std::to_string(frames->size()) + ": the limit is too low");
                         sRecursionLimit = limit;
                         return none();
                     } },
@@ -384,6 +391,7 @@ namespace neos::python_runtime
             object* version_info()
             {
                 auto const& t = structseq_type("sys.version_info", { "major", "minor", "micro", "releaselevel", "serial" }, 5u);
+                set_structseq_not_instantiable(t);     // (as CPython's: its type cannot be called)
                 return make_structseq(t, { make_int(3), make_int(13), make_int(0), make_str("final"), make_int(0) });
             }
         }
@@ -423,6 +431,8 @@ namespace neos::python_runtime
             else
                 clear_error();
             aAttributes.emplace_back("api_version", make_int(1013));
+            // (sys._git: the implementation, and its source's tag and revision (none here))
+            aAttributes.emplace_back("_git", make_tuple({ make_str("neos"), make_str(""), make_str("") }));
             aAttributes.emplace_back("maxunicode", make_int(1114111));
             aAttributes.emplace_back("copyright", make_str("Copyright (c) 2001-2024 Python Software Foundation.\nAll Rights Reserved."));
             auto const exe = executable();
@@ -432,7 +442,46 @@ namespace neos::python_runtime
             for (char const* name : { "prefix", "base_prefix", "exec_prefix", "base_exec_prefix" })
                 aAttributes.emplace_back(name, make_str(prefix));
             aAttributes.emplace_back("platlibdir", make_str("lib"));
-            aAttributes.emplace_back("path", make_list({ make_str("") }));
+            // (sys.path (as CPython's site-less initial path): the script's directory (absolute; '' if there is no script), then
+            // PYTHONPATH's directories; the standard library is the runtime's own, in no directory)
+            {
+                std::string script;
+                for (auto const& [name, value] : aAttributes)
+                    if (name == "argv" && value != nullptr && kind_of(value) == NEOS_PY_LIST && !as<list_object>(value)->items.empty() &&
+                        kind_of(as<list_object>(value)->items.front()) == NEOS_PY_STR)
+                        script = as<str_object>(as<list_object>(value)->items.front())->value;
+                std::vector<object*> path;
+                std::error_code ec;
+                if (!script.empty() && script != "-c" && script != "-m" && std::filesystem::is_regular_file(script, ec))
+                {
+                    // (its symbolic links resolved, as CPython's)
+                    auto const directory = std::filesystem::weakly_canonical(std::filesystem::absolute(std::filesystem::path{ script }, ec), ec).parent_path();
+                    path.push_back(make_str(ec ? std::string{} : directory.string()));
+                }
+                else
+                    path.push_back(make_str(""));
+                if (auto const list = std::getenv("PYTHONPATH"))
+                {
+#if defined(_WIN32)
+                    char const separator = ';';
+#else
+                    char const separator = ':';
+#endif
+                    std::string const paths{ list };
+                    std::size_t start = 0u;
+                    for (;;)
+                    {
+                        auto const end = paths.find(separator, start);
+                        auto const entry = paths.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                        if (!entry.empty())
+                            path.push_back(make_str(entry));
+                        if (end == std::string::npos)
+                            break;
+                        start = end + 1u;
+                    }
+                }
+                aAttributes.emplace_back("path", make_list(std::move(path)));
+            }
             aAttributes.emplace_back("meta_path", make_list());
             aAttributes.emplace_back("path_hooks", make_list());
             aAttributes.emplace_back("path_importer_cache", make_dict());
@@ -520,6 +569,7 @@ namespace neos::python_runtime
                 auto const& t = structseq_type("sys.flags", { "debug", "inspect", "interactive", "optimize", "dont_write_bytecode", "no_user_site", "no_site",
                     "ignore_environment", "verbose", "bytes_warning", "quiet", "hash_randomization", "isolated", "dev_mode", "utf8_mode", "warn_default_encoding",
                     "safe_path", "int_max_str_digits" }, 18u);
+                set_structseq_not_instantiable(t);     // (as CPython's: its type cannot be called)
                 std::vector<object*> values;
                 for (int i = 0; i < 18; ++i)
                     values.push_back(i == 13 || i == 16 ? make_bool(false) : i == 11 ? make_int(1) : i == 17 ? make_int(4300) : make_int(0));

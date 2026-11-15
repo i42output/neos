@@ -160,6 +160,12 @@ namespace neos::python_runtime::detail::tokenize_module
         void make_tokenize()
         {
             static module_writer const& w = writer("tokenize");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("tokenize", "_builtin_open", import_attribute("builtins", "open"));
+            define("tokenize", "lookup", import_attribute("codecs", "lookup"));
+            define("tokenize", "BOM_UTF8", import_attribute("codecs", "BOM_UTF8"));
+            define("tokenize", "TextIOWrapper", import_attribute("io", "TextIOWrapper"));
+            define("tokenize", "EXACT_TOKEN_TYPES", import_attribute("token", "EXACT_TOKEN_TYPES"));
             define("tokenize", "__author__", S<"Ka-Ping Yee <ping@lfw.org>">());
             define("tokenize", "__credits__", S<"GvR, ESR, Tim Peters, Thomas Wouters, Fred Drake, Skip Montanaro, Raymond Hettinger, Trent Nelson, Michael Foord">());
             define("tokenize", "cookie_re", (Mod<"re">()).method("compile", { S<"^[ \\t\\f]*#.*?coding[:=][ \\t]*([-\\w.]+)">(), Mod<"re">().attr("ASCII") }));
@@ -177,9 +183,9 @@ namespace neos::python_runtime::detail::tokenize_module
                 { "exact_type", B<"property">()(w.method("TokenInfo", "exact_type", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        if (((self.attr("type") == (Mod<"token">().attr("OP"))) && (Mod<"token">().attr("EXACT_TOKEN_TYPES")).contains(self.attr("string"))))
+                        if (((self.attr("type") == (Mod<"token">().attr("OP"))) && (G<"tokenize.EXACT_TOKEN_TYPES">()).contains(self.attr("string"))))
                         {
-                            return (Mod<"token">().attr("EXACT_TOKEN_TYPES"))[self.attr("string")];
+                            return (G<"tokenize.EXACT_TOKEN_TYPES">())[self.attr("string")];
                         }
                         else
                         {
@@ -275,7 +281,7 @@ namespace neos::python_runtime::detail::tokenize_module
             // Sorting in reverse order puts the long operators before their prefixes.
             // Otherwise if = came before ==, == would get recognized as two instances
             // of =.
-            define("tokenize", "Special", call_ex((G<"tokenize.group">()), {  }, (B<"map">())(Mod<"re">().attr("escape"), (B<"sorted">()).call({ Mod<"token">().attr("EXACT_TOKEN_TYPES") }, { { "reverse", boolean(true) } })), py{}));
+            define("tokenize", "Special", call_ex((G<"tokenize.group">()), {  }, (B<"map">())(Mod<"re">().attr("escape"), (B<"sorted">()).call({ G<"tokenize.EXACT_TOKEN_TYPES">() }, { { "reverse", boolean(true) } })), py{}));
             define("tokenize", "Funny", (G<"tokenize.group">())(S<"\\r?\\n">(), G<"tokenize.Special">()));
             define("tokenize", "PlainToken", (G<"tokenize.group">())(G<"tokenize.Number">(), G<"tokenize.Funny">(), G<"tokenize.String">(), G<"tokenize.Name">()));
             define("tokenize", "Token", (G<"tokenize.Ignore">()) + (G<"tokenize.PlainToken">()));
@@ -734,7 +740,7 @@ namespace neos::python_runtime::detail::tokenize_module
         encoding = (G<"tokenize._get_normal_name">())(match.method("group", { I<1>() }));
         try
         {
-            codec = (Mod<"codecs">().attr("lookup"))(encoding);
+            codec = (G<"tokenize.lookup">())(encoding);
         }
         catch (raised const&)
         {
@@ -775,7 +781,7 @@ namespace neos::python_runtime::detail::tokenize_module
         return encoding;
     });
                     first = read_or_stop();
-                    if (first.method("startswith", { Mod<"codecs">().attr("BOM_UTF8") }).truthy())
+                    if (first.method("startswith", { G<"tokenize.BOM_UTF8">() }).truthy())
                     {
                         *bom_found = boolean(true);
                         first = first[B<"slice">()(I<3>(), none(), none())];
@@ -814,14 +820,14 @@ namespace neos::python_runtime::detail::tokenize_module
                     py encoding;
                     py lines;
                     py text;
-                    buffer = (Mod<"builtins">().attr("open"))(filename, S<"rb">());
+                    buffer = (G<"tokenize._builtin_open">())(filename, S<"rb">());
                     try
                     {
                         auto const items25 = unpack((G<"tokenize.detect_encoding">())(buffer.attr("readline")), 2);
                         encoding = items25[0];
                         lines = items25[1];
                         buffer.method("seek", { I<0>() });
-                        text = (Mod<"io">().attr("TextIOWrapper")).call({ buffer, encoding }, { { "line_buffering", boolean(true) } });
+                        text = (G<"tokenize.TextIOWrapper">()).call({ buffer, encoding }, { { "line_buffering", boolean(true) } });
                         text.set_attr("mode", S<"r">());
                         return text;
                     }
@@ -927,7 +933,7 @@ namespace neos::python_runtime::detail::tokenize_module
                         {
                             filename = (*args).attr("filename");
                             {
-                                py const manager28 = (Mod<"builtins">().attr("open"))(filename, S<"rb">());
+                                py const manager28 = (G<"tokenize._builtin_open">())(filename, S<"rb">());
                                 py const exit28 = pyclass::special_method(manager28, "__exit__");
                                 py const value28 = pyclass::special_method(manager28, "__enter__")(manager28);
                                 f = value28;
@@ -1089,12 +1095,8 @@ namespace neos::python_runtime::detail::tokenize_module
                 }
                 if (auto const doc = tokenize_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("_builtin_open", import_attribute("builtins", "open").release());
-                aAttributes.emplace_back("lookup", import_attribute("codecs", "lookup").release());
-                aAttributes.emplace_back("BOM_UTF8", import_attribute("codecs", "BOM_UTF8").release());
                 aAttributes.emplace_back("collections", py{ fn_import("collections") }.release());
                 aAttributes.emplace_back("functools", py{ fn_import("functools") }.release());
-                aAttributes.emplace_back("TextIOWrapper", import_attribute("io", "TextIOWrapper").release());
                 aAttributes.emplace_back("_itertools", py{ fn_import("itertools") }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
@@ -1105,7 +1107,6 @@ namespace neos::python_runtime::detail::tokenize_module
                         if (auto const text = n.str(); all || !text.starts_with("_"))
                             aAttributes.emplace_back(text, m.attr(text.c_str()).release());
                 }
-                aAttributes.emplace_back("EXACT_TOKEN_TYPES", import_attribute("token", "EXACT_TOKEN_TYPES").release());
                 aAttributes.emplace_back("_tokenize", py{ fn_import("_tokenize") }.release());
                 aAttributes.emplace_back("token", py{ fn_import("token") }.release());
                 for (auto const& [name, value] : s.attributes)
@@ -1116,6 +1117,14 @@ namespace neos::python_runtime::detail::tokenize_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("tokenize", tokenize_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("tokenize", tokenize_module, assigned);
     }
 }

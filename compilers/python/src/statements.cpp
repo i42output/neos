@@ -131,7 +131,9 @@ namespace neos::compilers::python
                 if (iEdits.empty())
                     return iText;
                 aChanged = true;
-                std::sort(iEdits.begin(), iEdits.end(), [](edit const& a, edit const& b) { return a.begin > b.begin; });
+                // (from the end; at the same position, a replacement before an insertion (so that the insertion is not replaced), and edits
+                // at the same place in the order they were made)
+                std::stable_sort(iEdits.begin(), iEdits.end(), [](edit const& a, edit const& b) { return a.begin != b.begin ? a.begin > b.begin : a.end > b.end; });
                 std::string result = iText;
                 for (auto const& e : iEdits)
                     result.replace(e.begin, e.end - e.begin, e.text);
@@ -506,8 +508,10 @@ namespace neos::compilers::python
                             auto const end = statement ? header_colon(l, in + 1u) : comprehension_iterable_end(l, in);
                             if (end <= in + 1u)
                                 continue;
+                            // (insertions, not a replacement of its source: edits within it (e.g. a generator expression's async for) are kept)
                             iEdits.push_back({ tok(l, t).begin, tok(l, t + 1u).begin, "" });
-                            replace(l, in + 1u, end, "__async_iter(" + source(l, in + 1u, end) + ")");
+                            iEdits.push_back({ tok(l, in + 1u).begin, tok(l, in + 1u).begin, "__async_iter(" });
+                            iEdits.push_back({ tok(l, end - 1u).end, tok(l, end - 1u).end, ")" });
                             continue;
                         }
                         if (!statement)
@@ -1472,6 +1476,89 @@ namespace neos::compilers::python
                             replace(l, t, t + 1u, "_" + owner + std::string{ n });
                     }
                 }
+                class_names();
+            }
+            // (a class's body that binds __class__ itself (e.g. unittest.mock's "__class__ = property(...)"): that name is the body's
+            // _cc___class__ (the compiler puts it in the class's namespace as __class__), apart from the class's cell (the _bN_ function's 
+            // __class__ parameter, which its methods' super() and __class__ use), as CPython keeps them apart; the body's own lines only 
+            // (not its functions', classes' or lambdas'))
+            void class_names()
+            {
+                for (std::size_t l = 0u; l < iLines.size(); ++l)
+                {
+                    if (!class_at(l) || header_colon(l, 2u) + 1u != count(l))
+                        continue;
+                    std::vector<std::pair<std::size_t, std::size_t>> uses;
+                    bool binds = false;
+                    std::optional<std::size_t> nested;
+                    for (auto b = l + 1u; b < iLines.size() && iLines[b].indent > iLines[l].indent; ++b)
+                    {
+                        if (nested && iLines[b].indent > *nested)
+                            continue;
+                        nested.reset();
+                        std::size_t from = 0u;
+                        std::size_t to = count(b);
+                        // (global __class__ or nonlocal __class__: the body's __class__ is that variable, not a name of its namespace)
+                        if ((is_name(b, 0u, "global") || is_name(b, 0u, "nonlocal")))
+                        {
+                            bool declared = false;
+                            for (auto t = 1u; t < count(b); ++t)
+                                declared = declared || is_name(b, t, "__class__");
+                            if (declared)
+                            {
+                                uses.clear();
+                                binds = false;
+                                break;
+                            }
+                            continue;
+                        }
+                        if (auto const d = def_at(b); d || class_at(b))
+                        {
+                            // (a def's or class's name (its body is its own))
+                            from = d ? *d + 1u : 1u;
+                            to = from + 1u;
+                            if (is_name(b, from, "__class__"))
+                                binds = true;
+                            if (header_colon(b, from + 1u) + 1u == count(b))
+                                nested = iLines[b].indent;
+                        }
+                        int depth = 0;
+                        for (auto t = from; t < to; ++t)
+                        {
+                            if (tok(b, t).kind == token::Op)
+                            {
+                                auto const op = text(b, t);
+                                if (opening(op))
+                                    ++depth;
+                                else if (closing(op))
+                                    --depth;
+                                continue;
+                            }
+                            if (is_name(b, t, "lambda"))
+                                break;
+                            if (!is_name(b, t, "__class__") || (t > 0u && is_op(b, t - 1u, ".")))
+                                continue;
+                            // (a keyword argument's name)
+                            if (depth > 0 && is_op(b, t + 1u, "="))
+                                continue;
+                            uses.emplace_back(b, t);
+                            if (t + 1u < count(b) && tok(b, t + 1u).kind == token::Op)
+                            {
+                                auto const op = text(b, t + 1u);
+                                if (depth == 0 && (op == "=" || op == ":" || op == ":=" || (op.size() >= 2u && op.back() == '=' && op != "==" && op != "<=" && 
+                                    op != ">=" && op != "!=")))
+                                    binds = true;
+                                if (op == ":=")
+                                    binds = true;
+                            }
+                            if (t > 0u && (is_name(b, t - 1u, "as") || is_name(b, t - 1u, "for") || is_name(b, t - 1u, "del")))
+                                binds = true;
+                        }
+                    }
+                    if (binds)
+                        for (auto const& use : uses)
+                            replace(use.first, use.second, use.second + 1u, "_cc___class__");
+                }
             }
         private:
             std::string const& iText;
@@ -1542,7 +1629,7 @@ namespace neos::compilers::python
                 auto const end = line.tokens.back().end;
                 // (the value parenthesized: a tuple's display without parentheses ("x = 1, 2") is one argument)
                 edits.push_back({ end, end, "))" });
-                edits.push_back({ begin, begin, "__ns_bind('" + std::string{ target } + "', (" });
+                edits.push_back({ begin, begin, "__ns_bind('" + (target == "_cc___class__" ? std::string{ "__class__" } : std::string{ target }) + "', (" });
             }
         }
         if (edits.empty())
@@ -1804,6 +1891,16 @@ namespace neos::compilers::python
                 auto consumer = is_op(l, aOpen, "(") ? consuming_builtin(l, aOpen) : std::nullopt;
                 if (consumer && aClassBody && (*consumer == "any" || *consumer == "all"))
                     consumer.reset();
+                // (an asynchronous generator expression: one that awaits (its element, conditions or later iterables), or whose for clauses 
+                // are async (async for: see the awaits' rewrite, __async_iter); its items are not collected (a builtin of it raises TypeError))
+                bool asynchronous = false;
+                for (auto t = aOpen + 1u; t < aClose; ++t)
+                    if (tok(l, t).kind == token::Name && is_op(l, t + 1u, "(") &&
+                        (t < firstIterable->first || t >= firstIterable->second ? text(l, t) == "__await" || text(l, t) == "__async_iter" :
+                            t == firstIterable->first && text(l, t) == "__async_iter"))
+                        asynchronous = true;
+                if (asynchronous && is_op(l, aOpen, "("))
+                    consumer.reset();
                 bool const generator = is_op(l, aOpen, "(") && !consumer;
                 bool const wrapped = aClassBody || generator;   // (its first iterable is an argument: _qit)
                 bool const bare = consumer && (*consumer == "list" || *consumer == "set");
@@ -1850,7 +1947,8 @@ namespace neos::compilers::python
                     std::string clauses = comprehension.substr(clausesAt, comprehension.size() - clausesAt - 1u);
                     while (!element.empty() && (element.back() == ' ' || element.back() == '\t'))
                         element.pop_back();
-                    result += "(__generator(lambda _qit: {0: __yield(" + element + ") " + clauses + "}, '<genexpr>', '<genexpr>', iter(" + iterable + ")))";
+                    result += std::string{ asynchronous ? "(__async_generator(" : "(__generator(" } + "lambda _qit: {0: __yield(" + element + ") " + clauses + 
+                        "}, '<genexpr>', '<genexpr>', iter(" + iterable + ")))";
                 }
                 else if (aClassBody)
                     result += "(lambda _qit: " + comprehension + ")(" + iterable + ")";

@@ -147,6 +147,9 @@ namespace neos::python_runtime::detail::html_parser_module
         void make_html_parser()
         {
             static module_writer const& w = writer("html.parser");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("html.parser", "unescape", import_attribute("html", "unescape"));
+            define("html.parser", "html5_entities", import_attribute("html.entities", "html5"));
             // This file is based on sgmllib.py, but the API is slightly different.
             // XXX There should be a way to distinguish between PCDATA (parsed
             // character data -- the normal case), RCDATA (replaceable character
@@ -192,13 +195,13 @@ namespace neos::python_runtime::detail::html_parser_module
                     // Numeric / hex char refs must always be unescaped
                     if (ref_.method("startswith", { S<"&#">() }).truthy())
                     {
-                        return (Mod<"html">().attr("unescape"))(ref_);
+                        return (G<"html.parser.unescape">())(ref_);
                     }
                     // Named character / entity references must only be unescaped
                     // if they are an exact match, and they are not followed by an equals sign
-                    if (((!ref_.method("endswith", { S<"=">() }).truthy()) && (Mod<"html.entities">().attr("html5")).contains(ref_[B<"slice">()(I<1>(), none(), none())])))
+                    if (((!ref_.method("endswith", { S<"=">() }).truthy()) && (G<"html.parser.html5_entities">()).contains(ref_[B<"slice">()(I<1>(), none(), none())])))
                     {
-                        return (Mod<"html">().attr("unescape"))(ref_);
+                        return (G<"html.parser.unescape">())(ref_);
                     }
                     // Otherwise do not unescape
                     return ref_;
@@ -432,7 +435,7 @@ namespace neos::python_runtime::detail::html_parser_module
                             {
                                 if ((self.attr("convert_charrefs").truthy() && self.attr("_escapable").truthy()))
                                 {
-                                    self.method("handle_data", { (Mod<"html">().attr("unescape"))(rawdata[B<"slice">()(i, j, none())]) });
+                                    self.method("handle_data", { (G<"html.parser.unescape">())(rawdata[B<"slice">()(i, j, none())]) });
                                 }
                                 else
                                 {
@@ -628,7 +631,7 @@ namespace neos::python_runtime::detail::html_parser_module
                         {
                             if ((self.attr("convert_charrefs").truthy() && self.attr("_escapable").truthy()))
                             {
-                                self.method("handle_data", { (Mod<"html">().attr("unescape"))(rawdata[B<"slice">()(i, n, none())]) });
+                                self.method("handle_data", { (G<"html.parser.unescape">())(rawdata[B<"slice">()(i, n, none())]) });
                             }
                             else
                             {
@@ -977,8 +980,6 @@ namespace neos::python_runtime::detail::html_parser_module
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("_markupbase", py{ fn_import("_markupbase") }.release());
-                aAttributes.emplace_back("unescape", import_attribute("html", "unescape").release());
-                aAttributes.emplace_back("html5_entities", import_attribute("html.entities", "html5").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -987,6 +988,14 @@ namespace neos::python_runtime::detail::html_parser_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("html.parser", html_parser_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("html.parser", html_parser_module, assigned);
     }
 }

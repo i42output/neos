@@ -85,7 +85,10 @@ namespace neos::python_runtime
                 bool hooked = false;                    ///< (an asynchronous generator: its first iteration has begun)
                 object* finalizer = nullptr;            ///< (an asynchronous generator: sys.set_asyncgen_hooks's finalizer when its first iteration began)
                 bool finalized = false;                 ///< (its finalizer has been called)
+                bool iterableCoroutine = false;         ///< (a generator of a function that types.coroutine decorated: awaitable (CPython's
+                                                        ///< CO_ITERABLE_COROUTINE))
                 neos_rt_frame suspendedAt{};            ///< (suspended: its body's frame where it suspended (its line); source null: not known)
+                void* execState = nullptr;              ///< (suspended: the program that its body runs and its exec namespaces (exec_suspend's))
                 ~generator_object();
             };
 
@@ -165,7 +168,17 @@ namespace neos::python_runtime
                 // (alive while it runs)
                 if (!g.dying)
                     retain(&g.h.base);
+                // (the thread's program and exec namespaces: the body's while it runs (where it suspended), the resumer's again when it 
+                // suspends or finishes)
+                auto const resumerProgram = current_program();
+                auto const depth = exec_depth();
+                if (g.execState != nullptr)
+                    exec_resume(std::exchange(g.execState, nullptr));
                 auto const finished = host()->coroutine_resume(g.coroutine);
+                if (finished == 0)
+                    g.execState = exec_suspend(depth, resumerProgram);
+                else
+                    exec_discard(exec_suspend(depth, resumerProgram));
                 tCurrent = g.resumer;
                 ref const self{ g.dying ? nullptr : &g.h.base };
                 if (finished != 0)
@@ -339,6 +352,8 @@ namespace neos::python_runtime
                 }
                 if (coroutine != nullptr)
                     host()->coroutine_delete(coroutine);
+                if (execState != nullptr)
+                    exec_discard(execState);
                 release(finalizer);
                 release(function);
                 release(arguments);
@@ -406,6 +421,26 @@ namespace neos::python_runtime
 
             object* async_generator_attribute(object* aSelf, char const* aName);
             object* coroutine_await(neos_py_context*, void*, object* aArgs, object*);
+
+            // (the generator types' methods, unbound (as CPython's method descriptors: e.g. type(agen).__anext__(agen), as test_asyncgen's pure 
+            // Python anext uses))
+            inline bool const sGeneratorTypeAttributes = []()
+            {
+                static auto const provider = [](char const* aType, std::initializer_list<char const*> aNames, char const* aName) -> object*
+                {
+                    for (auto const n : aNames)
+                        if (std::strcmp(n, aName) == 0)
+                            return unbound_method(aType, aName);
+                    return nullptr;
+                };
+                register_type_attributes("generator", [](char const* aName) -> object*
+                    { return provider("generator", { "__iter__", "__next__", "send", "throw", "close" }, aName); });
+                register_type_attributes("coroutine", [](char const* aName) -> object*
+                    { return provider("coroutine", { "__await__", "send", "throw", "close" }, aName); });
+                register_type_attributes("async_generator", [](char const* aName) -> object*
+                    { return provider("async_generator", { "__aiter__", "__anext__", "asend", "athrow", "aclose" }, aName); });
+                return true;
+            }();
 
             neos_py_type make_generator_type(generator_object::kind_t aKind)
             {
@@ -596,7 +631,7 @@ namespace neos::python_runtime
                 if (a.state == asend_object::Done)
                 {
                     error("RuntimeError", a.mode == asend_object::Send ? "cannot reuse already awaited __anext__()/asend()" :
-                        a.mode == asend_object::Throw ? "cannot reuse already awaited athrow()" : "cannot reuse already awaited aclose()");
+                        "cannot reuse already awaited aclose()/athrow()");
                     return -1;
                 }
                 auto& g = as_generator(a.generator);
@@ -769,7 +804,7 @@ namespace neos::python_runtime
             // (an awaitable's iterator)
             object* awaitable_iterator(object* aAwaitable)
             {
-                if (is_coroutine_object(aAwaitable) || is_asend(aAwaitable))
+                if (is_coroutine_object(aAwaitable) || is_asend(aAwaitable) || (is_generator(aAwaitable) && as_generator(aAwaitable).iterableCoroutine))
                     return (retain(aAwaitable), aAwaitable);
                 ref const method{ getattr(aAwaitable, "__await__") };
                 if (!method)
@@ -1116,6 +1151,15 @@ namespace neos::python_runtime
         }
 
         // __generator(body, name, qualname, arguments...)
+        // (types.coroutine's: a generator made awaitable (an iterable coroutine); false if it is not a generator)
+        bool generator_make_iterable_coroutine(object* aObject)
+        {
+            if (!is_generator(aObject))
+                return false;
+            as_generator(aObject).iterableCoroutine = true;
+            return true;
+        }
+
         object* b_generator(std::vector<object*> const& aArgs, object* aKwargs)
         {
             return new_generator(sGeneratorType, generator_object::Generator, aArgs, aKwargs);
@@ -1325,38 +1369,116 @@ namespace neos::python_runtime
         // the result is its return value
         object* b_yield_from(std::vector<object*> const& aArgs, object*)
         {
+            // (PEP 380's expansion: values sent to this generator are sent to the iterator (None: next), exceptions thrown into it are 
+            // thrown into the iterator (if it has a throw method; else raised here), and GeneratorExit closes the iterator (if it has 
+            // close) then is raised here; the iterator's StopIteration's value is the result)
             if (aArgs.size() != 1u)
                 return error("SystemError", "__yield_from(iterable)");
             ref const it{ iter(aArgs[0]) };
             if (!it)
                 return nullptr;
-            ref sent{ (retain(none()), none()) };
-            for (;;)
+            bool const generator = is_generator(it.get());
+            // (the exception being raised: taken, as the awaits' take_exception)
+            auto const taken = []() -> ref
             {
-                ref value;
-                if (is_generator(it.get()))
+                std::string const text = error_text();
+                clear_error();
+                ref result{ fn_caught(text.c_str()) };
+                fn_handled();
+                return result;
+            };
+            object* result = nullptr;   ///< (the iterator finished: its result (a new reference))
+            // (a step of the iterator (aSent: send, aThrown: throw, neither: next): the value that it yielded; null: it finished (result)
+            // or raised)
+            auto const step = [&](object* aSent, object* aThrown) -> ref
+            {
+                if (generator)
                 {
                     auto& inner = as_generator(it.get());
-                    value = ref{ resume(inner, kind_of(sent.get()) == NEOS_PY_NONE ? nullptr : sent.get(), nullptr) };
-                    if (!value)
-                    {
-                        if (failed())
-                            return nullptr;
-                        auto const result = inner.result != nullptr ? inner.result : none();
-                        retain(result);
-                        return result;
-                    }
+                    ref value{ resume(inner, aSent, aThrown) };
+                    if (!value && !failed())
+                        result = new_reference(inner.result != nullptr ? inner.result : none());
+                    return value;
                 }
+                ref value;
+                if (aThrown != nullptr)
+                {
+                    ref const method{ getattr(it.get(), "throw") };
+                    if (!method)
+                    {
+                        clear_error();
+                        fn_raise(aThrown);
+                        return {};
+                    }
+                    ref const args{ make_tuple({ new_reference(aThrown) }) };
+                    value = ref{ call(method.get(), args.get(), nullptr) };
+                }
+                else if (aSent != nullptr)
+                    value = ref{ call_method_named(it.get(), "send", { new_reference(aSent) }) };
+                else if (is_instance(it.get()))
+                    value = ref{ call_method_named(it.get(), "__next__", {}) };    // (its StopIteration's value: the result)
                 else
                 {
                     value = ref{ next(it.get()) };
-                    if (!value)
-                        return failed() ? nullptr : (retain(none()), none());
+                    if (!value && !failed())
+                    {
+                        result = new_reference(none());
+                        return {};
+                    }
                 }
+                if (!value && failed() && std::string_view{ error_text() }.starts_with("StopIteration"))
+                {
+                    ref const e{ taken() };
+                    ref v{ e ? getattr(e.get(), "value") : nullptr };
+                    if (!v)
+                    {
+                        clear_error();
+                        v = ref{ new_reference(none()) };
+                    }
+                    result = v.release_ownership();
+                }
+                return value;
+            };
+            ref value{ step(nullptr, nullptr) };
+            for (;;)
+            {
+                if (!value)
+                    return result;  // (null if it raised)
                 std::vector<object*> const args{ value.get() };
-                sent = ref{ b_yield(args, nullptr) };
-                if (!sent)
+                ref const sent{ b_yield(args, nullptr) };
+                if (sent)
+                {
+                    value = step(kind_of(sent.get()) == NEOS_PY_NONE ? nullptr : sent.get(), nullptr);
+                    continue;
+                }
+                if (!failed())
                     return nullptr;
+                // (an exception thrown into this generator while it delegates)
+                bool const exit = std::string_view{ error_text() }.starts_with("GeneratorExit");
+                ref const e{ taken() };
+                if (!e)
+                    return nullptr;
+                if (exit)
+                {
+                    if (generator)
+                    {
+                        close(as_generator(it.get()));
+                        if (failed())
+                            return nullptr;
+                    }
+                    else if (ref const method{ getattr(it.get(), "close") })
+                    {
+                        ref const noArgs{ make_tuple() };
+                        ref const closed{ call(method.get(), noArgs.get(), nullptr) };
+                        if (!closed)
+                            return nullptr;
+                    }
+                    else
+                        clear_error();
+                    fn_raise(e.get());
+                    return nullptr;
+                }
+                value = step(nullptr, e.get());
             }
         }
 

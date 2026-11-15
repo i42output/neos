@@ -144,6 +144,12 @@ namespace neos::python_runtime::detail::subprocess_module
         void make_subprocess()
         {
             static module_writer const& sp = writer("subprocess");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. 
+            // unittest.mock.patch replaces them))
+            define("subprocess", "_time", import_attribute("time", "monotonic"));
+#if !defined(_WIN32)
+            define("subprocess", "_fork_exec", import_attribute("_posixsubprocess", "fork_exec"));
+#endif
             // subprocess - Subprocesses with accessible I/O streams
             // 
             // For more information about this module, see PEP 324.
@@ -1624,7 +1630,7 @@ namespace neos::python_runtime::detail::subprocess_module
                         {
                             if (!timeout.is_none())
                             {
-                                endtime = (Mod<"time">().attr("monotonic"))() + timeout;
+                                endtime = (G<"subprocess._time">())() + timeout;
                             }
                             else
                             {
@@ -1722,7 +1728,7 @@ namespace neos::python_runtime::detail::subprocess_module
                         }
                         else
                         {
-                            return endtime - (Mod<"time">().attr("monotonic"))();
+                            return endtime - (G<"subprocess._time">())();
                         }
                         return none();
                     }) },
@@ -1738,7 +1744,7 @@ namespace neos::python_runtime::detail::subprocess_module
                         {
                             return none();
                         }
-                        if ((skip_check_and_raise.truthy() || ((Mod<"time">().attr("monotonic"))() > endtime)))
+                        if ((skip_check_and_raise.truthy() || ((G<"subprocess._time">())() > endtime)))
                         {
                             py_raise((G<"subprocess.TimeoutExpired">()).call({ self.attr("args"), orig_timeout }, { { "output", (stdout_seq.truthy() ? py{ make_bytes(std::string{ "", 0 }) }.method("join", { stdout_seq }) : none()) }, { "stderr", (stderr_seq.truthy() ? py{ make_bytes(std::string{ "", 0 }) }.method("join", { stderr_seq }) : none()) } }));
                         }
@@ -1752,7 +1758,7 @@ namespace neos::python_runtime::detail::subprocess_module
                         py sigint_timeout;
                         if (!timeout.is_none())
                         {
-                            endtime = (Mod<"time">().attr("monotonic"))() + timeout;
+                            endtime = (G<"subprocess._time">())() + timeout;
                         }
                         try
                         {
@@ -2866,7 +2872,7 @@ namespace neos::python_runtime::detail::subprocess_module
                                         }
                                         fds_to_keep = (B<"set">())(pass_fds);
                                         fds_to_keep.method("add", { errpipe_write });
-                                        self.set_attr("pid", (Mod<"_posixsubprocess">().attr("fork_exec"))(args, executable_list, close_fds, (B<"tuple">())((B<"sorted">())((B<"map">())(B<"int">(), fds_to_keep))), cwd, env_list, p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite, errpipe_read, errpipe_write, restore_signals, start_new_session, process_group, gid, gids, uid, umask, preexec_fn, G<"subprocess._USE_VFORK">()));
+                                        self.set_attr("pid", (G<"subprocess._fork_exec">())(args, executable_list, close_fds, (B<"tuple">())((B<"sorted">())((B<"map">())(B<"int">(), fds_to_keep))), cwd, env_list, p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite, errpipe_read, errpipe_write, restore_signals, start_new_session, process_group, gid, gids, uid, umask, preexec_fn, G<"subprocess._USE_VFORK">()));
                                         self.set_attr("_child_created", boolean(true));
                                     }
                                     catch (raised const&)
@@ -3127,7 +3133,7 @@ namespace neos::python_runtime::detail::subprocess_module
                         }
                         if (!timeout.is_none())
                         {
-                            endtime = (Mod<"time">().attr("monotonic"))() + timeout;
+                            endtime = (G<"subprocess._time">())() + timeout;
                             // Enter a busy loop if we have a timeout.  This busy loop was
                             // cribbed from Lib/threading.py in Thread.wait() at r71065.
                             delay = F<0.0005>();
@@ -3555,7 +3561,6 @@ namespace neos::python_runtime::detail::subprocess_module
                 aAttributes.emplace_back("__doc__", py{ subprocess_docs::doc("") }.release());
                 for (auto module : { "builtins", "errno", "io", "locale", "os", "time", "signal", "sys", "threading", "warnings", "contextlib", "types" })
                     aAttributes.emplace_back(module, fn_import(module));
-                aAttributes.emplace_back("_time", import_attribute("time", "monotonic").release());
                 aAttributes.emplace_back("fcntl", py::none().release());
 #if defined(_WIN32)
                 // (the constants of _winapi that subprocess exports)
@@ -3567,7 +3572,6 @@ namespace neos::python_runtime::detail::subprocess_module
                 aAttributes.emplace_back("msvcrt", fn_import("msvcrt"));
                 aAttributes.emplace_back("_winapi", fn_import("_winapi"));
 #else
-                aAttributes.emplace_back("_fork_exec", import_attribute("_posixsubprocess", "fork_exec").release());
                 aAttributes.emplace_back("select", fn_import("select"));
                 aAttributes.emplace_back("selectors", fn_import("selectors"));
 #endif
@@ -3579,6 +3583,14 @@ namespace neos::python_runtime::detail::subprocess_module
             return result != nullptr;
         }
 
-        inline bool const sSubprocess = register_module("subprocess", subprocess_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sSubprocess = register_module("subprocess", subprocess_module, assigned);
     }
 }

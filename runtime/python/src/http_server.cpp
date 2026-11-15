@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::http_server_module
         void make_http_server()
         {
             static module_writer const& w = writer("http.server");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("http.server", "HTTPStatus", import_attribute("http", "HTTPStatus"));
             // See also:
             // 
             // HTTP Working Group                                        T. Berners-Lee
@@ -319,7 +321,7 @@ namespace neos::python_runtime::detail::http_server_module
                                 {
                                     // Send the error response with a status line and headers.
                                     self.set_attr("request_version", S<"">());
-                                    self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("BAD_REQUEST"), (S<"Bad request version (%r)">()) % version });
+                                    self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("BAD_REQUEST"), (S<"Bad request version (%r)">()) % version });
                                     return boolean(false);
                                 }
                                 else
@@ -332,14 +334,14 @@ namespace neos::python_runtime::detail::http_server_module
                             }
                             if (version_number >= py_tuple({ I<2>(), I<0>() }))
                             {
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("HTTP_VERSION_NOT_SUPPORTED"), (S<"Invalid HTTP version (%s)">()) % base_version_number });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("HTTP_VERSION_NOT_SUPPORTED"), (S<"Invalid HTTP version (%s)">()) % base_version_number });
                                 return boolean(false);
                             }
                         }
                         if (!(((I<2>()) <= py{ words.size() }) && (py{ words.size() } <= (I<3>()))))
                         {
                             self.set_attr("request_version", S<"">());
-                            self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("BAD_REQUEST"), (S<"Bad request syntax (%r)">()) % requestline });
+                            self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("BAD_REQUEST"), (S<"Bad request syntax (%r)">()) % requestline });
                             return boolean(false);
                         }
                         auto const items6 = unpack(words[B<"slice">()(none(), I<2>(), none())], 2);
@@ -351,7 +353,7 @@ namespace neos::python_runtime::detail::http_server_module
                             if (command != (S<"GET">()))
                             {
                                 self.set_attr("request_version", S<"">());
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("BAD_REQUEST"), (S<"Bad HTTP/0.9 request type (%r)">()) % command });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("BAD_REQUEST"), (S<"Bad HTTP/0.9 request type (%r)">()) % command });
                                 return boolean(false);
                             }
                             is_http_0_9 = boolean(true);
@@ -384,13 +386,13 @@ namespace neos::python_runtime::detail::http_server_module
                             if (matches(handler8.exception, Mod<"http.client">().attr("LineTooLong")))
                             {
                                 err = handler8.exception;
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("REQUEST_HEADER_FIELDS_TOO_LARGE"), S<"Line too long">(), (B<"str">())(err) });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("REQUEST_HEADER_FIELDS_TOO_LARGE"), S<"Line too long">(), (B<"str">())(err) });
                                 return boolean(false);
                             }
                             else if (matches(handler8.exception, Mod<"http.client">().attr("HTTPException")))
                             {
                                 err = handler8.exception;
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("REQUEST_HEADER_FIELDS_TOO_LARGE"), S<"Too many headers">(), (B<"str">())(err) });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("REQUEST_HEADER_FIELDS_TOO_LARGE"), S<"Too many headers">(), (B<"str">())(err) });
                                 return boolean(false);
                             }
                             else
@@ -419,7 +421,7 @@ namespace neos::python_runtime::detail::http_server_module
                 { "handle_expect_100", w.method("BaseHTTPRequestHandler", "handle_expect_100", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        self.method("send_response_only", { (Mod<"http">().attr("HTTPStatus")).attr("CONTINUE") });
+                        self.method("send_response_only", { (G<"http.server.HTTPStatus">()).attr("CONTINUE") });
                         self.method("end_headers");
                         return boolean(true);
                     }) },
@@ -437,7 +439,7 @@ namespace neos::python_runtime::detail::http_server_module
                                 self.set_attr("requestline", S<"">());
                                 self.set_attr("request_version", S<"">());
                                 self.set_attr("command", S<"">());
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("REQUEST_URI_TOO_LONG") });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("REQUEST_URI_TOO_LONG") });
                                 return none();
                             }
                             if (!self.attr("raw_requestline").truthy())
@@ -453,7 +455,7 @@ namespace neos::python_runtime::detail::http_server_module
                             mname = (S<"do_">()) + self.attr("command");
                             if (!(B<"hasattr">())(self, mname).truthy())
                             {
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("NOT_IMPLEMENTED"), (S<"Unsupported method (%r)">()) % self.attr("command") });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("NOT_IMPLEMENTED"), (S<"Unsupported method (%r)">()) % self.attr("command") });
                                 return none();
                             }
                             method = (B<"getattr">())(self, mname);
@@ -530,7 +532,7 @@ namespace neos::python_runtime::detail::http_server_module
                         // - RFC7230: 3.3. 1xx, 204(No Content), 304(Not Modified)
                         // - RFC7231: 6.3.6. 205(Reset Content)
                         body = none();
-                        if (((code >= (I<200>())) && (!py_tuple({ (Mod<"http">().attr("HTTPStatus")).attr("NO_CONTENT"), (Mod<"http">().attr("HTTPStatus")).attr("RESET_CONTENT"), (Mod<"http">().attr("HTTPStatus")).attr("NOT_MODIFIED") }).contains(code))))
+                        if (((code >= (I<200>())) && (!py_tuple({ (G<"http.server.HTTPStatus">()).attr("NO_CONTENT"), (G<"http.server.HTTPStatus">()).attr("RESET_CONTENT"), (G<"http.server.HTTPStatus">()).attr("NOT_MODIFIED") }).contains(code))))
                         {
                             // HTML encode to prevent Cross Site Scripting attacks
                             // (see bug #1100201)
@@ -634,7 +636,7 @@ namespace neos::python_runtime::detail::http_server_module
                         py self = a[0];
                         py code = a[1];
                         py size = a[2];
-                        if (isinstance(code, Mod<"http">().attr("HTTPStatus")))
+                        if (isinstance(code, G<"http.server.HTTPStatus">()))
                         {
                             code = code.attr("value");
                         }
@@ -713,7 +715,7 @@ namespace neos::python_runtime::detail::http_server_module
                     }) },
                 { "protocol_version", S<"HTTP/1.0">() },
                 { "MessageClass", Mod<"http.client">().attr("HTTPMessage") },
-                { "responses", [&]() -> py { py const comprehension16 = py_dict(); py v; for (py const& item : iterate{ (Mod<"http">().attr("HTTPStatus")).attr("__members__").method("values") }) { v = item; comprehension16.set_item(v, py_tuple({ v.attr("phrase"), v.attr("description") })); } return comprehension16; }() }, }));
+                { "responses", [&]() -> py { py const comprehension16 = py_dict(); py v; for (py const& item : iterate{ (G<"http.server.HTTPStatus">()).attr("__members__").method("values") }) { v = item; comprehension16.set_item(v, py_tuple({ v.attr("phrase"), v.attr("description") })); } return comprehension16; }() }, }));
 
             define("http.server", "SimpleHTTPRequestHandler", w.make_class("SimpleHTTPRequestHandler", { G<"http.server.BaseHTTPRequestHandler">() }, {
                 { "server_version", (S<"SimpleHTTP/">()) + (G<"http.server.__version__">()) },
@@ -794,7 +796,7 @@ namespace neos::python_runtime::detail::http_server_module
                             if (!parts.attr("path").method("endswith", { py_tuple({ S<"/">(), S<"%2f">(), S<"%2F">() }) }).truthy())
                             {
                                 // redirect browser - doing basically what apache does
-                                self.method("send_response", { (Mod<"http">().attr("HTTPStatus")).attr("MOVED_PERMANENTLY") });
+                                self.method("send_response", { (G<"http.server.HTTPStatus">()).attr("MOVED_PERMANENTLY") });
                                 new_parts = py_tuple({ parts[I<0>()], parts[I<1>()], parts[I<2>()] + (S<"/">()), parts[I<3>()], parts[I<4>()] });
                                 new_url = (Mod<"urllib.parse">().attr("urlunsplit"))(new_parts);
                                 self.method("send_header", { S<"Location">(), new_url });
@@ -827,7 +829,7 @@ namespace neos::python_runtime::detail::http_server_module
                         // parsing and rejection of filenames with a trailing slash
                         if (path.method("endswith", { S<"/">() }).truthy())
                         {
-                            self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("NOT_FOUND"), S<"File not found">() });
+                            self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("NOT_FOUND"), S<"File not found">() });
                             return none();
                         }
                         try
@@ -839,7 +841,7 @@ namespace neos::python_runtime::detail::http_server_module
                             pyclass::handler_scope handler19;
                             if (matches(handler19.exception, B<"OSError">()))
                             {
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("NOT_FOUND"), S<"File not found">() });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("NOT_FOUND"), S<"File not found">() });
                                 return none();
                             }
                             else
@@ -885,7 +887,7 @@ namespace neos::python_runtime::detail::http_server_module
                                             last_modif = last_modif.method("replace", {  }, { { "microsecond", I<0>() } });
                                             if (last_modif <= ims)
                                             {
-                                                self.method("send_response", { (Mod<"http">().attr("HTTPStatus")).attr("NOT_MODIFIED") });
+                                                self.method("send_response", { (G<"http.server.HTTPStatus">()).attr("NOT_MODIFIED") });
                                                 self.method("end_headers");
                                                 f.method("close");
                                                 return none();
@@ -894,7 +896,7 @@ namespace neos::python_runtime::detail::http_server_module
                                     }
                                 }
                             }
-                            self.method("send_response", { (Mod<"http">().attr("HTTPStatus")).attr("OK") });
+                            self.method("send_response", { (G<"http.server.HTTPStatus">()).attr("OK") });
                             self.method("send_header", { S<"Content-type">(), ctype });
                             self.method("send_header", { S<"Content-Length">(), (B<"str">())(fs[I<6>()]) });
                             self.method("send_header", { S<"Last-Modified">(), self.method("date_time_string", { fs.attr("st_mtime") }) });
@@ -935,7 +937,7 @@ namespace neos::python_runtime::detail::http_server_module
                             pyclass::handler_scope handler22;
                             if (matches(handler22.exception, B<"OSError">()))
                             {
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("NOT_FOUND"), S<"No permission to list directory">() });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("NOT_FOUND"), S<"No permission to list directory">() });
                                 return none();
                             }
                             else
@@ -999,7 +1001,7 @@ namespace neos::python_runtime::detail::http_server_module
                         f = (Mod<"io">().attr("BytesIO"))();
                         f.method("write", { encoded });
                         f.method("seek", { I<0>() });
-                        self.method("send_response", { (Mod<"http">().attr("HTTPStatus")).attr("OK") });
+                        self.method("send_response", { (G<"http.server.HTTPStatus">()).attr("OK") });
                         self.method("send_header", { S<"Content-type">(), (S<"text/html; charset=%s">()) % enc });
                         self.method("send_header", { S<"Content-Length">(), (B<"str">())(py{ encoded.size() }) });
                         self.method("end_headers");
@@ -1223,7 +1225,7 @@ namespace neos::python_runtime::detail::http_server_module
                         }
                         else
                         {
-                            self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("NOT_IMPLEMENTED"), S<"Can only POST to CGI scripts">() });
+                            self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("NOT_IMPLEMENTED"), S<"Can only POST to CGI scripts">() });
                         }
                         return none();
                     }) },
@@ -1372,12 +1374,12 @@ namespace neos::python_runtime::detail::http_server_module
                         scriptfile = self.method("translate_path", { scriptname });
                         if (!(Mod<"os">().attr("path")).method("exists", { scriptfile }).truthy())
                         {
-                            self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("NOT_FOUND"), (S<"No such CGI script (%r)">()) % scriptname });
+                            self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("NOT_FOUND"), (S<"No such CGI script (%r)">()) % scriptname });
                             return none();
                         }
                         if (!(Mod<"os">().attr("path")).method("isfile", { scriptfile }).truthy())
                         {
-                            self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("FORBIDDEN"), (S<"CGI script is not a plain file (%r)">()) % scriptname });
+                            self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("FORBIDDEN"), (S<"CGI script is not a plain file (%r)">()) % scriptname });
                             return none();
                         }
                         ispy = self.method("is_python", { scriptname });
@@ -1385,7 +1387,7 @@ namespace neos::python_runtime::detail::http_server_module
                         {
                             if (!self.method("is_executable", { scriptfile }).truthy())
                             {
-                                self.method("send_error", { (Mod<"http">().attr("HTTPStatus")).attr("FORBIDDEN"), (S<"CGI script is not executable (%r)">()) % scriptname });
+                                self.method("send_error", { (G<"http.server.HTTPStatus">()).attr("FORBIDDEN"), (S<"CGI script is not executable (%r)">()) % scriptname });
                                 return none();
                             }
                         }
@@ -1484,7 +1486,7 @@ namespace neos::python_runtime::detail::http_server_module
                             k = item;
                             env.method("setdefault", { k, S<"">() });
                         }
-                        self.method("send_response", { (Mod<"http">().attr("HTTPStatus")).attr("OK"), S<"Script output follows">() });
+                        self.method("send_response", { (G<"http.server.HTTPStatus">()).attr("OK"), S<"Script output follows">() });
                         self.method("flush_headers");
                         decoded_query = query.method("replace", { S<"+">(), S<" ">() });
                         if (self.attr("have_fork").truthy())
@@ -1757,7 +1759,6 @@ namespace neos::python_runtime::detail::http_server_module
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
-                aAttributes.emplace_back("HTTPStatus", import_attribute("http", "HTTPStatus").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -1766,6 +1767,14 @@ namespace neos::python_runtime::detail::http_server_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("http.server", http_server_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("http.server", http_server_module, assigned);
     }
 }

@@ -149,6 +149,12 @@ namespace neos::python_runtime::detail::unittest_case_module
         void make_unittest_case()
         {
             static module_writer const& w = writer("unittest.case");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("unittest.case", "strclass", import_attribute("unittest.util", "strclass"));
+            define("unittest.case", "safe_repr", import_attribute("unittest.util", "safe_repr"));
+            define("unittest.case", "_count_diff_all_purpose", import_attribute("unittest.util", "_count_diff_all_purpose"));
+            define("unittest.case", "_count_diff_hashable", import_attribute("unittest.util", "_count_diff_hashable"));
+            define("unittest.case", "_common_shorten_repr", import_attribute("unittest.util", "_common_shorten_repr"));
             define("unittest.case", "__unittest", boolean(true));
             define("unittest.case", "_subtest_msg_sentinel", (B<"object">())());
             define("unittest.case", "DIFF_OMITTED", S<"\nDiff is %s characters long. Set self.maxDiff to None to see it.">());
@@ -951,7 +957,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                 { "id", w.method("TestCase", "id", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (S<"%s.%s">()) % py_tuple({ (Mod<"unittest.util">().attr("strclass"))(self.attr("__class__")), self.attr("_testMethodName") });
+                        return (S<"%s.%s">()) % py_tuple({ (G<"unittest.case.strclass">())(self.attr("__class__")), self.attr("_testMethodName") });
                     }) },
                 { "__eq__", w.method("TestCase", "__eq__", { py_positional("other") }, [](arguments a) -> py
                     {
@@ -971,12 +977,12 @@ namespace neos::python_runtime::detail::unittest_case_module
                 { "__str__", w.method("TestCase", "__str__", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (S<"%s (%s.%s)">()) % py_tuple({ self.attr("_testMethodName"), (Mod<"unittest.util">().attr("strclass"))(self.attr("__class__")), self.attr("_testMethodName") });
+                        return (S<"%s (%s.%s)">()) % py_tuple({ self.attr("_testMethodName"), (G<"unittest.case.strclass">())(self.attr("__class__")), self.attr("_testMethodName") });
                     }) },
                 { "__repr__", w.method("TestCase", "__repr__", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (S<"<%s testMethod=%s>">()) % py_tuple({ (Mod<"unittest.util">().attr("strclass"))(self.attr("__class__")), self.attr("_testMethodName") });
+                        return (S<"<%s testMethod=%s>">()) % py_tuple({ (G<"unittest.case.strclass">())(self.attr("__class__")), self.attr("_testMethodName") });
                     }) },
                 { "subTest", (Mod<"contextlib">().attr("contextmanager"))(w.method("TestCase", "subTest", { py_positional("msg", G<"unittest.case._subtest_msg_sentinel">()) }, [](arguments a) -> py
                     {
@@ -1518,7 +1524,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py msg = a[2];
                         if (expr.truthy())
                         {
-                            msg = self.method("_formatMessage", { msg, (S<"%s is not false">()) % (Mod<"unittest.util">().attr("safe_repr"))(expr) });
+                            msg = self.method("_formatMessage", { msg, (S<"%s is not false">()) % (G<"unittest.case.safe_repr">())(expr) });
                             py_raise(self.method("failureException", { msg }));
                         }
                         return none();
@@ -1530,7 +1536,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py msg = a[2];
                         if (!expr.truthy())
                         {
-                            msg = self.method("_formatMessage", { msg, (S<"%s is not true">()) % (Mod<"unittest.util">().attr("safe_repr"))(expr) });
+                            msg = self.method("_formatMessage", { msg, (S<"%s is not true">()) % (G<"unittest.case.safe_repr">())(expr) });
                             py_raise(self.method("failureException", { msg }));
                         }
                         return none();
@@ -1559,7 +1565,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                             pyclass::handler_scope handler39;
                             if (matches(handler39.exception, B<"UnicodeDecodeError">()))
                             {
-                                return (S<"%s : %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(standardMsg), (Mod<"unittest.util">().attr("safe_repr"))(msg) });
+                                return (S<"%s : %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(standardMsg), (G<"unittest.case.safe_repr">())(msg) });
                             }
                             else
                                 py_reraise(handler39.exception);
@@ -1676,7 +1682,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!(first == second))
                         {
-                            standardMsg = (S<"%s != %s">()) % (Mod<"unittest.util">().attr("_common_shorten_repr"))(first, second);
+                            standardMsg = (S<"%s != %s">()) % (G<"unittest.case._common_shorten_repr">())(first, second);
                             msg = self.method("_formatMessage", { msg, standardMsg });
                             py_raise(self.method("failureException", { msg }));
                         }
@@ -1701,7 +1707,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py msg = a[3];
                         if (!(first != second))
                         {
-                            msg = self.method("_formatMessage", { msg, (S<"%s == %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(first), (Mod<"unittest.util">().attr("safe_repr"))(second) }) });
+                            msg = self.method("_formatMessage", { msg, (S<"%s == %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(first), (G<"unittest.case.safe_repr">())(second) }) });
                             py_raise(self.method("failureException", { msg }));
                         }
                         return none();
@@ -1732,7 +1738,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                             {
                                 return none();
                             }
-                            standardMsg = (S<"%s != %s within %s delta (%s difference)">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(first), (Mod<"unittest.util">().attr("safe_repr"))(second), (Mod<"unittest.util">().attr("safe_repr"))(delta), (Mod<"unittest.util">().attr("safe_repr"))(diff) });
+                            standardMsg = (S<"%s != %s within %s delta (%s difference)">()) % py_tuple({ (G<"unittest.case.safe_repr">())(first), (G<"unittest.case.safe_repr">())(second), (G<"unittest.case.safe_repr">())(delta), (G<"unittest.case.safe_repr">())(diff) });
                         }
                         else
                         {
@@ -1744,7 +1750,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                             {
                                 return none();
                             }
-                            standardMsg = (S<"%s != %s within %r places (%s difference)">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(first), (Mod<"unittest.util">().attr("safe_repr"))(second), places, (Mod<"unittest.util">().attr("safe_repr"))(diff) });
+                            standardMsg = (S<"%s != %s within %r places (%s difference)">()) % py_tuple({ (G<"unittest.case.safe_repr">())(first), (G<"unittest.case.safe_repr">())(second), places, (G<"unittest.case.safe_repr">())(diff) });
                         }
                         msg = self.method("_formatMessage", { msg, standardMsg });
                         py_raise(self.method("failureException", { msg }));
@@ -1770,7 +1776,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                             {
                                 return none();
                             }
-                            standardMsg = (S<"%s == %s within %s delta (%s difference)">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(first), (Mod<"unittest.util">().attr("safe_repr"))(second), (Mod<"unittest.util">().attr("safe_repr"))(delta), (Mod<"unittest.util">().attr("safe_repr"))(diff) });
+                            standardMsg = (S<"%s == %s within %s delta (%s difference)">()) % py_tuple({ (G<"unittest.case.safe_repr">())(first), (G<"unittest.case.safe_repr">())(second), (G<"unittest.case.safe_repr">())(delta), (G<"unittest.case.safe_repr">())(diff) });
                         }
                         else
                         {
@@ -1782,7 +1788,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                             {
                                 return none();
                             }
-                            standardMsg = (S<"%s == %s within %r places">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(first), (Mod<"unittest.util">().attr("safe_repr"))(second), places });
+                            standardMsg = (S<"%s == %s within %r places">()) % py_tuple({ (G<"unittest.case.safe_repr">())(first), (G<"unittest.case.safe_repr">())(second), places });
                         }
                         msg = self.method("_formatMessage", { msg, standardMsg });
                         py_raise(self.method("failureException", { msg }));
@@ -1808,11 +1814,11 @@ namespace neos::python_runtime::detail::unittest_case_module
                             seq_type_name = seq_type.attr("__name__");
                             if (!isinstance(seq1, seq_type))
                             {
-                                py_raise(self.method("failureException", { (S<"First sequence is not a %s: %s">()) % py_tuple({ seq_type_name, (Mod<"unittest.util">().attr("safe_repr"))(seq1) }) }));
+                                py_raise(self.method("failureException", { (S<"First sequence is not a %s: %s">()) % py_tuple({ seq_type_name, (G<"unittest.case.safe_repr">())(seq1) }) }));
                             }
                             if (!isinstance(seq2, seq_type))
                             {
-                                py_raise(self.method("failureException", { (S<"Second sequence is not a %s: %s">()) % py_tuple({ seq_type_name, (Mod<"unittest.util">().attr("safe_repr"))(seq2) }) }));
+                                py_raise(self.method("failureException", { (S<"Second sequence is not a %s: %s">()) % py_tuple({ seq_type_name, (G<"unittest.case.safe_repr">())(seq2) }) }));
                             }
                         }
                         else
@@ -1857,7 +1863,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                             {
                                 return none();
                             }
-                            differing = (S<"%ss differ: %s != %s\n">()) % (py_tuple({ seq_type_name.method("capitalize") }) + (Mod<"unittest.util">().attr("_common_shorten_repr"))(seq1, seq2));
+                            differing = (S<"%ss differ: %s != %s\n">()) % (py_tuple({ seq_type_name.method("capitalize") }) + (G<"unittest.case._common_shorten_repr">())(seq1, seq2));
                             bool broke43 = false;
                             for (py const& item : iterate{ (B<"range">())((B<"min">())(len1, len2)) })
                             {
@@ -1896,7 +1902,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                                 }
                                 if (item1 != item2)
                                 {
-                                    differing = inplace(NEOS_PY_ADD, differing, (S<"\nFirst differing element %d:\n%s\n%s\n">()) % (py_tuple({ i }) + (Mod<"unittest.util">().attr("_common_shorten_repr"))(item1, item2)));
+                                    differing = inplace(NEOS_PY_ADD, differing, (S<"\nFirst differing element %d:\n%s\n%s\n">()) % (py_tuple({ i }) + (G<"unittest.case._common_shorten_repr">())(item1, item2)));
                                     broke43 = true;
                                     break;
                                 }
@@ -1914,7 +1920,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                                 differing = inplace(NEOS_PY_ADD, differing, (S<"\nFirst %s contains %d additional elements.\n">()) % py_tuple({ seq_type_name, len1 - len2 }));
                                 try
                                 {
-                                    differing = inplace(NEOS_PY_ADD, differing, (S<"First extra element %d:\n%s\n">()) % py_tuple({ len2, (Mod<"unittest.util">().attr("safe_repr"))(seq1[len2]) }));
+                                    differing = inplace(NEOS_PY_ADD, differing, (S<"First extra element %d:\n%s\n">()) % py_tuple({ len2, (G<"unittest.case.safe_repr">())(seq1[len2]) }));
                                 }
                                 catch (raised const&)
                                 {
@@ -1932,7 +1938,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                                 differing = inplace(NEOS_PY_ADD, differing, (S<"\nSecond %s contains %d additional elements.\n">()) % py_tuple({ seq_type_name, len2 - len1 }));
                                 try
                                 {
-                                    differing = inplace(NEOS_PY_ADD, differing, (S<"First extra element %d:\n%s\n">()) % py_tuple({ len1, (Mod<"unittest.util">().attr("safe_repr"))(seq2[len1]) }));
+                                    differing = inplace(NEOS_PY_ADD, differing, (S<"First extra element %d:\n%s\n">()) % py_tuple({ len1, (G<"unittest.case.safe_repr">())(seq2[len1]) }));
                                 }
                                 catch (raised const&)
                                 {
@@ -2072,7 +2078,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!container.contains(member))
                         {
-                            standardMsg = (S<"%s not found in %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(member), (Mod<"unittest.util">().attr("safe_repr"))(container) });
+                            standardMsg = (S<"%s not found in %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(member), (G<"unittest.case.safe_repr">())(container) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2086,7 +2092,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (container.contains(member))
                         {
-                            standardMsg = (S<"%s unexpectedly found in %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(member), (Mod<"unittest.util">().attr("safe_repr"))(container) });
+                            standardMsg = (S<"%s unexpectedly found in %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(member), (G<"unittest.case.safe_repr">())(container) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2100,7 +2106,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!expr1.is(expr2))
                         {
-                            standardMsg = (S<"%s is not %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(expr1), (Mod<"unittest.util">().attr("safe_repr"))(expr2) });
+                            standardMsg = (S<"%s is not %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(expr1), (G<"unittest.case.safe_repr">())(expr2) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2114,7 +2120,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (expr1.is(expr2))
                         {
-                            standardMsg = (S<"unexpectedly identical: %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(expr1) });
+                            standardMsg = (S<"unexpectedly identical: %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(expr1) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2131,7 +2137,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         self.method("assertIsInstance", { d2, B<"dict">(), S<"Second argument is not a dictionary">() });
                         if (d1 != d2)
                         {
-                            standardMsg = (S<"%s != %s">()) % (Mod<"unittest.util">().attr("_common_shorten_repr"))(d1, d2);
+                            standardMsg = (S<"%s != %s">()) % (G<"unittest.case._common_shorten_repr">())(d1, d2);
                             diff = (S<"\n">()) + (S<"\n">()).method("join", { (Mod<"difflib">().attr("ndiff"))((Mod<"pprint">().attr("pformat"))(d1).method("splitlines"), (Mod<"pprint">().attr("pformat"))(d2).method("splitlines")) });
                             standardMsg = self.method("_truncateMessage", { standardMsg, diff });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
@@ -2167,7 +2173,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                                 if (matches(handler53.exception, B<"TypeError">()))
                                 {
                                     // Handle case with unhashable elements
-                                    differences = (Mod<"unittest.util">().attr("_count_diff_all_purpose"))(first_seq, second_seq);
+                                    differences = (G<"unittest.case._count_diff_all_purpose">())(first_seq, second_seq);
                                 }
                                 else
                                     py_reraise(handler53.exception);
@@ -2178,7 +2184,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                                 {
                                     return none();
                                 }
-                                differences = (Mod<"unittest.util">().attr("_count_diff_hashable"))(first_seq, second_seq);
+                                differences = (G<"unittest.case._count_diff_hashable">())(first_seq, second_seq);
                             }
                         }
                         if (differences.truthy())
@@ -2238,7 +2244,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                             firstlines = first_presplit.method("splitlines", {  }, { { "keepends", boolean(true) } });
                             secondlines = second_presplit.method("splitlines", {  }, { { "keepends", boolean(true) } });
                             // Generate the message and diff, then raise the exception
-                            standardMsg = (S<"%s != %s">()) % (Mod<"unittest.util">().attr("_common_shorten_repr"))(first, second);
+                            standardMsg = (S<"%s != %s">()) % (G<"unittest.case._common_shorten_repr">())(first, second);
                             diff = (S<"\n">()) + (S<"">()).method("join", { (Mod<"difflib">().attr("ndiff"))(firstlines, secondlines) });
                             standardMsg = self.method("_truncateMessage", { standardMsg, diff });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
@@ -2254,7 +2260,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!(a_ < b))
                         {
-                            standardMsg = (S<"%s not less than %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(a_), (Mod<"unittest.util">().attr("safe_repr"))(b) });
+                            standardMsg = (S<"%s not less than %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(a_), (G<"unittest.case.safe_repr">())(b) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2268,7 +2274,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!(a_ <= b))
                         {
-                            standardMsg = (S<"%s not less than or equal to %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(a_), (Mod<"unittest.util">().attr("safe_repr"))(b) });
+                            standardMsg = (S<"%s not less than or equal to %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(a_), (G<"unittest.case.safe_repr">())(b) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2282,7 +2288,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!(a_ > b))
                         {
-                            standardMsg = (S<"%s not greater than %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(a_), (Mod<"unittest.util">().attr("safe_repr"))(b) });
+                            standardMsg = (S<"%s not greater than %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(a_), (G<"unittest.case.safe_repr">())(b) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2296,7 +2302,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!(a_ >= b))
                         {
-                            standardMsg = (S<"%s not greater than or equal to %s">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(a_), (Mod<"unittest.util">().attr("safe_repr"))(b) });
+                            standardMsg = (S<"%s not greater than or equal to %s">()) % py_tuple({ (G<"unittest.case.safe_repr">())(a_), (G<"unittest.case.safe_repr">())(b) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2309,7 +2315,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!obj.is_none())
                         {
-                            standardMsg = (S<"%s is not None">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(obj) });
+                            standardMsg = (S<"%s is not None">()) % py_tuple({ (G<"unittest.case.safe_repr">())(obj) });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2336,7 +2342,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (!isinstance(obj, cls))
                         {
-                            standardMsg = (S<"%s is not an instance of %r">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(obj), cls });
+                            standardMsg = (S<"%s is not an instance of %r">()) % py_tuple({ (G<"unittest.case.safe_repr">())(obj), cls });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2350,7 +2356,7 @@ namespace neos::python_runtime::detail::unittest_case_module
                         py standardMsg;
                         if (isinstance(obj, cls))
                         {
-                            standardMsg = (S<"%s is an instance of %r">()) % py_tuple({ (Mod<"unittest.util">().attr("safe_repr"))(obj), cls });
+                            standardMsg = (S<"%s is an instance of %r">()) % py_tuple({ (G<"unittest.case.safe_repr">())(obj), cls });
                             self.method("fail", { self.method("_formatMessage", { msg, standardMsg }) });
                         }
                         return none();
@@ -2484,12 +2490,12 @@ namespace neos::python_runtime::detail::unittest_case_module
                 { "__str__", w.method("FunctionTestCase", "__str__", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (S<"%s (%s)">()) % py_tuple({ (Mod<"unittest.util">().attr("strclass"))(self.attr("__class__")), self.attr("_testFunc").attr("__name__") });
+                        return (S<"%s (%s)">()) % py_tuple({ (G<"unittest.case.strclass">())(self.attr("__class__")), self.attr("_testFunc").attr("__name__") });
                     }) },
                 { "__repr__", w.method("FunctionTestCase", "__repr__", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        return (S<"<%s tec=%s>">()) % py_tuple({ (Mod<"unittest.util">().attr("strclass"))(self.attr("__class__")), self.attr("_testFunc") });
+                        return (S<"<%s tec=%s>">()) % py_tuple({ (G<"unittest.case.strclass">())(self.attr("__class__")), self.attr("_testFunc") });
                     }) },
                 { "shortDescription", w.method("FunctionTestCase", "shortDescription", {  }, [](arguments a) -> py
                     {
@@ -2580,11 +2586,6 @@ namespace neos::python_runtime::detail::unittest_case_module
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("types", py{ fn_import("types") }.release());
                 aAttributes.emplace_back("result", py{ fn_import("unittest.result") }.release());
-                aAttributes.emplace_back("strclass", import_attribute("unittest.util", "strclass").release());
-                aAttributes.emplace_back("safe_repr", import_attribute("unittest.util", "safe_repr").release());
-                aAttributes.emplace_back("_count_diff_all_purpose", import_attribute("unittest.util", "_count_diff_all_purpose").release());
-                aAttributes.emplace_back("_count_diff_hashable", import_attribute("unittest.util", "_count_diff_hashable").release());
-                aAttributes.emplace_back("_common_shorten_repr", import_attribute("unittest.util", "_common_shorten_repr").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -2593,6 +2594,14 @@ namespace neos::python_runtime::detail::unittest_case_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("unittest.case", unittest_case_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("unittest.case", unittest_case_module, assigned);
     }
 }

@@ -160,6 +160,9 @@ namespace neos::python_runtime::detail::xml_sax_xmlreader_module
         void make_xml_sax_xmlreader()
         {
             static module_writer const& w = writer("xml.sax.xmlreader");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xml.sax.xmlreader", "SAXNotSupportedException", import_attribute("xml.sax._exceptions", "SAXNotSupportedException"));
+            define("xml.sax.xmlreader", "SAXNotRecognizedException", import_attribute("xml.sax._exceptions", "SAXNotRecognizedException"));
             // ===== XMLREADER =====
             define("xml.sax.xmlreader", "XMLReader", w.make_class("XMLReader", {  }, {
                 { "__init__", w.method("XMLReader", "__init__", {  }, [](arguments a) -> py
@@ -229,33 +232,33 @@ namespace neos::python_runtime::detail::xml_sax_xmlreader_module
                     {
                         py self = a[0];
                         py locale = a[1];
-                        py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotSupportedException"))(S<"Locale support not implemented">()));
+                        py_raise((G<"xml.sax.xmlreader.SAXNotSupportedException">())(S<"Locale support not implemented">()));
                     }) },
                 { "getFeature", w.method("XMLReader", "getFeature", { py_positional("name") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py name = a[1];
-                        py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotRecognizedException"))((S<"Feature '%s' not recognized">()) % name));
+                        py_raise((G<"xml.sax.xmlreader.SAXNotRecognizedException">())((S<"Feature '%s' not recognized">()) % name));
                     }) },
                 { "setFeature", w.method("XMLReader", "setFeature", { py_positional("name"), py_positional("state") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py name = a[1];
                         py state = a[2];
-                        py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotRecognizedException"))((S<"Feature '%s' not recognized">()) % name));
+                        py_raise((G<"xml.sax.xmlreader.SAXNotRecognizedException">())((S<"Feature '%s' not recognized">()) % name));
                     }) },
                 { "getProperty", w.method("XMLReader", "getProperty", { py_positional("name") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py name = a[1];
-                        py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotRecognizedException"))((S<"Property '%s' not recognized">()) % name));
+                        py_raise((G<"xml.sax.xmlreader.SAXNotRecognizedException">())((S<"Property '%s' not recognized">()) % name));
                     }) },
                 { "setProperty", w.method("XMLReader", "setProperty", { py_positional("name"), py_positional("value") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py name = a[1];
                         py value = a[2];
-                        py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotRecognizedException"))((S<"Property '%s' not recognized">()) % name));
+                        py_raise((G<"xml.sax.xmlreader.SAXNotRecognizedException">())((S<"Property '%s' not recognized">()) % name));
                     }) }, }));
 
             define("xml.sax.xmlreader", "IncrementalParser", w.make_class("IncrementalParser", { G<"xml.sax.xmlreader.XMLReader">() }, {
@@ -604,8 +607,6 @@ namespace neos::python_runtime::detail::xml_sax_xmlreader_module
                 if (auto const doc = xml_sax_xmlreader_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("handler", py{ fn_import("xml.sax.handler") }.release());
-                aAttributes.emplace_back("SAXNotSupportedException", import_attribute("xml.sax._exceptions", "SAXNotSupportedException").release());
-                aAttributes.emplace_back("SAXNotRecognizedException", import_attribute("xml.sax._exceptions", "SAXNotRecognizedException").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -614,6 +615,14 @@ namespace neos::python_runtime::detail::xml_sax_xmlreader_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.sax.xmlreader", xml_sax_xmlreader_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.sax.xmlreader", xml_sax_xmlreader_module, assigned);
     }
 }

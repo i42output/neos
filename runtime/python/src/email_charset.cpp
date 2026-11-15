@@ -160,6 +160,9 @@ namespace neos::python_runtime::detail::email_charset_module
         void make_email_charset()
         {
             static module_writer const& w = writer("email.charset");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.charset", "partial", import_attribute("functools", "partial"));
+            define("email.charset", "encode_7or8bit", import_attribute("email.encoders", "encode_7or8bit"));
             // Copyright (C) 2001-2007 Python Software Foundation
             // Author: Ben Gertzfield, Barry Warsaw
             // Contact: email-sig@python.org
@@ -316,7 +319,7 @@ namespace neos::python_runtime::detail::email_charset_module
                         }
                         else
                         {
-                            return Mod<"email.encoders">().attr("encode_7or8bit");
+                            return G<"email.charset.encode_7or8bit">();
                         }
                         return none();
                     }) },
@@ -364,7 +367,7 @@ namespace neos::python_runtime::detail::email_charset_module
                         codec = [&]() -> py { py const t = self.attr("output_codec"); return t.truthy() ? t : S<"us-ascii">(); }();
                         header_bytes = (G<"email.charset._encode">())(string, codec);
                         encoder_module = self.method("_get_encoder", { header_bytes });
-                        encoder = (Mod<"functools">().attr("partial")).call({ encoder_module.attr("header_encode") }, { { "charset", codec } });
+                        encoder = (G<"email.charset.partial">()).call({ encoder_module.attr("header_encode") }, { { "charset", codec } });
                         // Calculate the number of characters that the RFC 2047 chrome will
                         // contribute to each line.
                         charset = self.method("get_output_charset");
@@ -501,11 +504,9 @@ namespace neos::python_runtime::detail::email_charset_module
                 }
                 if (auto const doc = email_charset_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("partial", import_attribute("functools", "partial").release());
                 aAttributes.emplace_back("email", py{ fn_import("email") }.release());
                 aAttributes.emplace_back("email", py{ fn_import("email") }.release());
                 aAttributes.emplace_back("errors", import_attribute("email", "errors").release());
-                aAttributes.emplace_back("encode_7or8bit", import_attribute("email.encoders", "encode_7or8bit").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -514,6 +515,14 @@ namespace neos::python_runtime::detail::email_charset_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.charset", email_charset_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.charset", email_charset_module, assigned);
     }
 }

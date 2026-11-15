@@ -160,6 +160,11 @@ namespace neos::python_runtime::detail::imaplib_module
         void make_imaplib()
         {
             static module_writer const& w = writer("imaplib");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("imaplib", "datetime", import_attribute("datetime", "datetime"));
+            define("imaplib", "timezone", import_attribute("datetime", "timezone"));
+            define("imaplib", "timedelta", import_attribute("datetime", "timedelta"));
+            define("imaplib", "DEFAULT_BUFFER_SIZE", import_attribute("io", "DEFAULT_BUFFER_SIZE"));
             // Author: Piers Lauder <piers@cs.su.oz.au> December 1997.
             // 
             // Authentication code contributed by Donn Cave <donn@u.washington.edu> June 1998.
@@ -2027,7 +2032,7 @@ namespace neos::python_runtime::detail::imaplib_module
                         self.set_attr("port", none());
                         self.set_attr("sock", none());
                         self.set_attr("file", none());
-                        self.set_attr("process", (Mod<"subprocess">().attr("Popen")).call({ self.attr("command") }, { { "bufsize", Mod<"io">().attr("DEFAULT_BUFFER_SIZE") }, { "stdin", py{ -1 } /* subprocess.PIPE */ }, { "stdout", py{ -1 } /* subprocess.PIPE */ }, { "shell", boolean(true) }, { "close_fds", boolean(true) } }));
+                        self.set_attr("process", (Mod<"subprocess">().attr("Popen")).call({ self.attr("command") }, { { "bufsize", G<"imaplib.DEFAULT_BUFFER_SIZE">() }, { "stdin", py{ -1 } /* subprocess.PIPE */ }, { "stdout", py{ -1 } /* subprocess.PIPE */ }, { "shell", boolean(true) }, { "close_fds", boolean(true) } }));
                         self.set_attr("writefile", self.attr("process").attr("stdin"));
                         self.set_attr("readfile", self.attr("process").attr("stdout"));
                         return none();
@@ -2207,7 +2212,7 @@ namespace neos::python_runtime::detail::imaplib_module
                     py gmtoff;
                     if (isinstance(date_time, py_tuple({ B<"int">(), B<"float">() })))
                     {
-                        dt = (Mod<"datetime">().attr("datetime")).method("fromtimestamp", { date_time, (Mod<"datetime">().attr("timezone")).attr("utc") }).method("astimezone");
+                        dt = (G<"imaplib.datetime">()).method("fromtimestamp", { date_time, (G<"imaplib.timezone">()).attr("utc") }).method("astimezone");
                     }
                     else if (isinstance(date_time, B<"tuple">()))
                     {
@@ -2228,10 +2233,10 @@ namespace neos::python_runtime::detail::imaplib_module
                                 gmtoff = -(Mod<"time">().attr("timezone"));
                             }
                         }
-                        delta = (Mod<"datetime">().attr("timedelta")).call({  }, { { "seconds", gmtoff } });
-                        dt = call_ex((Mod<"datetime">().attr("datetime")), {  }, date_time[B<"slice">()(none(), I<6>(), none())], py{}, { { "tzinfo", (Mod<"datetime">().attr("timezone"))(delta) } });
+                        delta = (G<"imaplib.timedelta">()).call({  }, { { "seconds", gmtoff } });
+                        dt = call_ex((G<"imaplib.datetime">()), {  }, date_time[B<"slice">()(none(), I<6>(), none())], py{}, { { "tzinfo", (G<"imaplib.timezone">())(delta) } });
                     }
-                    else if (isinstance(date_time, Mod<"datetime">().attr("datetime")))
+                    else if (isinstance(date_time, G<"imaplib.datetime">()))
                     {
                         if (date_time.attr("tzinfo").is_none())
                         {
@@ -2275,10 +2280,6 @@ namespace neos::python_runtime::detail::imaplib_module
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("calendar", py{ fn_import("calendar") }.release());
-                aAttributes.emplace_back("datetime", import_attribute("datetime", "datetime").release());
-                aAttributes.emplace_back("timezone", import_attribute("datetime", "timezone").release());
-                aAttributes.emplace_back("timedelta", import_attribute("datetime", "timedelta").release());
-                aAttributes.emplace_back("DEFAULT_BUFFER_SIZE", import_attribute("io", "DEFAULT_BUFFER_SIZE").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -2287,6 +2288,14 @@ namespace neos::python_runtime::detail::imaplib_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("imaplib", imaplib_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("imaplib", imaplib_module, assigned);
     }
 }

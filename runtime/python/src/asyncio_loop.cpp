@@ -643,6 +643,11 @@ namespace neos::python_runtime::detail::asyncio
         void make_base_events()
         {
             static module_writer const& w = writer("base_events");
+            // (its imports (e.g. "from .log import logger", "import signal"): its globals, which its code reads (unittest.mock.patch can replace them))
+            define("base_events", "logger", object_of("log.logger"));
+            define("base_events", "os", py{ fn_import("os") });
+            define("base_events", "socket", py{ fn_import("socket") });
+            define("base_events", "sys", py{ fn_import("sys") });
             define("base_events", "__all__", py_tuple({ S<"BaseEventLoop">(), S<"Server">() }));
             // Minimum number of _scheduled timer handles before cleanup of
             // cancelled handles is performed.
@@ -650,7 +655,7 @@ namespace neos::python_runtime::detail::asyncio
             // Minimum fraction of _scheduled timer handles that are cancelled
             // before cleanup of cancelled handles is performed.
             define("base_events", "_MIN_CANCELLED_TIMER_HANDLES_FRACTION", F<0.5>());
-            define("base_events", "_HAS_IPv6", (B<"hasattr">())(Mod<"socket">(), S<"AF_INET6">()));
+            define("base_events", "_HAS_IPv6", (B<"hasattr">())(G<"base_events.socket">(), S<"AF_INET6">()));
             // Maximum timeout passed to select to avoid OS limitations
             define("base_events", "MAXIMUM_SELECT_TIMEOUT", (I<24>()) * (I<3600>()));
             define("base_events", "_format_handle", w.function("_format_handle", "_format_handle", { py_positional("handle") }, [](arguments a) -> py
@@ -691,7 +696,7 @@ namespace neos::python_runtime::detail::asyncio
             define("base_events", "_set_reuseport", w.function("_set_reuseport", "_set_reuseport", { py_positional("sock") }, [](arguments a) -> py
                 {
                     py sock = a[0];
-                    if (!has_attr(Mod<"socket">(), "SO_REUSEPORT"))
+                    if (!has_attr(G<"base_events.socket">(), "SO_REUSEPORT"))
                     {
                         py_raise((B<"ValueError">())(S<"reuse_port not supported by socket module">()));
                     }
@@ -699,7 +704,7 @@ namespace neos::python_runtime::detail::asyncio
                     {
                         try
                         {
-                            sock.method("setsockopt", { Mod<"socket">().attr("SOL_SOCKET"), Mod<"socket">().attr("SO_REUSEPORT"), I<1>() });
+                            sock.method("setsockopt", { G<"base_events.socket">().attr("SOL_SOCKET"), G<"base_events.socket">().attr("SO_REUSEPORT"), I<1>() });
                         }
                         catch (raised const&)
                         {
@@ -726,21 +731,21 @@ namespace neos::python_runtime::detail::asyncio
                     py scopeid = a[6];
                     py af;
                     py afs;
-                    if (!has_attr(Mod<"socket">(), "inet_pton"))
+                    if (!has_attr(G<"base_events.socket">(), "inet_pton"))
                     {
                         return none();
                     }
-                    if (((!set_of({ I<0>(), Mod<"socket">().attr("IPPROTO_TCP"), Mod<"socket">().attr("IPPROTO_UDP") }).contains(proto)) || host.is_none()))
+                    if (((!set_of({ I<0>(), G<"base_events.socket">().attr("IPPROTO_TCP"), G<"base_events.socket">().attr("IPPROTO_UDP") }).contains(proto)) || host.is_none()))
                     {
                         return none();
                     }
-                    if (type == (Mod<"socket">().attr("SOCK_STREAM")))
+                    if (type == (G<"base_events.socket">().attr("SOCK_STREAM")))
                     {
-                        proto = Mod<"socket">().attr("IPPROTO_TCP");
+                        proto = G<"base_events.socket">().attr("IPPROTO_TCP");
                     }
-                    else if (type == (Mod<"socket">().attr("SOCK_DGRAM")))
+                    else if (type == (G<"base_events.socket">().attr("SOCK_DGRAM")))
                     {
-                        proto = Mod<"socket">().attr("IPPROTO_UDP");
+                        proto = G<"base_events.socket">().attr("IPPROTO_UDP");
                     }
                     else
                     {
@@ -776,12 +781,12 @@ namespace neos::python_runtime::detail::asyncio
                                 py_reraise(handler2.exception);
                         }
                     }
-                    if (family == (Mod<"socket">().attr("AF_UNSPEC")))
+                    if (family == (G<"base_events.socket">().attr("AF_UNSPEC")))
                     {
-                        afs = py_list({ Mod<"socket">().attr("AF_INET") });
+                        afs = py_list({ G<"base_events.socket">().attr("AF_INET") });
                         if ((G<"base_events._HAS_IPv6">()).truthy())
                         {
-                            afs.method("append", { Mod<"socket">().attr("AF_INET6") });
+                            afs.method("append", { G<"base_events.socket">().attr("AF_INET6") });
                         }
                     }
                     else
@@ -803,9 +808,9 @@ namespace neos::python_runtime::detail::asyncio
                         af = item;
                         try
                         {
-                            (Mod<"socket">().attr("inet_pton"))(af, host);
+                            (G<"base_events.socket">().attr("inet_pton"))(af, host);
                             // The host has already been resolved.
-                            if (((G<"base_events._HAS_IPv6">()).truthy() && (af == (Mod<"socket">().attr("AF_INET6")))))
+                            if (((G<"base_events._HAS_IPv6">()).truthy() && (af == (G<"base_events.socket">().attr("AF_INET6")))))
                             {
                                 return py_tuple({ af, type, proto, S<"">(), py_tuple({ host, port, flowinfo, scopeid }) });
                             }
@@ -878,14 +883,14 @@ namespace neos::python_runtime::detail::asyncio
                     return none();
                 }));
 
-            if ((B<"hasattr">())(Mod<"socket">(), S<"TCP_NODELAY">()).truthy())
+            if ((B<"hasattr">())(G<"base_events.socket">(), S<"TCP_NODELAY">()).truthy())
             {
                 define("base_events", "_set_nodelay", w.function("_set_nodelay", "_set_nodelay", { py_positional("sock") }, [](arguments a) -> py
                     {
                         py sock = a[0];
-                        if ((set_of({ Mod<"socket">().attr("AF_INET"), Mod<"socket">().attr("AF_INET6") }).contains(sock.attr("family")) && (sock.attr("type") == (Mod<"socket">().attr("SOCK_STREAM"))) && (sock.attr("proto") == (Mod<"socket">().attr("IPPROTO_TCP")))))
+                        if ((set_of({ G<"base_events.socket">().attr("AF_INET"), G<"base_events.socket">().attr("AF_INET6") }).contains(sock.attr("family")) && (sock.attr("type") == (G<"base_events.socket">().attr("SOCK_STREAM"))) && (sock.attr("proto") == (G<"base_events.socket">().attr("IPPROTO_TCP")))))
                         {
-                            sock.method("setsockopt", { Mod<"socket">().attr("IPPROTO_TCP"), Mod<"socket">().attr("TCP_NODELAY"), I<1>() });
+                            sock.method("setsockopt", { G<"base_events.socket">().attr("IPPROTO_TCP"), G<"base_events.socket">().attr("TCP_NODELAY"), I<1>() });
                         }
                         return none();
                     }));
@@ -1644,9 +1649,9 @@ namespace neos::python_runtime::detail::asyncio
                         self.method("_check_closed");
                         self.method("_check_running");
                         self.method("_set_coroutine_origin_tracking", { self.attr("_debug") });
-                        self.set_attr("_old_agen_hooks", (Mod<"sys">().attr("get_asyncgen_hooks"))());
+                        self.set_attr("_old_agen_hooks", (G<"base_events.sys">().attr("get_asyncgen_hooks"))());
                         self.set_attr("_thread_id", (Mod<"threading">().attr("get_ident"))());
-                        (Mod<"sys">().attr("set_asyncgen_hooks")).call({  }, { { "firstiter", self.attr("_asyncgen_firstiter_hook") }, { "finalizer", self.attr("_asyncgen_finalizer_hook") } });
+                        (G<"base_events.sys">().attr("set_asyncgen_hooks")).call({  }, { { "firstiter", self.attr("_asyncgen_firstiter_hook") }, { "finalizer", self.attr("_asyncgen_finalizer_hook") } });
                         (G<"events._set_running_loop">())(self);
                         return none();
                     }) },
@@ -1660,7 +1665,7 @@ namespace neos::python_runtime::detail::asyncio
                         // Restore any pre-existing async generator hooks.
                         if (!self.attr("_old_agen_hooks").is_none())
                         {
-                            call_ex((Mod<"sys">().attr("set_asyncgen_hooks")), {  }, self.attr("_old_agen_hooks"), py{});
+                            call_ex((G<"base_events.sys">().attr("set_asyncgen_hooks")), {  }, self.attr("_old_agen_hooks"), py{});
                             self.set_attr("_old_agen_hooks", none());
                         }
                         return none();
@@ -1773,7 +1778,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         if (self.attr("_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"Close %r">(), self });
+                            (G<"base_events.logger">()).method("debug", { S<"Close %r">(), self });
                         }
                         self.set_attr("_closed", boolean(true));
                         self.attr("_ready").method("clear");
@@ -1998,18 +2003,18 @@ namespace neos::python_runtime::detail::asyncio
                             msg.method("append", { S(std::string{ "flags=" } + flags.repr()) });
                         }
                         msg = (S<", ">()).method("join", { msg });
-                        (G<"log.logger">()).method("debug", { S<"Get address info %s">(), msg });
+                        (G<"base_events.logger">()).method("debug", { S<"Get address info %s">(), msg });
                         t0 = self.method("time");
-                        addrinfo = (Mod<"socket">().attr("getaddrinfo"))(host, port, family, type, proto, flags);
+                        addrinfo = (G<"base_events.socket">().attr("getaddrinfo"))(host, port, family, type, proto, flags);
                         dt = self.method("time") - t0;
                         msg = S(std::string{ "Getting address info " } + msg.str() + " took " + formatted((dt * (F<1000.0>())), ".3f") + "ms: " + addrinfo.repr());
                         if (dt >= self.attr("slow_callback_duration"))
                         {
-                            (G<"log.logger">()).method("info", { msg });
+                            (G<"base_events.logger">()).method("info", { msg });
                         }
                         else
                         {
-                            (G<"log.logger">()).method("debug", { msg });
+                            (G<"base_events.logger">()).method("debug", { msg });
                         }
                         return addrinfo;
                     }) },
@@ -2029,7 +2034,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         else
                         {
-                            getaddr_func = Mod<"socket">().attr("getaddrinfo");
+                            getaddr_func = G<"base_events.socket">().attr("getaddrinfo");
                         }
                         return py_await(self.method("run_in_executor", { none(), getaddr_func, host, port, family, type, proto, flags }));
                     }) },
@@ -2038,7 +2043,7 @@ namespace neos::python_runtime::detail::asyncio
                         py self = a[0];
                         py sockaddr = a[1];
                         py flags = a[2];
-                        return py_await(self.method("run_in_executor", { none(), Mod<"socket">().attr("getnameinfo"), sockaddr, flags }));
+                        return py_await(self.method("run_in_executor", { none(), G<"base_events.socket">().attr("getnameinfo"), sockaddr, flags }));
                     }) },
                 { "sock_sendfile", async_method(w, "BaseEventLoop", "sock_sendfile", { py_positional("sock"), py_positional("file"), py_positional("offset", I<0>()), py_positional("count", none()), py_keyword("fallback", boolean(true)) }, [](arguments a) -> py
                     {
@@ -2159,7 +2164,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             py_raise((B<"ValueError">())(S<"file should be opened in binary mode">()));
                         }
-                        if (!(sock.attr("type") == (Mod<"socket">().attr("SOCK_STREAM"))))
+                        if (!(sock.attr("type") == (G<"base_events.socket">().attr("SOCK_STREAM"))))
                         {
                             py_raise((B<"ValueError">())(S<"only SOCK_STREAM type sockets are supported">()));
                         }
@@ -2220,7 +2225,7 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     try
                                     {
-                                        sock = (Mod<"socket">().attr("socket")).call({  }, { { "family", family }, { "type", type_ }, { "proto", proto } });
+                                        sock = (G<"base_events.socket">().attr("socket")).call({  }, { { "family", family }, { "type", type_ }, { "proto", proto } });
                                         sock.method("setblocking", { boolean(false) });
                                         if (!local_addr_infos.is_none())
                                         {
@@ -2400,14 +2405,14 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 py_raise((B<"ValueError">())(S<"host/port and sock can not be specified at the same time">()));
                             }
-                            infos = py_await((*self).method("_ensure_resolved", { py_tuple({ host, port }) }, { { "family", family }, { "type", Mod<"socket">().attr("SOCK_STREAM") }, { "proto", proto }, { "flags", flags }, { "loop", (*self) } }));
+                            infos = py_await((*self).method("_ensure_resolved", { py_tuple({ host, port }) }, { { "family", family }, { "type", G<"base_events.socket">().attr("SOCK_STREAM") }, { "proto", proto }, { "flags", flags }, { "loop", (*self) } }));
                             if (!infos.truthy())
                             {
                                 py_raise((B<"OSError">())(S<"getaddrinfo() returned empty list">()));
                             }
                             if (!local_addr.is_none())
                             {
-                                *laddr_infos = py_await((*self).method("_ensure_resolved", { local_addr }, { { "family", family }, { "type", Mod<"socket">().attr("SOCK_STREAM") }, { "proto", proto }, { "flags", flags }, { "loop", (*self) } }));
+                                *laddr_infos = py_await((*self).method("_ensure_resolved", { local_addr }, { { "family", family }, { "type", G<"base_events.socket">().attr("SOCK_STREAM") }, { "proto", proto }, { "flags", flags }, { "loop", (*self) } }));
                                 if (!(*laddr_infos).truthy())
                                 {
                                     py_raise((B<"OSError">())(S<"getaddrinfo() returned empty list">()));
@@ -2508,7 +2513,7 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 py_raise((B<"ValueError">())(S<"host and port was not specified and no sock specified">()));
                             }
-                            if (sock.attr("type") != (Mod<"socket">().attr("SOCK_STREAM")))
+                            if (sock.attr("type") != (G<"base_events.socket">().attr("SOCK_STREAM")))
                             {
                                 // We allow AF_INET, AF_INET6, AF_UNIX as long as they
                                 // are SOCK_STREAM.
@@ -2527,7 +2532,7 @@ namespace neos::python_runtime::detail::asyncio
                             // Get the socket from the transport because SSL transport closes
                             // the old socket and creates a new SSL socket
                             sock = transport.method("get_extra_info", { S<"socket">() });
-                            (G<"log.logger">()).method("debug", { S<"%r connected to %s:%r: (%r, %r)">(), sock, host, port, transport, protocol });
+                            (G<"base_events.logger">()).method("debug", { S<"%r connected to %s:%r: (%r, %r)">(), sock, host, port, transport, protocol });
                         }
                         return py_tuple({ transport, protocol });
                     }) },
@@ -2804,7 +2809,7 @@ namespace neos::python_runtime::detail::asyncio
                         py waiter;
                         if (!sock.is_none())
                         {
-                            if (sock.attr("type") == (Mod<"socket">().attr("SOCK_STREAM")))
+                            if (sock.attr("type") == (G<"base_events.socket">().attr("SOCK_STREAM")))
                             {
                                 py_raise((B<"ValueError">())(S(std::string{ "A datagram socket was expected, got " } + sock.repr())));
                             }
@@ -2828,7 +2833,7 @@ namespace neos::python_runtime::detail::asyncio
                                 }
                                 addr_pairs_info = py_tuple({ py_tuple({ py_tuple({ family, proto }), py_tuple({ none(), none() }) }) });
                             }
-                            else if ((has_attr(Mod<"socket">(), "AF_UNIX") && (family == (Mod<"socket">().attr("AF_UNIX")))))
+                            else if ((has_attr(G<"base_events.socket">(), "AF_UNIX") && (family == (G<"base_events.socket">().attr("AF_UNIX")))))
                             {
                                 for (py const& item : iterate{ py_tuple({ local_addr, remote_addr }) })
                                 {
@@ -2842,9 +2847,9 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     try
                                     {
-                                        if ((Mod<"stat">().attr("S_ISSOCK"))((Mod<"os">().attr("stat"))(local_addr).attr("st_mode")).truthy())
+                                        if ((Mod<"stat">().attr("S_ISSOCK"))((G<"base_events.os">().attr("stat"))(local_addr).attr("st_mode")).truthy())
                                         {
-                                            (Mod<"os">().attr("remove"))(local_addr);
+                                            (G<"base_events.os">().attr("remove"))(local_addr);
                                         }
                                     }
                                     catch (raised const&)
@@ -2857,7 +2862,7 @@ namespace neos::python_runtime::detail::asyncio
                                         {
                                             err = handler44.exception;
                                             // Directory may have permissions only to create socket.
-                                            (G<"log.logger">()).method("error", { S<"Unable to check or remove stale UNIX socket %r: %r">(), local_addr, err });
+                                            (G<"base_events.logger">()).method("error", { S<"Unable to check or remove stale UNIX socket %r: %r">(), local_addr, err });
                                         }
                                         else
                                             py_reraise(handler44.exception);
@@ -2880,7 +2885,7 @@ namespace neos::python_runtime::detail::asyncio
                                         {
                                             py_raise((B<"TypeError">())(S<"2-tuple is expected">()));
                                         }
-                                        infos = py_await(self.method("_ensure_resolved", { addr }, { { "family", family }, { "type", Mod<"socket">().attr("SOCK_DGRAM") }, { "proto", proto }, { "flags", flags }, { "loop", self } }));
+                                        infos = py_await(self.method("_ensure_resolved", { addr }, { { "family", family }, { "type", G<"base_events.socket">().attr("SOCK_DGRAM") }, { "proto", proto }, { "flags", flags }, { "loop", self } }));
                                         if (!infos.truthy())
                                         {
                                             py_raise((B<"OSError">())(S<"getaddrinfo() returned empty list">()));
@@ -2926,14 +2931,14 @@ namespace neos::python_runtime::detail::asyncio
                                     bool otherwise54 = false;
                                     try
                                     {
-                                        sock = (Mod<"socket">().attr("socket")).call({  }, { { "family", family }, { "type", Mod<"socket">().attr("SOCK_DGRAM") }, { "proto", proto } });
+                                        sock = (G<"base_events.socket">().attr("socket")).call({  }, { { "family", family }, { "type", G<"base_events.socket">().attr("SOCK_DGRAM") }, { "proto", proto } });
                                         if (reuse_port.truthy())
                                         {
                                             (G<"base_events._set_reuseport">())(sock);
                                         }
                                         if (allow_broadcast.truthy())
                                         {
-                                            sock.method("setsockopt", { Mod<"socket">().attr("SOL_SOCKET"), Mod<"socket">().attr("SO_BROADCAST"), I<1>() });
+                                            sock.method("setsockopt", { G<"base_events.socket">().attr("SOL_SOCKET"), G<"base_events.socket">().attr("SO_BROADCAST"), I<1>() });
                                         }
                                         sock.method("setblocking", { boolean(false) });
                                         if (local_addr.truthy())
@@ -2990,11 +2995,11 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (local_addr.truthy())
                             {
-                                (G<"log.logger">()).method("info", { S<"Datagram endpoint local_addr=%r remote_addr=%r created: (%r, %r)">(), local_addr, remote_addr, transport, protocol });
+                                (G<"base_events.logger">()).method("info", { S<"Datagram endpoint local_addr=%r remote_addr=%r created: (%r, %r)">(), local_addr, remote_addr, transport, protocol });
                             }
                             else
                             {
-                                (G<"log.logger">()).method("debug", { S<"Datagram endpoint remote_addr=%r created: (%r, %r)">(), remote_addr, transport, protocol });
+                                (G<"base_events.logger">()).method("debug", { S<"Datagram endpoint remote_addr=%r created: (%r, %r)">(), remote_addr, transport, protocol });
                             }
                         }
                         try
@@ -3011,7 +3016,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         return py_tuple({ transport, protocol });
                     }) },
-                { "_ensure_resolved", async_method(w, "BaseEventLoop", "_ensure_resolved", { py_positional("address"), py_keyword("family", I<0>()), py_keyword("type", Mod<"socket">().attr("SOCK_STREAM")), py_keyword("proto", I<0>()), py_keyword("flags", I<0>()), py_keyword("loop") }, [](arguments a) -> py
+                { "_ensure_resolved", async_method(w, "BaseEventLoop", "_ensure_resolved", { py_positional("address"), py_keyword("family", I<0>()), py_keyword("type", G<"base_events.socket">().attr("SOCK_STREAM")), py_keyword("proto", I<0>()), py_keyword("flags", I<0>()), py_keyword("loop") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py address = a[1];
@@ -3046,14 +3051,14 @@ namespace neos::python_runtime::detail::asyncio
                         py family = a[3];
                         py flags = a[4];
                         py infos;
-                        infos = py_await(self.method("_ensure_resolved", { py_tuple({ host, port }) }, { { "family", family }, { "type", Mod<"socket">().attr("SOCK_STREAM") }, { "flags", flags }, { "loop", self } }));
+                        infos = py_await(self.method("_ensure_resolved", { py_tuple({ host, port }) }, { { "family", family }, { "type", G<"base_events.socket">().attr("SOCK_STREAM") }, { "flags", flags }, { "loop", self } }));
                         if (!infos.truthy())
                         {
                             py_raise((B<"OSError">())(S(std::string{ "getaddrinfo(" } + host.repr() + ") returned empty list")));
                         }
                         return infos;
                     }) },
-                { "create_server", async_method(w, "BaseEventLoop", "create_server", { py_positional("protocol_factory"), py_positional("host", none()), py_positional("port", none()), py_keyword("family", Mod<"socket">().attr("AF_UNSPEC")), py_keyword("flags", Mod<"socket">().attr("AI_PASSIVE")), py_keyword("sock", none()), py_keyword("backlog", I<100>()), py_keyword("ssl", none()), py_keyword("reuse_address", none()), py_keyword("reuse_port", none()), py_keyword("keep_alive", none()), py_keyword("ssl_handshake_timeout", none()), py_keyword("ssl_shutdown_timeout", none()), py_keyword("start_serving", boolean(true)) }, [](arguments a) -> py
+                { "create_server", async_method(w, "BaseEventLoop", "create_server", { py_positional("protocol_factory"), py_positional("host", none()), py_positional("port", none()), py_keyword("family", G<"base_events.socket">().attr("AF_UNSPEC")), py_keyword("flags", G<"base_events.socket">().attr("AI_PASSIVE")), py_keyword("sock", none()), py_keyword("backlog", I<100>()), py_keyword("ssl", none()), py_keyword("reuse_address", none()), py_keyword("reuse_port", none()), py_keyword("keep_alive", none()), py_keyword("ssl_handshake_timeout", none()), py_keyword("ssl_shutdown_timeout", none()), py_keyword("start_serving", boolean(true)) }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py protocol_factory = a[1];
@@ -3108,7 +3113,7 @@ namespace neos::python_runtime::detail::asyncio
                             }
                             if (reuse_address.is_none())
                             {
-                                reuse_address = [&]() -> py { py const t = boolean((Mod<"os">().attr("name")) == (S<"posix">())); return !t.truthy() ? t : boolean((Mod<"sys">().attr("platform")) != (S<"cygwin">())); }();
+                                reuse_address = [&]() -> py { py const t = boolean((G<"base_events.os">().attr("name")) == (S<"posix">())); return !t.truthy() ? t : boolean((G<"base_events.sys">().attr("platform")) != (S<"cygwin">())); }();
                             }
                             sockets = py_list();
                             if (host == (S<"">()))
@@ -3144,17 +3149,17 @@ namespace neos::python_runtime::detail::asyncio
                                         sa = items59[4];
                                         try
                                         {
-                                            sock = (Mod<"socket">().attr("socket"))(af, socktype, proto);
+                                            sock = (G<"base_events.socket">().attr("socket"))(af, socktype, proto);
                                         }
                                         catch (raised const&)
                                         {
                                             pyclass::handler_scope handler60;
-                                            if (matches(handler60.exception, Mod<"socket">().attr("error")))
+                                            if (matches(handler60.exception, G<"base_events.socket">().attr("error")))
                                             {
                                                 // Assume it's a bad family/type/protocol combination.
                                                 if (self.attr("_debug").truthy())
                                                 {
-                                                    (G<"log.logger">()).method("warning", { S<"create_server() failed to create socket.socket(%r, %r, %r)">(), af, socktype, proto }, { { "exc_info", boolean(true) } });
+                                                    (G<"base_events.logger">()).method("warning", { S<"create_server() failed to create socket.socket(%r, %r, %r)">(), af, socktype, proto }, { { "exc_info", boolean(true) } });
                                                 }
                                                 continue;
                                             }
@@ -3164,24 +3169,24 @@ namespace neos::python_runtime::detail::asyncio
                                         sockets.method("append", { sock });
                                         if (reuse_address.truthy())
                                         {
-                                            sock.method("setsockopt", { Mod<"socket">().attr("SOL_SOCKET"), Mod<"socket">().attr("SO_REUSEADDR"), boolean(true) });
+                                            sock.method("setsockopt", { G<"base_events.socket">().attr("SOL_SOCKET"), G<"base_events.socket">().attr("SO_REUSEADDR"), boolean(true) });
                                         }
                                         // Since Linux 6.12.9, SO_REUSEPORT is not allowed
                                         // on other address families than AF_INET/AF_INET6.
-                                        if ((reuse_port.truthy() && py_tuple({ Mod<"socket">().attr("AF_INET"), Mod<"socket">().attr("AF_INET6") }).contains(af)))
+                                        if ((reuse_port.truthy() && py_tuple({ G<"base_events.socket">().attr("AF_INET"), G<"base_events.socket">().attr("AF_INET6") }).contains(af)))
                                         {
                                             (G<"base_events._set_reuseport">())(sock);
                                         }
                                         if (keep_alive.truthy())
                                         {
-                                            sock.method("setsockopt", { Mod<"socket">().attr("SOL_SOCKET"), Mod<"socket">().attr("SO_KEEPALIVE"), boolean(true) });
+                                            sock.method("setsockopt", { G<"base_events.socket">().attr("SOL_SOCKET"), G<"base_events.socket">().attr("SO_KEEPALIVE"), boolean(true) });
                                         }
                                         // Disable IPv4/IPv6 dual stack support (enabled by
                                         // default on Linux) which makes a single socket
                                         // listen on both address families.
-                                        if (((G<"base_events._HAS_IPv6">()).truthy() && (af == (Mod<"socket">().attr("AF_INET6"))) && has_attr(Mod<"socket">(), "IPPROTO_IPV6")))
+                                        if (((G<"base_events._HAS_IPv6">()).truthy() && (af == (G<"base_events.socket">().attr("AF_INET6"))) && has_attr(G<"base_events.socket">(), "IPPROTO_IPV6")))
                                         {
-                                            sock.method("setsockopt", { Mod<"socket">().attr("IPPROTO_IPV6"), Mod<"socket">().attr("IPV6_V6ONLY"), boolean(true) });
+                                            sock.method("setsockopt", { G<"base_events.socket">().attr("IPPROTO_IPV6"), G<"base_events.socket">().attr("IPV6_V6ONLY"), boolean(true) });
                                         }
                                         try
                                         {
@@ -3201,7 +3206,7 @@ namespace neos::python_runtime::detail::asyncio
                                                     sock.method("close");
                                                     if (self.attr("_debug").truthy())
                                                     {
-                                                        (G<"log.logger">()).method("warning", { msg });
+                                                        (G<"base_events.logger">()).method("warning", { msg });
                                                     }
                                                     continue;
                                                 }
@@ -3242,7 +3247,7 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 py_raise((B<"ValueError">())(S<"Neither host/port nor sock were specified">()));
                             }
-                            if (sock.attr("type") != (Mod<"socket">().attr("SOCK_STREAM")))
+                            if (sock.attr("type") != (G<"base_events.socket">().attr("SOCK_STREAM")))
                             {
                                 py_raise((B<"ValueError">())(S(std::string{ "A Stream Socket was expected, got " } + sock.repr())));
                             }
@@ -3263,7 +3268,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         if (self.attr("_debug").truthy())
                         {
-                            (G<"log.logger">()).method("info", { S<"%r is serving">(), server });
+                            (G<"base_events.logger">()).method("info", { S<"%r is serving">(), server });
                         }
                         return server;
                     }) },
@@ -3277,7 +3282,7 @@ namespace neos::python_runtime::detail::asyncio
                         py ssl_shutdown_timeout = a[5];
                         py protocol;
                         py transport;
-                        if (sock.attr("type") != (Mod<"socket">().attr("SOCK_STREAM")))
+                        if (sock.attr("type") != (G<"base_events.socket">().attr("SOCK_STREAM")))
                         {
                             py_raise((B<"ValueError">())(S(std::string{ "A Stream Socket was expected, got " } + sock.repr())));
                         }
@@ -3301,7 +3306,7 @@ namespace neos::python_runtime::detail::asyncio
                             // Get the socket from the transport because SSL transport closes
                             // the old socket and creates a new SSL socket
                             sock = transport.method("get_extra_info", { S<"socket">() });
-                            (G<"log.logger">()).method("debug", { S<"%r handled: (%r, %r)">(), sock, transport, protocol });
+                            (G<"base_events.logger">()).method("debug", { S<"%r handled: (%r, %r)">(), sock, transport, protocol });
                         }
                         return py_tuple({ transport, protocol });
                     }) },
@@ -3330,7 +3335,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         if (self.attr("_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"Read pipe %r connected: (%r, %r)">(), pipe.method("fileno"), transport, protocol });
+                            (G<"base_events.logger">()).method("debug", { S<"Read pipe %r connected: (%r, %r)">(), pipe.method("fileno"), transport, protocol });
                         }
                         return py_tuple({ transport, protocol });
                     }) },
@@ -3359,7 +3364,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         if (self.attr("_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"Write pipe %r connected: (%r, %r)">(), pipe.method("fileno"), transport, protocol });
+                            (G<"base_events.logger">()).method("debug", { S<"Write pipe %r connected: (%r, %r)">(), pipe.method("fileno"), transport, protocol });
                         }
                         return py_tuple({ transport, protocol });
                     }) },
@@ -3391,7 +3396,7 @@ namespace neos::python_runtime::detail::asyncio
                                 info.method("append", { S(std::string{ "stderr=" } + (G<"base_events._format_pipe">())(stderr_).str()) });
                             }
                         }
-                        (G<"log.logger">()).method("debug", { (S<" ">()).method("join", { info }) });
+                        (G<"base_events.logger">()).method("debug", { (S<" ">()).method("join", { info }) });
                         return none();
                     }) },
                 { "subprocess_shell", async_method(w, "BaseEventLoop", "subprocess_shell", { py_positional("protocol_factory"), py_positional("cmd"), py_keyword("stdin", py{ -1 } /* subprocess.PIPE */), py_keyword("stdout", py{ -1 } /* subprocess.PIPE */), py_keyword("stderr", py{ -1 } /* subprocess.PIPE */), py_keyword("universal_newlines", boolean(false)), py_keyword("shell", boolean(true)), py_keyword("bufsize", I<0>()), py_keyword("encoding", none()), py_keyword("errors", none()), py_keyword("text", none()) }, [](arguments a) -> py
@@ -3452,7 +3457,7 @@ namespace neos::python_runtime::detail::asyncio
                         transport = py_await(call_ex(self.attr("_make_subprocess_transport"), { protocol, cmd, boolean(true), stdin_, stdout_, stderr_, bufsize }, py{}, kwargs));
                         if ((self.attr("_debug").truthy() && (!debug_log.is_none())))
                         {
-                            (G<"log.logger">()).method("info", { S<"%s: %r">(), debug_log, transport });
+                            (G<"base_events.logger">()).method("info", { S<"%s: %r">(), debug_log, transport });
                         }
                         return py_tuple({ transport, protocol });
                     }, false, true) },
@@ -3513,7 +3518,7 @@ namespace neos::python_runtime::detail::asyncio
                         transport = py_await(call_ex(self.attr("_make_subprocess_transport"), { protocol, popen_args, boolean(false), stdin_, stdout_, stderr_, bufsize }, py{}, kwargs));
                         if ((self.attr("_debug").truthy() && (!debug_log.is_none())))
                         {
-                            (G<"log.logger">()).method("info", { S<"%s: %r">(), debug_log, transport });
+                            (G<"base_events.logger">()).method("info", { S<"%s: %r">(), debug_log, transport });
                         }
                         return py_tuple({ transport, protocol });
                     }, true, true) },
@@ -3589,7 +3594,7 @@ namespace neos::python_runtime::detail::asyncio
                             }
                             log_lines.method("append", { S(key.str() + ": " + value.str()) });
                         }
-                        (G<"log.logger">()).method("error", { (S<"\n">()).method("join", { log_lines }) }, { { "exc_info", exc_info } });
+                        (G<"base_events.logger">()).method("error", { (S<"\n">()).method("join", { log_lines }) }, { { "exc_info", exc_info } });
                         return none();
                     }) },
                 { "call_exception_handler", w.method("BaseEventLoop", "call_exception_handler", { py_positional("context") }, [](arguments a) -> py
@@ -3617,7 +3622,7 @@ namespace neos::python_runtime::detail::asyncio
                                     // Second protection layer for unexpected errors
                                     // in the default implementation, as well as for subclassed
                                     // event loops with overloaded "default_exception_handler".
-                                    (G<"log.logger">()).method("error", { S<"Exception in default exception handler">() }, { { "exc_info", boolean(true) } });
+                                    (G<"base_events.logger">()).method("error", { S<"Exception in default exception handler">() }, { { "exc_info", boolean(true) } });
                                 }
                                 else
                                     py_reraise(handler68.exception);
@@ -3681,7 +3686,7 @@ namespace neos::python_runtime::detail::asyncio
                                         {
                                             // Guard 'default_exception_handler' in case it is
                                             // overloaded.
-                                            (G<"log.logger">()).method("error", { S<"Exception in default exception handler while handling an unexpected error in custom exception handler">() }, { { "exc_info", boolean(true) } });
+                                            (G<"base_events.logger">()).method("error", { S<"Exception in default exception handler while handling an unexpected error in custom exception handler">() }, { { "exc_info", boolean(true) } });
                                         }
                                         else
                                             py_reraise(handler70.exception);
@@ -3836,7 +3841,7 @@ namespace neos::python_runtime::detail::asyncio
                                         dt = self.method("time") - t0;
                                         if (dt >= self.attr("slow_callback_duration"))
                                         {
-                                            (G<"log.logger">()).method("warning", { S<"Executing %s took %.3f seconds">(), (G<"base_events._format_handle">())(handle), dt });
+                                            (G<"base_events.logger">()).method("warning", { S<"Executing %s took %.3f seconds">(), (G<"base_events._format_handle">())(handle), dt });
                                         }
                                     }
                                     catch (raised const&)
@@ -3872,12 +3877,12 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         if (enabled.truthy())
                         {
-                            self.set_attr("_coroutine_origin_tracking_saved_depth", (Mod<"sys">().attr("get_coroutine_origin_tracking_depth"))());
-                            (Mod<"sys">().attr("set_coroutine_origin_tracking_depth"))(G<"constants.DEBUG_STACK_DEPTH">());
+                            self.set_attr("_coroutine_origin_tracking_saved_depth", (G<"base_events.sys">().attr("get_coroutine_origin_tracking_depth"))());
+                            (G<"base_events.sys">().attr("set_coroutine_origin_tracking_depth"))(G<"constants.DEBUG_STACK_DEPTH">());
                         }
                         else
                         {
-                            (Mod<"sys">().attr("set_coroutine_origin_tracking_depth"))(self.attr("_coroutine_origin_tracking_saved_depth"));
+                            (G<"base_events.sys">().attr("set_coroutine_origin_tracking_depth"))(self.attr("_coroutine_origin_tracking_saved_depth"));
                         }
                         self.set_attr("_coroutine_origin_tracking_enabled", enabled);
                         return none();
@@ -3905,12 +3910,28 @@ namespace neos::python_runtime::detail::asyncio
         void make_selector_events()
         {
             static module_writer const& w = writer("selector_events");
+            // (its imports (e.g. "from .log import logger", "import signal"): its globals, which its code reads (unittest.mock.patch can replace them))
+            define("selector_events", "logger", object_of("log.logger"));
             define("selector_events", "__all__", py_tuple({ S<"BaseSelectorEventLoop">() }));
             define("selector_events", "_HAS_SENDMSG", (B<"hasattr">())(Mod<"socket">().attr("socket"), S<"sendmsg">()));
             if ((G<"selector_events._HAS_SENDMSG">()).truthy())
             {
+                try
+                {
+                    define("selector_events", "SC_IOV_MAX", (Mod<"os">().attr("sysconf"))(S<"SC_IOV_MAX">()));
+                }
+                catch (raised const&)
+                {
+                    pyclass::handler_scope handler0;
+                    if (matches(handler0.exception, B<"OSError">()))
+                    {
+                        // Fallback to send
+                        define("selector_events", "_HAS_SENDMSG", boolean(false));
+                    }
+                    else
+                        py_reraise(handler0.exception);
+                }
             }
-            // Fallback to send
             define("selector_events", "_test_selector_event", w.function("_test_selector_event", "_test_selector_event", { py_positional("selector"), py_positional("fd"), py_positional("event") }, [](arguments a) -> py
                 {
                     py selector = a[0];
@@ -3952,7 +3973,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             selector = (Mod<"selectors">().attr("DefaultSelector"))();
                         }
-                        (G<"log.logger">()).method("debug", { S<"Using selector: %s">(), selector.attr("__class__").attr("__name__") });
+                        (G<"selector_events.logger">()).method("debug", { S<"Using selector: %s">(), selector.attr("__class__").attr("__name__") });
                         self.set_attr("_selector", selector);
                         self.method("_make_self_pipe");
                         self.set_attr("_transports", (Mod<"weakref">().attr("WeakValueDictionary"))());
@@ -4106,7 +4127,7 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 if (self.attr("_debug").truthy())
                                 {
-                                    (G<"log.logger">()).method("debug", { S<"Fail to write a null byte into the self-pipe socket">() }, { { "exc_info", boolean(true) } });
+                                    (G<"selector_events.logger">()).method("debug", { S<"Fail to write a null byte into the self-pipe socket">() }, { { "exc_info", boolean(true) } });
                                 }
                             }
                             else
@@ -4155,7 +4176,7 @@ namespace neos::python_runtime::detail::asyncio
                                     addr = items10[1];
                                     if (self.attr("_debug").truthy())
                                     {
-                                        (G<"log.logger">()).method("debug", { S<"%r got a new connection from %r: %r">(), server, addr, conn });
+                                        (G<"selector_events.logger">()).method("debug", { S<"%r got a new connection from %r: %r">(), server, addr, conn });
                                     }
                                     conn.method("setblocking", { boolean(false) });
                                     otherwise9 = true;
@@ -5502,7 +5523,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.attr("_loop").method("_remove_reader", { self.attr("_sock_fd") });
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r pauses reading">(), self });
+                            (G<"selector_events.logger">()).method("debug", { S<"%r pauses reading">(), self });
                         }
                         return none();
                     }) },
@@ -5517,7 +5538,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.method("_add_reader", { self.attr("_sock_fd"), self.attr("_read_ready") });
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r resumes reading">(), self });
+                            (G<"selector_events.logger">()).method("debug", { S<"%r resumes reading">(), self });
                         }
                         return none();
                     }) },
@@ -5565,7 +5586,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (self.attr("_loop").method("get_debug").truthy())
                             {
-                                (G<"log.logger">()).method("debug", { S<"%r: %s">(), self, message }, { { "exc_info", boolean(true) } });
+                                (G<"selector_events.logger">()).method("debug", { S<"%r: %s">(), self, message }, { { "exc_info", boolean(true) } });
                             }
                         }
                         else
@@ -5865,7 +5886,7 @@ namespace neos::python_runtime::detail::asyncio
                         py keep_open;
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r received EOF">(), self });
+                            (G<"selector_events.logger">()).method("debug", { S<"%r received EOF">(), self });
                         }
                         try
                         {
@@ -5926,7 +5947,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (self.attr("_conn_lost") >= (G<"constants.LOG_THRESHOLD_FOR_CONNLOST_WRITES">()))
                             {
-                                (G<"log.logger">()).method("warning", { S<"socket.send() raised exception.">() });
+                                (G<"selector_events.logger">()).method("warning", { S<"socket.send() raised exception.">() });
                             }
                             {
                                 py const target56 = self;
@@ -6181,7 +6202,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (self.attr("_conn_lost") >= (G<"constants.LOG_THRESHOLD_FOR_CONNLOST_WRITES">()))
                             {
-                                (G<"log.logger">()).method("warning", { S<"socket.send() raised exception.">() });
+                                (G<"selector_events.logger">()).method("warning", { S<"socket.send() raised exception.">() });
                             }
                             {
                                 py const target61 = self;
@@ -6361,7 +6382,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (self.attr("_conn_lost") >= (G<"constants.LOG_THRESHOLD_FOR_CONNLOST_WRITES">()))
                             {
-                                (G<"log.logger">()).method("warning", { S<"socket.send() raised exception.">() });
+                                (G<"selector_events.logger">()).method("warning", { S<"socket.send() raised exception.">() });
                             }
                             {
                                 py const target65 = self;
@@ -6497,6 +6518,8 @@ namespace neos::python_runtime::detail::asyncio
         {
             static module_writer const& w = writer("base_subprocess");
                 // Don't clear the _proc reference yet: _post_init() may still run
+            // (its imports (e.g. "from .log import logger", "import signal"): its globals, which its code reads (unittest.mock.patch can replace them))
+            define("base_subprocess", "logger", object_of("log.logger"));
             define("base_subprocess", "BaseSubprocessTransport", w.make_class("BaseSubprocessTransport", { G<"transports.SubprocessTransport">() }, {
                 { "__init__", w.method("BaseSubprocessTransport", "__init__", { py_positional("loop"), py_positional("protocol"), py_positional("args"), py_positional("shell"), py_positional("stdin"), py_positional("stdout"), py_positional("stderr"), py_positional("bufsize"), py_positional("waiter", none()), py_positional("extra", none()) }, [](arguments a) -> py
                     {
@@ -6561,7 +6584,7 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 program = args[I<0>()];
                             }
-                            (G<"log.logger">()).method("debug", { S<"process %r created: pid %s">(), program, self.attr("_pid") });
+                            (G<"base_subprocess.logger">()).method("debug", { S<"process %r created: pid %s">(), program, self.attr("_pid") });
                         }
                         self.attr("_loop").method("create_task", { self.method("_connect_pipes", { waiter }) });
                         return none();
@@ -6679,7 +6702,7 @@ namespace neos::python_runtime::detail::asyncio
                             // transport hasn't been notified yet?
                             if (self.attr("_loop").method("get_debug").truthy())
                             {
-                                (G<"log.logger">()).method("warning", { S<"Close running child process: kill %r">(), self });
+                                (G<"base_subprocess.logger">()).method("warning", { S<"Close running child process: kill %r">(), self });
                             }
                             try
                             {
@@ -6930,7 +6953,7 @@ namespace neos::python_runtime::detail::asyncio
                             py_raise(B<"AssertionError">()(self.attr("_returncode")));
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("info", { S<"%r exited with return code %r">(), self, returncode });
+                            (G<"base_subprocess.logger">()).method("info", { S<"%r exited with return code %r">(), self, returncode });
                         }
                         self.set_attr("_returncode", returncode);
                         if (self.attr("_proc").attr("returncode").is_none())
@@ -7070,6 +7093,12 @@ namespace neos::python_runtime::detail::asyncio
         [[maybe_unused]] void make_unix_events()
         {
             static module_writer const& w = writer("unix_events");
+            // (its imports (e.g. "from .log import logger", "import signal"): its globals, which its code reads (unittest.mock.patch can replace them))
+            define("unix_events", "logger", object_of("log.logger"));
+            define("unix_events", "os", py{ fn_import("os") });
+            define("unix_events", "signal", py{ fn_import("signal") });
+            define("unix_events", "socket", py{ fn_import("socket") });
+            define("unix_events", "sys", py{ fn_import("sys") });
             define("unix_events", "__all__", py_tuple({ S<"SelectorEventLoop">(), S<"AbstractChildWatcher">(), S<"SafeChildWatcher">(), S<"FastChildWatcher">(), S<"PidfdChildWatcher">(), S<"MultiLoopChildWatcher">(), S<"ThreadedChildWatcher">(), S<"DefaultEventLoopPolicy">(), S<"EventLoop">() }));
 #if defined(_WIN32)
             // (raise ImportError('Signals are not really supported on Windows'): the runtime registers the module only where it is supported)
@@ -7086,7 +7115,7 @@ namespace neos::python_runtime::detail::asyncio
                     py status = a[0];
                     try
                     {
-                        return (Mod<"os">().attr("waitstatus_to_exitcode"))(status);
+                        return (G<"unix_events.os">().attr("waitstatus_to_exitcode"))(status);
                     }
                     catch (raised const&)
                     {
@@ -7119,7 +7148,7 @@ namespace neos::python_runtime::detail::asyncio
                         py self = a[0];
                         py sig;
                         (B<"super">()(G<"unix_events._UnixSelectorEventLoop">(), self)).method("close");
-                        if (!(Mod<"sys">().attr("is_finalizing"))().truthy())
+                        if (!(G<"unix_events.sys">().attr("is_finalizing"))().truthy())
                         {
                             for (py const& item : iterate{ (B<"list">())(self.attr("_signal_handlers")) })
                             {
@@ -7172,7 +7201,7 @@ namespace neos::python_runtime::detail::asyncio
                             // main thread.  By calling it early we ensure that an
                             // event loop running in another thread cannot add a signal
                             // handler.
-                            (Mod<"signal">().attr("set_wakeup_fd"))(self.attr("_csock").method("fileno"));
+                            (G<"unix_events.signal">().attr("set_wakeup_fd"))(self.attr("_csock").method("fileno"));
                         }
                         catch (raised const&)
                         {
@@ -7192,9 +7221,9 @@ namespace neos::python_runtime::detail::asyncio
                             // Register a dummy signal handler to ask Python to write the signal
                             // number in the wakeup file descriptor. _process_self_data() will
                             // read signal numbers from this file descriptor to handle signals.
-                            (Mod<"signal">().attr("signal"))(sig, G<"unix_events._sighandler_noop">());
+                            (G<"unix_events.signal">().attr("signal"))(sig, G<"unix_events._sighandler_noop">());
                             // Set SA_RESTART to limit EINTR occurrences.
-                            (Mod<"signal">().attr("siginterrupt"))(sig, boolean(false));
+                            (G<"unix_events.signal">().attr("siginterrupt"))(sig, boolean(false));
                         }
                         catch (raised const&)
                         {
@@ -7207,7 +7236,7 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     try
                                     {
-                                        (Mod<"signal">().attr("set_wakeup_fd"))(I<-1>());
+                                        (G<"unix_events.signal">().attr("set_wakeup_fd"))(I<-1>());
                                     }
                                     catch (raised const&)
                                     {
@@ -7215,7 +7244,7 @@ namespace neos::python_runtime::detail::asyncio
                                         if (matches(handler6.exception, py_tuple({ B<"ValueError">(), B<"OSError">() })))
                                         {
                                             nexc = handler6.exception;
-                                            (G<"log.logger">()).method("info", { S<"set_wakeup_fd(-1) failed: %s">(), nexc });
+                                            (G<"unix_events.logger">()).method("info", { S<"set_wakeup_fd(-1) failed: %s">(), nexc });
                                         }
                                         else
                                             py_reraise(handler6.exception);
@@ -7276,17 +7305,17 @@ namespace neos::python_runtime::detail::asyncio
                             else
                                 py_reraise(handler7.exception);
                         }
-                        if (sig == (Mod<"signal">().attr("SIGINT")))
+                        if (sig == (G<"unix_events.signal">().attr("SIGINT")))
                         {
-                            handler = Mod<"signal">().attr("default_int_handler");
+                            handler = G<"unix_events.signal">().attr("default_int_handler");
                         }
                         else
                         {
-                            handler = Mod<"signal">().attr("SIG_DFL");
+                            handler = G<"unix_events.signal">().attr("SIG_DFL");
                         }
                         try
                         {
-                            (Mod<"signal">().attr("signal"))(sig, handler);
+                            (G<"unix_events.signal">().attr("signal"))(sig, handler);
                         }
                         catch (raised const&)
                         {
@@ -7310,7 +7339,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             try
                             {
-                                (Mod<"signal">().attr("set_wakeup_fd"))(I<-1>());
+                                (G<"unix_events.signal">().attr("set_wakeup_fd"))(I<-1>());
                             }
                             catch (raised const&)
                             {
@@ -7318,7 +7347,7 @@ namespace neos::python_runtime::detail::asyncio
                                 if (matches(handler9.exception, py_tuple({ B<"ValueError">(), B<"OSError">() })))
                                 {
                                     exc = handler9.exception;
-                                    (G<"log.logger">()).method("info", { S<"set_wakeup_fd(-1) failed: %s">(), exc });
+                                    (G<"unix_events.logger">()).method("info", { S<"set_wakeup_fd(-1) failed: %s">(), exc });
                                 }
                                 else
                                     py_reraise(handler9.exception);
@@ -7334,7 +7363,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             py_raise((B<"TypeError">())(S(std::string{ "sig must be an int, not " } + sig.repr())));
                         }
-                        if (!(Mod<"signal">().attr("valid_signals"))().contains(sig))
+                        if (!(G<"unix_events.signal">().attr("valid_signals"))().contains(sig))
                         {
                             py_raise((B<"ValueError">())(S(std::string{ "invalid signal number " } + sig.str())));
                         }
@@ -7503,8 +7532,8 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 py_raise((B<"ValueError">())(S<"path and sock can not be specified at the same time">()));
                             }
-                            path = (Mod<"os">().attr("fspath"))(path);
-                            sock = (Mod<"socket">().attr("socket"))(Mod<"socket">().attr("AF_UNIX"), Mod<"socket">().attr("SOCK_STREAM"), I<0>());
+                            path = (G<"unix_events.os">().attr("fspath"))(path);
+                            sock = (G<"unix_events.socket">().attr("socket"))(G<"unix_events.socket">().attr("AF_UNIX"), G<"unix_events.socket">().attr("SOCK_STREAM"), I<0>());
                             try
                             {
                                 sock.method("setblocking", { boolean(false) });
@@ -7525,7 +7554,7 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 py_raise((B<"ValueError">())(S<"no path and sock were specified">()));
                             }
-                            if (((sock.attr("family") != (Mod<"socket">().attr("AF_UNIX"))) || (sock.attr("type") != (Mod<"socket">().attr("SOCK_STREAM")))))
+                            if (((sock.attr("family") != (G<"unix_events.socket">().attr("AF_UNIX"))) || (sock.attr("type") != (G<"unix_events.socket">().attr("SOCK_STREAM")))))
                             {
                                 py_raise((B<"ValueError">())(S(std::string{ "A UNIX Domain Stream Socket was expected, got " } + sock.repr())));
                             }
@@ -7570,16 +7599,16 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 py_raise((B<"ValueError">())(S<"path and sock can not be specified at the same time">()));
                             }
-                            path = (Mod<"os">().attr("fspath"))(path);
-                            sock = (Mod<"socket">().attr("socket"))(Mod<"socket">().attr("AF_UNIX"), Mod<"socket">().attr("SOCK_STREAM"));
+                            path = (G<"unix_events.os">().attr("fspath"))(path);
+                            sock = (G<"unix_events.socket">().attr("socket"))(G<"unix_events.socket">().attr("AF_UNIX"), G<"unix_events.socket">().attr("SOCK_STREAM"));
                             // Check for abstract socket. `str` and `bytes` paths are supported.
                             if (!py_tuple({ I<0>(), S<"\u0000">() }).contains(path[I<0>()]))
                             {
                                 try
                                 {
-                                    if ((Mod<"stat">().attr("S_ISSOCK"))((Mod<"os">().attr("stat"))(path).attr("st_mode")).truthy())
+                                    if ((Mod<"stat">().attr("S_ISSOCK"))((G<"unix_events.os">().attr("stat"))(path).attr("st_mode")).truthy())
                                     {
-                                        (Mod<"os">().attr("remove"))(path);
+                                        (G<"unix_events.os">().attr("remove"))(path);
                                     }
                                 }
                                 catch (raised const&)
@@ -7592,7 +7621,7 @@ namespace neos::python_runtime::detail::asyncio
                                     {
                                         err = handler15.exception;
                                         // Directory may have permissions only to create socket.
-                                        (G<"log.logger">()).method("error", { S<"Unable to check or remove stale UNIX socket %r: %r">(), path, err });
+                                        (G<"unix_events.logger">()).method("error", { S<"Unable to check or remove stale UNIX socket %r: %r">(), path, err });
                                     }
                                     else
                                         py_reraise(handler15.exception);
@@ -7635,7 +7664,7 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 py_raise((B<"ValueError">())(S<"path was not specified, and no sock specified">()));
                             }
-                            if (((sock.attr("family") != (Mod<"socket">().attr("AF_UNIX"))) || (sock.attr("type") != (Mod<"socket">().attr("SOCK_STREAM")))))
+                            if (((sock.attr("family") != (G<"unix_events.socket">().attr("AF_UNIX"))) || (sock.attr("type") != (G<"unix_events.socket">().attr("SOCK_STREAM")))))
                             {
                                 py_raise((B<"ValueError">())(S(std::string{ "A UNIX Domain Stream Socket was expected, got " } + sock.repr())));
                             }
@@ -7648,7 +7677,7 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 try
                                 {
-                                    self.attr("_unix_server_sockets").set_item(sock, (Mod<"os">().attr("stat"))(path).attr("st_ino"));
+                                    self.attr("_unix_server_sockets").set_item(sock, (G<"unix_events.os">().attr("stat"))(path).attr("st_ino"));
                                 }
                                 catch (raised const&)
                                 {
@@ -7686,7 +7715,7 @@ namespace neos::python_runtime::detail::asyncio
                         py fut;
                         try
                         {
-                            Mod<"os">().attr("sendfile");
+                            G<"unix_events.os">().attr("sendfile");
                         }
                         catch (raised const&)
                         {
@@ -7715,7 +7744,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         try
                         {
-                            fsize = (Mod<"os">().attr("fstat"))(fileno).attr("st_size");
+                            fsize = (G<"unix_events.os">().attr("fstat"))(fileno).attr("st_size");
                         }
                         catch (raised const&)
                         {
@@ -7777,12 +7806,12 @@ namespace neos::python_runtime::detail::asyncio
                             }
                         }
                         // On 32-bit architectures truncate to 1GiB to avoid OverflowError
-                        blocksize = (B<"min">())(blocksize, floordiv((Mod<"sys">().attr("maxsize")), (I<2>())) + (I<1>()));
+                        blocksize = (B<"min">())(blocksize, floordiv((G<"unix_events.sys">().attr("maxsize")), (I<2>())) + (I<1>()));
                         {
                             bool otherwise21 = false;
                             try
                             {
-                                sent = (Mod<"os">().attr("sendfile"))(fd, fileno, offset, blocksize);
+                                sent = (G<"unix_events.os">().attr("sendfile"))(fd, fileno, offset, blocksize);
                                 otherwise21 = true;
                             }
                             catch (raised const&)
@@ -7865,7 +7894,7 @@ namespace neos::python_runtime::detail::asyncio
                         py self = a[0];
                         py fileno = a[1];
                         py offset = a[2];
-                        (Mod<"os">().attr("lseek"))(fileno, offset, Mod<"os">().attr("SEEK_SET"));
+                        (G<"unix_events.os">().attr("lseek"))(fileno, offset, G<"unix_events.os">().attr("SEEK_SET"));
                         return none();
                     }) },
                 { "_sock_add_cancellation_callback", w.method("_UnixSelectorEventLoop", "_sock_add_cancellation_callback", { py_positional("fut"), py_positional("sock") }, [](arguments a) -> py
@@ -7913,9 +7942,9 @@ namespace neos::python_runtime::detail::asyncio
                             del_item(self.attr("_unix_server_sockets"), sock);
                             try
                             {
-                                if ((Mod<"os">().attr("stat"))(path).attr("st_ino") == prev_ino)
+                                if ((G<"unix_events.os">().attr("stat"))(path).attr("st_ino") == prev_ino)
                                 {
-                                    (Mod<"os">().attr("unlink"))(path);
+                                    (G<"unix_events.os">().attr("unlink"))(path);
                                 }
                             }
                             catch (raised const&)
@@ -7927,7 +7956,7 @@ namespace neos::python_runtime::detail::asyncio
                                 else if (matches(handler22.exception, B<"OSError">()))
                                 {
                                     err = handler22.exception;
-                                    (G<"log.logger">()).method("error", { S<"Unable to clean up listening UNIX socket %r: %r">(), path, err });
+                                    (G<"unix_events.logger">()).method("error", { S<"Unable to clean up listening UNIX socket %r: %r">(), path, err });
                                 }
                                 else
                                     py_reraise(handler22.exception);
@@ -7955,7 +7984,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.set_attr("_protocol", protocol);
                         self.set_attr("_closing", boolean(false));
                         self.set_attr("_paused", boolean(false));
-                        mode = (Mod<"os">().attr("fstat"))(self.attr("_fileno")).attr("st_mode");
+                        mode = (G<"unix_events.os">().attr("fstat"))(self.attr("_fileno")).attr("st_mode");
                         if (!([&]() -> py { py const t = (Mod<"stat">().attr("S_ISFIFO"))(mode); return t.truthy() ? t : [&]() -> py { py const t = (Mod<"stat">().attr("S_ISSOCK"))(mode); return t.truthy() ? t : (Mod<"stat">().attr("S_ISCHR"))(mode); }(); }()).truthy())
                         {
                             self.set_attr("_pipe", none());
@@ -7963,7 +7992,7 @@ namespace neos::python_runtime::detail::asyncio
                             self.set_attr("_protocol", none());
                             py_raise((B<"ValueError">())(S<"Pipe transport is for pipes/sockets only.">()));
                         }
-                        (Mod<"os">().attr("set_blocking"))(self.attr("_fileno"), boolean(false));
+                        (G<"unix_events.os">().attr("set_blocking"))(self.attr("_fileno"), boolean(false));
                         self.attr("_loop").method("call_soon", { self.attr("_protocol").attr("connection_made"), self });
                         // only start reading when connection_made() has been called
                         self.attr("_loop").method("call_soon", { self.attr("_add_reader"), self.attr("_fileno"), self.attr("_read_ready") });
@@ -8039,7 +8068,7 @@ namespace neos::python_runtime::detail::asyncio
                             bool otherwise23 = false;
                             try
                             {
-                                data = (Mod<"os">().attr("read"))(self.attr("_fileno"), self.attr("max_size"));
+                                data = (G<"unix_events.os">().attr("read"))(self.attr("_fileno"), self.attr("max_size"));
                                 otherwise23 = true;
                             }
                             catch (raised const&)
@@ -8066,7 +8095,7 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     if (self.attr("_loop").method("get_debug").truthy())
                                     {
-                                        (G<"log.logger">()).method("info", { S<"%r was closed by peer">(), self });
+                                        (G<"unix_events.logger">()).method("info", { S<"%r was closed by peer">(), self });
                                     }
                                     self.set_attr("_closing", boolean(true));
                                     self.attr("_loop").method("_remove_reader", { self.attr("_fileno") });
@@ -8088,7 +8117,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.attr("_loop").method("_remove_reader", { self.attr("_fileno") });
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r pauses reading">(), self });
+                            (G<"unix_events.logger">()).method("debug", { S<"%r pauses reading">(), self });
                         }
                         return none();
                     }) },
@@ -8103,7 +8132,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.attr("_loop").method("_add_reader", { self.attr("_fileno"), self.attr("_read_ready") });
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r resumes reading">(), self });
+                            (G<"unix_events.logger">()).method("debug", { S<"%r resumes reading">(), self });
                         }
                         return none();
                     }) },
@@ -8153,7 +8182,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (self.attr("_loop").method("get_debug").truthy())
                             {
-                                (G<"log.logger">()).method("debug", { S<"%r: %s">(), self, message }, { { "exc_info", boolean(true) } });
+                                (G<"unix_events.logger">()).method("debug", { S<"%r: %s">(), self, message }, { { "exc_info", boolean(true) } });
                             }
                         }
                         else
@@ -8223,7 +8252,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.set_attr("_buffer", (B<"bytearray">())());
                         self.set_attr("_conn_lost", I<0>());
                         self.set_attr("_closing", boolean(false));
-                        pipe_stat = (Mod<"os">().attr("fstat"))(self.attr("_fileno"));
+                        pipe_stat = (G<"unix_events.os">().attr("fstat"))(self.attr("_fileno"));
                         mode = pipe_stat.attr("st_mode");
                         is_char = (Mod<"stat">().attr("S_ISCHR"))(mode);
                         is_fifo = (Mod<"stat">().attr("S_ISFIFO"))(mode);
@@ -8235,7 +8264,7 @@ namespace neos::python_runtime::detail::asyncio
                             self.set_attr("_protocol", none());
                             py_raise((B<"ValueError">())(S<"Pipe transport is only for pipes, sockets and character devices">()));
                         }
-                        (Mod<"os">().attr("set_blocking"))(self.attr("_fileno"), boolean(false));
+                        (G<"unix_events.os">().attr("set_blocking"))(self.attr("_fileno"), boolean(false));
                         self.attr("_loop").method("call_soon", { self.attr("_protocol").attr("connection_made"), self });
                         // On AIX, the reader trick (to be notified when the read end of the
                         // socket is closed) only works for sockets. On other platforms it
@@ -8247,8 +8276,8 @@ namespace neos::python_runtime::detail::asyncio
                         // ever report a false disconnection (gh-145030). The same XNU
                         // behaviour applies on iOS/tvOS/watchOS (sys.platform is not
                         // "darwin" there).
-                        is_named_fifo_without_close_event = [&]() -> py { py const t = boolean(set_of({ S<"darwin">(), S<"ios">(), S<"tvos">(), S<"watchos">(), S<"sunos5">() }).contains((Mod<"sys">().attr("platform")))); return !t.truthy() ? t : [&]() -> py { py const t = is_fifo; return !t.truthy() ? t : boolean(pipe_stat.attr("st_nlink") > (I<0>())); }(); }();
-                        if ((is_socket.truthy() || ([&]() -> py { py const t = is_fifo; return !t.truthy() ? t : [&]() -> py { py const t = boolean(!(Mod<"sys">().attr("platform")).method("startswith", { S<"aix">() }).truthy()); return !t.truthy() ? t : boolean(!is_named_fifo_without_close_event.truthy()); }(); }()).truthy()))
+                        is_named_fifo_without_close_event = [&]() -> py { py const t = boolean(set_of({ S<"darwin">(), S<"ios">(), S<"tvos">(), S<"watchos">(), S<"sunos5">() }).contains((G<"unix_events.sys">().attr("platform")))); return !t.truthy() ? t : [&]() -> py { py const t = is_fifo; return !t.truthy() ? t : boolean(pipe_stat.attr("st_nlink") > (I<0>())); }(); }();
+                        if ((is_socket.truthy() || ([&]() -> py { py const t = is_fifo; return !t.truthy() ? t : [&]() -> py { py const t = boolean(!(G<"unix_events.sys">().attr("platform")).method("startswith", { S<"aix">() }).truthy()); return !t.truthy() ? t : boolean(!is_named_fifo_without_close_event.truthy()); }(); }()).truthy()))
                         {
                             // only start reading when connection_made() has been called
                             self.attr("_loop").method("call_soon", { self.attr("_loop").attr("_add_reader"), self.attr("_fileno"), self.attr("_read_ready") });
@@ -8312,7 +8341,7 @@ namespace neos::python_runtime::detail::asyncio
                         py self = a[0];
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("info", { S<"%r was closed by peer">(), self });
+                            (G<"unix_events.logger">()).method("info", { S<"%r was closed by peer">(), self });
                         }
                         if (self.attr("_buffer").truthy())
                         {
@@ -8344,7 +8373,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (self.attr("_conn_lost") >= (G<"constants.LOG_THRESHOLD_FOR_CONNLOST_WRITES">()))
                             {
-                                (G<"log.logger">()).method("warning", { S<"pipe closed by peer or os.write(pipe, data) raised exception.">() });
+                                (G<"unix_events.logger">()).method("warning", { S<"pipe closed by peer or os.write(pipe, data) raised exception.">() });
                             }
                             {
                                 py const target25 = self;
@@ -8357,7 +8386,7 @@ namespace neos::python_runtime::detail::asyncio
                             // Attempt to send it right away first.
                             try
                             {
-                                n = (Mod<"os">().attr("write"))(self.attr("_fileno"), data);
+                                n = (G<"unix_events.os">().attr("write"))(self.attr("_fileno"), data);
                             }
                             catch (raised const&)
                             {
@@ -8411,7 +8440,7 @@ namespace neos::python_runtime::detail::asyncio
                             bool otherwise29 = false;
                             try
                             {
-                                n = (Mod<"os">().attr("write"))(self.attr("_fileno"), self.attr("_buffer"));
+                                n = (G<"unix_events.os">().attr("write"))(self.attr("_fileno"), self.attr("_buffer"));
                                 otherwise29 = true;
                             }
                             catch (raised const&)
@@ -8537,7 +8566,7 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             if (self.attr("_loop").method("get_debug").truthy())
                             {
-                                (G<"log.logger">()).method("debug", { S<"%r: %s">(), self, message }, { { "exc_info", boolean(true) } });
+                                (G<"unix_events.logger">()).method("debug", { S<"%r: %s">(), self, message }, { { "exc_info", boolean(true) } });
                             }
                         }
                         else
@@ -8602,13 +8631,13 @@ namespace neos::python_runtime::detail::asyncio
                         py kwargs = a[7];
                         py stdin_w;
                         stdin_w = none();
-                        if (((stdin_ == (py{ -1 } /* subprocess.PIPE */)) && (Mod<"sys">().attr("platform")).method("startswith", { S<"aix">() }).truthy()))
+                        if (((stdin_ == (py{ -1 } /* subprocess.PIPE */)) && (G<"unix_events.sys">().attr("platform")).method("startswith", { S<"aix">() }).truthy()))
                         {
                             // Use a socket pair for stdin on AIX, since it does not
                             // support selecting read events on the write end of a
                             // socket (which we use in order to detect closing of the
                             // other end).
-                            auto const items32 = unpack((Mod<"socket">().attr("socketpair"))(), 2);
+                            auto const items32 = unpack((G<"unix_events.socket">().attr("socketpair"))(), 2);
                             stdin_ = items32[0];
                             stdin_w = items32[1];
                         }
@@ -8736,7 +8765,7 @@ namespace neos::python_runtime::detail::asyncio
                         py loop;
                         py pidfd;
                         loop = (G<"events.get_running_loop">())();
-                        pidfd = (Mod<"os">().attr("pidfd_open"))(pid);
+                        pidfd = (G<"unix_events.os">().attr("pidfd_open"))(pid);
                         loop.method("_add_reader", { pidfd, self.attr("_do_wait"), pid, pidfd, callback, args });
                         return none();
                     }, true) },
@@ -8757,7 +8786,7 @@ namespace neos::python_runtime::detail::asyncio
                             bool otherwise34 = false;
                             try
                             {
-                                auto const items35 = unpack((Mod<"os">().attr("waitpid"))(pid, I<0>()), 2);
+                                auto const items35 = unpack((G<"unix_events.os">().attr("waitpid"))(pid, I<0>()), 2);
                                 _ = items35[0];
                                 status = items35[1];
                                 otherwise34 = true;
@@ -8770,7 +8799,7 @@ namespace neos::python_runtime::detail::asyncio
                                     // The child process is already reaped
                                     // (may happen if waitpid() is called elsewhere).
                                     returncode = I<255>();
-                                    (G<"log.logger">()).method("warning", { S<"child process pid %d exit status already read:  will report returncode 255">(), pid });
+                                    (G<"unix_events.logger">()).method("warning", { S<"child process pid %d exit status already read:  will report returncode 255">(), pid });
                                 }
                                 else
                                     py_reraise(handler34.exception);
@@ -8780,7 +8809,7 @@ namespace neos::python_runtime::detail::asyncio
                                 returncode = (G<"unix_events.waitstatus_to_exitcode">())(status);
                             }
                         }
-                        (Mod<"os">().attr("close"))(pidfd);
+                        (G<"unix_events.os">().attr("close"))(pidfd);
                         call_ex(callback, { pid, returncode }, args, py{});
                         return none();
                     }) },
@@ -8833,12 +8862,12 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         if (!self.attr("_loop").is_none())
                         {
-                            self.attr("_loop").method("remove_signal_handler", { Mod<"signal">().attr("SIGCHLD") });
+                            self.attr("_loop").method("remove_signal_handler", { G<"unix_events.signal">().attr("SIGCHLD") });
                         }
                         self.set_attr("_loop", loop);
                         if (!loop.is_none())
                         {
-                            loop.method("add_signal_handler", { Mod<"signal">().attr("SIGCHLD"), self.attr("_sig_chld") });
+                            loop.method("add_signal_handler", { G<"unix_events.signal">().attr("SIGCHLD"), self.attr("_sig_chld") });
                             // Prevent a race condition in case a child terminated
                             // during the switch.
                             self.method("_do_waitpid_all");
@@ -8960,7 +8989,7 @@ namespace neos::python_runtime::detail::asyncio
                             bool otherwise39 = false;
                             try
                             {
-                                auto const items40 = unpack((Mod<"os">().attr("waitpid"))(expected_pid, Mod<"os">().attr("WNOHANG")), 2);
+                                auto const items40 = unpack((G<"unix_events.os">().attr("waitpid"))(expected_pid, G<"unix_events.os">().attr("WNOHANG")), 2);
                                 pid = items40[0];
                                 status = items40[1];
                                 otherwise39 = true;
@@ -8974,7 +9003,7 @@ namespace neos::python_runtime::detail::asyncio
                                     // (may happen if waitpid() is called elsewhere).
                                     pid = expected_pid;
                                     returncode = I<255>();
-                                    (G<"log.logger">()).method("warning", { S<"Unknown child process pid %d, will report returncode 255">(), pid });
+                                    (G<"unix_events.logger">()).method("warning", { S<"Unknown child process pid %d, will report returncode 255">(), pid });
                                 }
                                 else
                                     py_reraise(handler39.exception);
@@ -8989,7 +9018,7 @@ namespace neos::python_runtime::detail::asyncio
                                 returncode = (G<"unix_events.waitstatus_to_exitcode">())(status);
                                 if (self.attr("_loop").method("get_debug").truthy())
                                 {
-                                    (G<"log.logger">()).method("debug", { S<"process %s exited with returncode %s">(), expected_pid, returncode });
+                                    (G<"unix_events.logger">()).method("debug", { S<"process %s exited with returncode %s">(), expected_pid, returncode });
                                 }
                             }
                         }
@@ -9011,7 +9040,7 @@ namespace neos::python_runtime::detail::asyncio
                                     // after os.waitpid() returns.
                                     if (self.attr("_loop").method("get_debug").truthy())
                                     {
-                                        (G<"log.logger">()).method("warning", { S<"Child watcher got an unexpected pid: %r">(), pid }, { { "exc_info", boolean(true) } });
+                                        (G<"unix_events.logger">()).method("warning", { S<"Child watcher got an unexpected pid: %r">(), pid }, { { "exc_info", boolean(true) } });
                                     }
                                 }
                                 else
@@ -9121,7 +9150,7 @@ namespace neos::python_runtime::detail::asyncio
                             if (flow45 == 1)
                                 return result45;
                         }
-                        (G<"log.logger">()).method("warning", { S<"Caught subprocesses termination from unknown pids: %s">(), collateral_victims });
+                        (G<"unix_events.logger">()).method("warning", { S<"Caught subprocesses termination from unknown pids: %s">(), collateral_victims });
                         return none();
                     }) },
                 { "add_child_handler", w.method("FastChildWatcher", "add_child_handler", { py_positional("pid"), py_positional("callback") }, [](arguments a) -> py
@@ -9213,7 +9242,7 @@ namespace neos::python_runtime::detail::asyncio
                                 bool otherwise51 = false;
                                 try
                                 {
-                                    auto const items52 = unpack((Mod<"os">().attr("waitpid"))(I<-1>(), Mod<"os">().attr("WNOHANG")), 2);
+                                    auto const items52 = unpack((G<"unix_events.os">().attr("waitpid"))(I<-1>(), G<"unix_events.os">().attr("WNOHANG")), 2);
                                     pid = items52[0];
                                     status = items52[1];
                                     otherwise51 = true;
@@ -9269,7 +9298,7 @@ namespace neos::python_runtime::detail::asyncio
                                                     self.attr("_zombies").set_item(pid, returncode);
                                                     if (self.attr("_loop").method("get_debug").truthy())
                                                     {
-                                                        (G<"log.logger">()).method("debug", { S<"unknown process %s exited with returncode %s">(), pid, returncode });
+                                                        (G<"unix_events.logger">()).method("debug", { S<"unknown process %s exited with returncode %s">(), pid, returncode });
                                                     }
                                                     flow53 = 3;
                                                     goto finally53;
@@ -9283,7 +9312,7 @@ namespace neos::python_runtime::detail::asyncio
                                         {
                                             if (self.attr("_loop").method("get_debug").truthy())
                                             {
-                                                (G<"log.logger">()).method("debug", { S<"process %s exited with returncode %s">(), pid, returncode });
+                                                (G<"unix_events.logger">()).method("debug", { S<"process %s exited with returncode %s">(), pid, returncode });
                                             }
                                         }
                                     }
@@ -9307,7 +9336,7 @@ namespace neos::python_runtime::detail::asyncio
                             }
                             if (callback.is_none())
                             {
-                                (G<"log.logger">()).method("warning", { S<"Caught subprocess termination from unknown pid: %d -> %d">(), pid, returncode });
+                                (G<"unix_events.logger">()).method("warning", { S<"Caught subprocess termination from unknown pid: %d -> %d">(), pid, returncode });
                             }
                             else
                             {
@@ -9346,14 +9375,14 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             return none();
                         }
-                        handler = (Mod<"signal">().attr("getsignal"))(Mod<"signal">().attr("SIGCHLD"));
+                        handler = (G<"unix_events.signal">().attr("getsignal"))(G<"unix_events.signal">().attr("SIGCHLD"));
                         if (handler != self.attr("_sig_chld"))
                         {
-                            (G<"log.logger">()).method("warning", { S<"SIGCHLD handler was changed by outside code">() });
+                            (G<"unix_events.logger">()).method("warning", { S<"SIGCHLD handler was changed by outside code">() });
                         }
                         else
                         {
-                            (Mod<"signal">().attr("signal"))(Mod<"signal">().attr("SIGCHLD"), self.attr("_saved_sighandler"));
+                            (G<"unix_events.signal">().attr("signal"))(G<"unix_events.signal">().attr("SIGCHLD"), self.attr("_saved_sighandler"));
                         }
                         self.set_attr("_saved_sighandler", none());
                         return none();
@@ -9413,14 +9442,14 @@ namespace neos::python_runtime::detail::asyncio
                         {
                             return none();
                         }
-                        self.set_attr("_saved_sighandler", (Mod<"signal">().attr("signal"))(Mod<"signal">().attr("SIGCHLD"), self.attr("_sig_chld")));
+                        self.set_attr("_saved_sighandler", (G<"unix_events.signal">().attr("signal"))(G<"unix_events.signal">().attr("SIGCHLD"), self.attr("_sig_chld")));
                         if (self.attr("_saved_sighandler").is_none())
                         {
-                            (G<"log.logger">()).method("warning", { S<"Previous SIGCHLD handler was set by non-Python code, restore to default handler on watcher close.">() });
-                            self.set_attr("_saved_sighandler", Mod<"signal">().attr("SIG_DFL"));
+                            (G<"unix_events.logger">()).method("warning", { S<"Previous SIGCHLD handler was set by non-Python code, restore to default handler on watcher close.">() });
+                            self.set_attr("_saved_sighandler", G<"unix_events.signal">().attr("SIG_DFL"));
                         }
                         // Set SA_RESTART to limit EINTR occurrences.
-                        (Mod<"signal">().attr("siginterrupt"))(Mod<"signal">().attr("SIGCHLD"), boolean(false));
+                        (G<"unix_events.signal">().attr("siginterrupt"))(G<"unix_events.signal">().attr("SIGCHLD"), boolean(false));
                         return none();
                     }) },
                 { "_do_waitpid_all", w.method("MultiLoopChildWatcher", "_do_waitpid_all", {  }, [](arguments a) -> py
@@ -9451,7 +9480,7 @@ namespace neos::python_runtime::detail::asyncio
                             bool otherwise58 = false;
                             try
                             {
-                                auto const items59 = unpack((Mod<"os">().attr("waitpid"))(expected_pid, Mod<"os">().attr("WNOHANG")), 2);
+                                auto const items59 = unpack((G<"unix_events.os">().attr("waitpid"))(expected_pid, G<"unix_events.os">().attr("WNOHANG")), 2);
                                 pid = items59[0];
                                 status = items59[1];
                                 otherwise58 = true;
@@ -9465,7 +9494,7 @@ namespace neos::python_runtime::detail::asyncio
                                     // (may happen if waitpid() is called elsewhere).
                                     pid = expected_pid;
                                     returncode = I<255>();
-                                    (G<"log.logger">()).method("warning", { S<"Unknown child process pid %d, will report returncode 255">(), pid });
+                                    (G<"unix_events.logger">()).method("warning", { S<"Unknown child process pid %d, will report returncode 255">(), pid });
                                     debug_log = boolean(false);
                                 }
                                 else
@@ -9499,7 +9528,7 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     // May happen if .remove_child_handler() is called
                                     // after os.waitpid() returns.
-                                    (G<"log.logger">()).method("warning", { S<"Child watcher got an unexpected pid: %r">(), pid }, { { "exc_info", boolean(true) } });
+                                    (G<"unix_events.logger">()).method("warning", { S<"Child watcher got an unexpected pid: %r">(), pid }, { { "exc_info", boolean(true) } });
                                 }
                                 else
                                     py_reraise(handler60.exception);
@@ -9508,13 +9537,13 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 if (loop.method("is_closed").truthy())
                                 {
-                                    (G<"log.logger">()).method("warning", { S<"Loop %r that handles pid %r is closed">(), loop, pid });
+                                    (G<"unix_events.logger">()).method("warning", { S<"Loop %r that handles pid %r is closed">(), loop, pid });
                                 }
                                 else
                                 {
                                     if ((debug_log.truthy() && loop.method("get_debug").truthy()))
                                     {
-                                        (G<"log.logger">()).method("debug", { S<"process %s exited with returncode %s">(), expected_pid, returncode });
+                                        (G<"unix_events.logger">()).method("debug", { S<"process %s exited with returncode %s">(), expected_pid, returncode });
                                     }
                                     call_ex(loop.attr("call_soon_threadsafe"), { callback, pid, returncode }, args, py{});
                                 }
@@ -9540,7 +9569,7 @@ namespace neos::python_runtime::detail::asyncio
                             }
                             else if (matches(handler62.exception, B<"BaseException">()))
                             {
-                                (G<"log.logger">()).method("warning", { S<"Unknown exception in SIGCHLD handler">() }, { { "exc_info", boolean(true) } });
+                                (G<"unix_events.logger">()).method("warning", { S<"Unknown exception in SIGCHLD handler">() }, { { "exc_info", boolean(true) } });
                             }
                             else
                                 py_reraise(handler62.exception);
@@ -9633,7 +9662,7 @@ namespace neos::python_runtime::detail::asyncio
                             bool otherwise63 = false;
                             try
                             {
-                                auto const items64 = unpack((Mod<"os">().attr("waitpid"))(expected_pid, I<0>()), 2);
+                                auto const items64 = unpack((G<"unix_events.os">().attr("waitpid"))(expected_pid, I<0>()), 2);
                                 pid = items64[0];
                                 status = items64[1];
                                 otherwise63 = true;
@@ -9647,7 +9676,7 @@ namespace neos::python_runtime::detail::asyncio
                                     // (may happen if waitpid() is called elsewhere).
                                     pid = expected_pid;
                                     returncode = I<255>();
-                                    (G<"log.logger">()).method("warning", { S<"Unknown child process pid %d, will report returncode 255">(), pid });
+                                    (G<"unix_events.logger">()).method("warning", { S<"Unknown child process pid %d, will report returncode 255">(), pid });
                                 }
                                 else
                                     py_reraise(handler63.exception);
@@ -9657,13 +9686,13 @@ namespace neos::python_runtime::detail::asyncio
                                 returncode = (G<"unix_events.waitstatus_to_exitcode">())(status);
                                 if (loop.method("get_debug").truthy())
                                 {
-                                    (G<"log.logger">()).method("debug", { S<"process %s exited with returncode %s">(), expected_pid, returncode });
+                                    (G<"unix_events.logger">()).method("debug", { S<"process %s exited with returncode %s">(), expected_pid, returncode });
                                 }
                             }
                         }
                         if (loop.method("is_closed").truthy())
                         {
-                            (G<"log.logger">()).method("warning", { S<"Loop %r that handles pid %r is closed">(), loop, pid });
+                            (G<"unix_events.logger">()).method("warning", { S<"Loop %r that handles pid %r is closed">(), loop, pid });
                         }
                         else
                         {
@@ -9676,14 +9705,14 @@ namespace neos::python_runtime::detail::asyncio
             define("unix_events", "can_use_pidfd", w.function("can_use_pidfd", "can_use_pidfd", {  }, [](arguments a) -> py
                 {
                     py pid;
-                    if (!has_attr(Mod<"os">(), "pidfd_open"))
+                    if (!has_attr(G<"unix_events.os">(), "pidfd_open"))
                     {
                         return boolean(false);
                     }
                     try
                     {
-                        pid = (Mod<"os">().attr("getpid"))();
-                        (Mod<"os">().attr("close"))((Mod<"os">().attr("pidfd_open"))(pid, I<0>()));
+                        pid = (G<"unix_events.os">().attr("getpid"))();
+                        (G<"unix_events.os">().attr("close"))((G<"unix_events.os">().attr("pidfd_open"))(pid, I<0>()));
                     }
                     catch (raised const&)
                     {

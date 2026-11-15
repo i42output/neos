@@ -44,6 +44,7 @@
 #include <string>
 #include <vector>
 #include "objects.hpp"
+#include "values.hpp"
 
 namespace neos::python_runtime
 {
@@ -1522,6 +1523,80 @@ namespace neos::python_runtime
                         return false;
                     aAttributes.emplace_back(name, bound);
                 }
+                // (main(args=None): Lib/calendar.py's command line (argparse): a year's or a month's calendar, as text or HTML)
+                aAttributes.emplace_back("main", make_native_function("main", "main", "", "calendar", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("main", { py_positional("args", py::none()) }, aArgs, aKwargs);
+                    py const parser = import_attribute("argparse", "ArgumentParser")();
+                    py const textgroup = parser.method("add_argument_group", { py{ "text only arguments" } });
+                    py const htmlgroup = parser.method("add_argument_group", { py{ "html only arguments" } });
+                    py const intType = builtin("int");
+                    textgroup.method("add_argument", { py{ "-w" }, py{ "--width" } }, { { "type", intType }, { "default", py{ 2 } }, { "help", py{ "width of date column (default 2)" } } });
+                    textgroup.method("add_argument", { py{ "-l" }, py{ "--lines" } }, { { "type", intType }, { "default", py{ 1 } }, { "help", py{ "number of lines for each week (default 1)" } } });
+                    textgroup.method("add_argument", { py{ "-s" }, py{ "--spacing" } }, { { "type", intType }, { "default", py{ 6 } }, { "help", py{ "spacing between months (default 6)" } } });
+                    textgroup.method("add_argument", { py{ "-m" }, py{ "--months" } }, { { "type", intType }, { "default", py{ 3 } }, { "help", py{ "months per row (default 3)" } } });
+                    htmlgroup.method("add_argument", { py{ "-c" }, py{ "--css" } }, { { "default", py{ "calendar.css" } }, { "help", py{ "CSS to use for page" } } });
+                    parser.method("add_argument", { py{ "-L" }, py{ "--locale" } }, { { "default", py::none() }, { "help", py{ "locale to use for month and weekday names" } } });
+                    parser.method("add_argument", { py{ "-e" }, py{ "--encoding" } }, { { "default", py::none() }, { "help", py{ "encoding to use for output" } } });
+                    parser.method("add_argument", { py{ "-t" }, py{ "--type" } }, { { "default", py{ "text" } }, { "choices", py{ make_tuple({ make_str("text"), make_str("html") }) } },
+                        { "help", py{ "output type (text or html)" } } });
+                    parser.method("add_argument", { py{ "-f" }, py{ "--first-weekday" } }, { { "type", intType }, { "default", py{ 0 } },
+                        { "help", py{ "weekday (0 is Monday, 6 is Sunday) to start each week (default 0)" } } });
+                    parser.method("add_argument", { py{ "year" } }, { { "nargs", py{ "?" } }, { "type", intType }, { "help", py{ "year number" } } });
+                    parser.method("add_argument", { py{ "month" } }, { { "nargs", py{ "?" } }, { "type", intType }, { "help", py{ "month number (1-12, text only)" } } });
+                    py const options = parser.method("parse_args", { a[0] });
+                    py const localeName = options.attr("locale");
+                    py const encoding = options.attr("encoding");
+                    if (localeName.truthy() && !encoding.truthy())
+                    {
+                        parser.method("error", { py{ "if --locale is specified --encoding is required" } });
+                        import_attribute("sys", "exit")(py{ 1 });
+                    }
+                    py const locale{ make_tuple({ localeName.reference(), encoding.reference() }) };
+                    py const firstWeekday = options.attr("first_weekday");
+                    py const year = options.attr("year");
+                    py const month = options.attr("month");
+                    auto const this_year = []() { return import_attribute("datetime", "date").attr("today")().attr("year"); };
+                    if (options.attr("type").str() == "html")
+                    {
+                        if (month.truthy())
+                        {
+                            parser.method("error", { py{ "incorrect number of arguments" } });
+                            import_attribute("sys", "exit")(py{ 1 });
+                        }
+                        py const cal = localeName.truthy() ? import_attribute("calendar", "LocaleHTMLCalendar").call({}, { { "locale", locale } }) :
+                            import_attribute("calendar", "HTMLCalendar")();
+                        cal.method("setfirstweekday", { firstWeekday });
+                        py const pageEncoding = encoding.is_none() ? import_attribute("sys", "getdefaultencoding")() : encoding;
+                        py const write = import_attribute("sys", "stdout").attr("buffer").attr("write");
+                        write(cal.method("formatyearpage", { year.is_none() ? this_year() : year }, { { "encoding", pageEncoding }, { "css", options.attr("css") } }));
+                        return py::none();
+                    }
+                    py const cal = localeName.truthy() ? import_attribute("calendar", "LocaleTextCalendar").call({}, { { "locale", locale } }) :
+                        import_attribute("calendar", "TextCalendar")();
+                    cal.method("setfirstweekday", { firstWeekday });
+                    std::vector<std::pair<char const*, py>> optdict = { { "w", options.attr("width") }, { "l", options.attr("lines") } };
+                    if (month.is_none())
+                    {
+                        optdict.emplace_back("c", options.attr("spacing"));
+                        optdict.emplace_back("m", options.attr("months"));
+                    }
+                    else
+                    {
+                        long long m = 0;
+                        py_checked(validate_month(month.get(), m));
+                    }
+                    py result = year.is_none() ? cal.method("formatyear", { this_year() }, optdict) :
+                        month.is_none() ? cal.method("formatyear", { year }, optdict) : cal.method("formatmonth", { year, month }, optdict);
+                    py write = import_attribute("sys", "stdout").attr("write");
+                    if (encoding.truthy())
+                    {
+                        result = result.method("encode", { encoding });
+                        write = import_attribute("sys", "stdout").attr("buffer").attr("write");
+                    }
+                    write(result);
+                    return py::none();
+                }).release());
                 aAttributes.emplace_back("_colwidth", make_int(20));
                 aAttributes.emplace_back("_spacing", make_int(6));
                 aAttributes.emplace_back("EPOCH", make_int(1970));

@@ -160,6 +160,15 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
         void make_xml_sax_expatreader()
         {
             static module_writer const& w = writer("xml.sax.expatreader");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xml.sax.expatreader", "feature_validation", import_attribute("xml.sax.handler", "feature_validation"));
+            define("xml.sax.expatreader", "feature_namespaces", import_attribute("xml.sax.handler", "feature_namespaces"));
+            define("xml.sax.expatreader", "feature_namespace_prefixes", import_attribute("xml.sax.handler", "feature_namespace_prefixes"));
+            define("xml.sax.expatreader", "feature_external_ges", import_attribute("xml.sax.handler", "feature_external_ges"));
+            define("xml.sax.expatreader", "feature_external_pes", import_attribute("xml.sax.handler", "feature_external_pes"));
+            define("xml.sax.expatreader", "feature_string_interning", import_attribute("xml.sax.handler", "feature_string_interning"));
+            define("xml.sax.expatreader", "property_xml_string", import_attribute("xml.sax.handler", "property_xml_string"));
+            define("xml.sax.expatreader", "property_interning_dict", import_attribute("xml.sax.handler", "property_interning_dict"));
             define("xml.sax.expatreader", "version", S<"0.20">());
             if (!(B<"hasattr">())(Mod<"xml.parsers.expat">(), S<"ParserCreate">()).truthy())
             {
@@ -305,19 +314,19 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
                     {
                         py self = a[0];
                         py name = a[1];
-                        if (name == (Mod<"xml.sax.handler">().attr("feature_namespaces")))
+                        if (name == (G<"xml.sax.expatreader.feature_namespaces">()))
                         {
                             return self.attr("_namespaces");
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("feature_string_interning")))
+                        else if (name == (G<"xml.sax.expatreader.feature_string_interning">()))
                         {
                             return boolean(!self.attr("_interning").is_none());
                         }
-                        else if (py_tuple({ Mod<"xml.sax.handler">().attr("feature_validation"), Mod<"xml.sax.handler">().attr("feature_external_pes"), Mod<"xml.sax.handler">().attr("feature_namespace_prefixes") }).contains(name))
+                        else if (py_tuple({ G<"xml.sax.expatreader.feature_validation">(), G<"xml.sax.expatreader.feature_external_pes">(), G<"xml.sax.expatreader.feature_namespace_prefixes">() }).contains(name))
                         {
                             return I<0>();
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("feature_external_ges")))
+                        else if (name == (G<"xml.sax.expatreader.feature_external_ges">()))
                         {
                             return self.attr("_external_ges");
                         }
@@ -332,15 +341,15 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
                         {
                             py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotSupportedException"))(S<"Cannot set features while parsing">()));
                         }
-                        if (name == (Mod<"xml.sax.handler">().attr("feature_namespaces")))
+                        if (name == (G<"xml.sax.expatreader.feature_namespaces">()))
                         {
                             self.set_attr("_namespaces", state);
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("feature_external_ges")))
+                        else if (name == (G<"xml.sax.expatreader.feature_external_ges">()))
                         {
                             self.set_attr("_external_ges", state);
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("feature_string_interning")))
+                        else if (name == (G<"xml.sax.expatreader.feature_string_interning">()))
                         {
                             if (state.truthy())
                             {
@@ -354,21 +363,21 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
                                 self.set_attr("_interning", none());
                             }
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("feature_validation")))
+                        else if (name == (G<"xml.sax.expatreader.feature_validation">()))
                         {
                             if (state.truthy())
                             {
                                 py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotSupportedException"))(S<"expat does not support validation">()));
                             }
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("feature_external_pes")))
+                        else if (name == (G<"xml.sax.expatreader.feature_external_pes">()))
                         {
                             if (state.truthy())
                             {
                                 py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotSupportedException"))(S<"expat does not read external parameter entities">()));
                             }
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("feature_namespace_prefixes")))
+                        else if (name == (G<"xml.sax.expatreader.feature_namespace_prefixes">()))
                         {
                             if (state.truthy())
                             {
@@ -389,11 +398,11 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
                         {
                             return self.attr("_lex_handler_prop");
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("property_interning_dict")))
+                        else if (name == (G<"xml.sax.expatreader.property_interning_dict">()))
                         {
                             return self.attr("_interning");
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("property_xml_string")))
+                        else if (name == (G<"xml.sax.expatreader.property_xml_string">()))
                         {
                             if (self.attr("_parser").truthy())
                             {
@@ -426,11 +435,11 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
                                 self.method("_reset_lex_handler_prop");
                             }
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("property_interning_dict")))
+                        else if (name == (G<"xml.sax.expatreader.property_interning_dict">()))
                         {
                             self.set_attr("_interning", value);
                         }
-                        else if (name == (Mod<"xml.sax.handler">().attr("property_xml_string")))
+                        else if (name == (G<"xml.sax.expatreader.property_xml_string">()))
                         {
                             py_raise((Mod<"xml.sax._exceptions">().attr("SAXNotSupportedException"))((S<"Property '%s' cannot be set">()) % name));
                         }
@@ -948,14 +957,6 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
                         if (auto const text = n.str(); all || !text.starts_with("_"))
                             aAttributes.emplace_back(text, m.attr(text.c_str()).release());
                 }
-                aAttributes.emplace_back("feature_validation", import_attribute("xml.sax.handler", "feature_validation").release());
-                aAttributes.emplace_back("feature_namespaces", import_attribute("xml.sax.handler", "feature_namespaces").release());
-                aAttributes.emplace_back("feature_namespace_prefixes", import_attribute("xml.sax.handler", "feature_namespace_prefixes").release());
-                aAttributes.emplace_back("feature_external_ges", import_attribute("xml.sax.handler", "feature_external_ges").release());
-                aAttributes.emplace_back("feature_external_pes", import_attribute("xml.sax.handler", "feature_external_pes").release());
-                aAttributes.emplace_back("feature_string_interning", import_attribute("xml.sax.handler", "feature_string_interning").release());
-                aAttributes.emplace_back("property_xml_string", import_attribute("xml.sax.handler", "property_xml_string").release());
-                aAttributes.emplace_back("property_interning_dict", import_attribute("xml.sax.handler", "property_interning_dict").release());
                 aAttributes.emplace_back("xmlreader", import_attribute("xml.sax", "xmlreader").release());
                 aAttributes.emplace_back("saxutils", import_attribute("xml.sax", "saxutils").release());
                 aAttributes.emplace_back("handler", import_attribute("xml.sax", "handler").release());
@@ -967,6 +968,14 @@ namespace neos::python_runtime::detail::xml_sax_expatreader_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xml.sax.expatreader", xml_sax_expatreader_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xml.sax.expatreader", xml_sax_expatreader_module, assigned);
     }
 }

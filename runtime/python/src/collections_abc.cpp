@@ -1537,7 +1537,15 @@ namespace neos::python_runtime::detail
             }
             result.emplace_back("longrange_iterator", longRange);
             result.emplace_back("set_iterator", type_of(iter(builtin("set")())));
-            result.emplace_back("str_iterator", type_of(iter(py{ "" })));
+            result.emplace_back("str_iterator", type_of(iter(py{ "\xC3\xA4" })));
+            result.emplace_back("str_ascii_iterator", type_of(iter(py{ "" })));
+            // (a sequence's iterator (of __getitem__), iter(callable, sentinel)'s, and reversed's, enumerate's, map's and filter's)
+            result.emplace_back("iterator", py{ type_object_for("iterator", "iterator") });
+            result.emplace_back("callable_iterator", type_of(iter(builtin("int"), py{ 1 })));
+            result.emplace_back("reversed", type_of(builtin("reversed")(py_tuple())));
+            result.emplace_back("enumerate", type_of(builtin("enumerate")(py_list())));
+            result.emplace_back("map", type_of(builtin("map")(builtin("str"), py_list())));
+            result.emplace_back("filter", type_of(builtin("filter")(py::none(), py_list())));
             result.emplace_back("tuple_iterator", type_of(iter(py_tuple())));
             result.emplace_back("zip_iterator", type_of(iter(builtin("zip")())));
             result.emplace_back("dict_keys", type_of(py_dict().method("keys")));
@@ -1599,7 +1607,8 @@ namespace neos::python_runtime::detail
                 make_abc("Iterable", {}, sIterableMethods, { "__iter__" }, {}, { { "__class_getitem__", classGetitem } });
                 py const iterator = make_abc("Iterator", { "Iterable" }, sIteratorMethods, { "__next__" });
                 for (auto name : { "bytes_iterator", "bytearray_iterator", "dict_keyiterator", "dict_valueiterator", "dict_itemiterator", "list_iterator",
-                    "list_reverseiterator", "range_iterator", "longrange_iterator", "set_iterator", "str_iterator", "tuple_iterator", "zip_iterator" })
+                    "list_reverseiterator", "range_iterator", "longrange_iterator", "set_iterator", "str_iterator", "str_ascii_iterator", "tuple_iterator", 
+                    "zip_iterator", "iterator", "callable_iterator", "reversed", "enumerate", "map", "filter" })
                     iterator.method("register", { typeNamed(name) });
                 make_abc("Reversible", { "Iterable" }, sReversibleMethods, { "__reversed__" });
                 make_abc("Generator", { "Iterator" }, sGeneratorMethods, { "send", "throw" }).method("register", { typeNamed("generator") });

@@ -217,13 +217,45 @@ namespace neos::python_runtime
                             return error("TypeError", "length_hint() takes no keyword arguments");
                         if (aArgs.empty() || aArgs.size() > 2u)
                             return error("TypeError", "length_hint expected at most 2 arguments");
+                        // (CPython's PyObject_LengthHint: its len() (unless that is a TypeError), else its __length_hint__() (unless it has none or 
+                        // that is NotImplemented), else the default)
+                        auto const fallback = [&]() -> object*
+                        {
+                            if (aArgs.size() == 2u)
+                            {
+                                long long d = 0;
+                                if (!to_index(aArgs[1], d))
+                                    return error("TypeError", std::string{ "'" } + type_name(aArgs[1]) + "' object cannot be interpreted as an integer");
+                                return make_int(d);
+                            }
+                            return make_int(0);
+                        };
                         auto const n = length(aArgs[0]);
                         if (n >= 0)
                             return make_int(n);
+                        if (error_text() != nullptr && !std::string_view{ error_text() }.starts_with("TypeError"))
+                            return nullptr;
                         clear_error();
-                        if (aArgs.size() == 2u)
-                            return borrowed(aArgs[1]);
-                        return make_int(0);
+                        ref const hint{ getattr(aArgs[0], "__length_hint__") };
+                        if (!hint)
+                        {
+                            clear_error();
+                            return fallback();
+                        }
+                        ref const empty{ make_tuple() };
+                        ref const result{ call(hint.get(), empty.get(), nullptr) };
+                        if (!result)
+                            return nullptr;
+                        if (result.get() == not_implemented())
+                            return fallback();
+                        if (kind_of(result.get()) != NEOS_PY_INT && kind_of(result.get()) != NEOS_PY_BOOL)
+                            return error("TypeError", std::string{ "__length_hint__ must be an integer, not " } + type_name(result.get()));
+                        long long r = 0;
+                        if (!to_index(result.get(), r))
+                            return nullptr;
+                        if (r < 0)
+                            return error("ValueError", "__length_hint__() should return >= 0");
+                        return make_int(r);
                     } },
                 { "call", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -709,7 +741,8 @@ namespace neos::python_runtime
                 }
                 while (lo < hi)
                 {
-                    auto const mid = (lo + hi) / 2;
+                    // ((lo + hi) / 2, as CPython's (size_t) sum: without overflow)
+                    auto const mid = lo + (hi - lo) / 2;
                     ref const index{ make_int(mid) };
                     ref item{ getitem(a[0], index.get()) };
                     if (!item)
@@ -854,10 +887,37 @@ namespace neos::python_runtime
                 return static_cast<bool>(method);
             }
 
+            // (an object of a type of a module whose type has a reduction of its own (__reduce_ex__ or __reduce__: not object's))
+            bool has_own_reduction(object* aObject)
+            {
+                // (a builtin iterator: its pickling (iterator_pickle_method))
+                if (kind_of(aObject) == NEOS_PY_ITERATOR)
+                    return true;
+                auto const type = python_type(aObject);
+                if (kind_of(aObject) != NEOS_PY_OTHER || type == nullptr || type->getattr == nullptr)
+                    return false;
+                for (auto name : { "__reduce_ex__", "__reduce__" })
+                {
+                    ref const method{ type->getattr(context(), aObject, name) };
+                    if (method)
+                        return true;
+                    clear_error();
+                }
+                return false;
+            }
+
             object* reduce_copy(object* aObject, object* aMemo, bool& aHandled)
             {
                 aHandled = false;
                 ref reductor{ special_method(aObject, "__reduce_ex__") };
+                // (an exception (of a builtin class), or another object of a type of a module: by its reduction (__reduce_ex__(4): 
+                // BaseException.__reduce__, a type's own (e.g. functools.partial's), or object's: "cannot pickle"), as CPython's copy)
+                if (!reductor && (exception_type_name(aObject) != nullptr || kind_of(aObject) == NEOS_PY_OTHER || kind_of(aObject) == NEOS_PY_ITERATOR))
+                {
+                    reductor = ref{ getattr(aObject, "__reduce_ex__") };
+                    if (!reductor)
+                        clear_error();
+                }
                 if (!reductor && own_state(aObject))
                 {
                     reductor = ref{ getattr(aObject, "__reduce_ex__") };
@@ -993,7 +1053,6 @@ namespace neos::python_runtime
                         return call_with(method.get(), {});
                     clear_error();
                 }
-                if (own_state(aObject))
                 {
                     bool reduced = false;
                     if (auto const copied = reduce_copy(aObject, nullptr, reduced); reduced)
@@ -1008,11 +1067,32 @@ namespace neos::python_runtime
             {
                 if (is_atomic(aObject))
                     return borrowed(aObject);
+                ref const id{ make_int(static_cast<long long>(reinterpret_cast<std::uintptr_t>(aObject))) };
+                if (auto const position = dict_find(aMemo, id.get()); position >= 0)
+                    return borrowed(as<dict_object>(aMemo)->items[static_cast<std::size_t>(position)].second);
                 // (a recursive call: copy.py's deepcopy is Python code (its frames counted: RecursionError, not a crash))
                 if (!enter_recursive_call(""))
                     return nullptr;
                 auto const result = deep_copy_object(aObject, aMemo);
                 leave_recursive_call();
+                // (_keep_alive(x, memo): the original is kept (in memo[id(memo)]) while the memo is, so that its id is not another's)
+                if (result != nullptr && result != aObject)
+                {
+                    ref const memoId{ make_int(static_cast<long long>(reinterpret_cast<std::uintptr_t>(aMemo))) };
+                    auto const position = dict_find(aMemo, memoId.get());
+                    if (position >= 0)
+                    {
+                        auto const kept = as<dict_object>(aMemo)->items[static_cast<std::size_t>(position)].second;
+                        ref const append{ getattr(kept, "append") };
+                        if (!append || !ref{ call_with(append.get(), { borrowed(aObject) }) })
+                            return (release(result), nullptr);
+                    }
+                    else
+                    {
+                        ref const kept{ make_list({ borrowed(aObject) }) };
+                        dict_set(aMemo, memoId.get(), kept.get());
+                    }
+                }
                 return result;
             }
 
@@ -1027,12 +1107,14 @@ namespace neos::python_runtime
                 {
                 case NEOS_PY_LIST:
                     {
+                        // (_deepcopy_list: for a in x (the list as it is: a copy of an item can change it))
                         result = ref{ make_list() };
                         dict_set(aMemo, id.get(), result.get());
-                        auto const items = as<list_object>(aObject)->items;
-                        for (auto i : items)
+                        ref const list{ borrowed(aObject) };
+                        for (std::size_t i = 0u; i < as<list_object>(aObject)->items.size(); ++i)
                         {
-                            auto const c = deep_copy(i, aMemo);
+                            ref const item{ borrowed(as<list_object>(aObject)->items[i]) };
+                            auto const c = deep_copy(item.get(), aMemo);
                             if (c == nullptr)
                                 return nullptr;
                             as<list_object>(result.get())->items.push_back(c);
@@ -1075,21 +1157,41 @@ namespace neos::python_runtime
                     }
                 case NEOS_PY_DICT:
                     {
+                        // (_deepcopy_dict: for key, value in x.items() (an iteration of the dict: its size must not change))
                         result = ref{ make_dict() };
                         dict_set(aMemo, id.get(), result.get());
-                        auto const items = as<dict_object>(aObject)->items;
-                        for (auto const& item : items)
+                        ref const dict{ borrowed(aObject) };
+                        auto const size = as<dict_object>(aObject)->items.size();
+                        for (std::size_t i = 0u; i < as<dict_object>(aObject)->items.size(); ++i)
                         {
-                            ref const k{ deep_copy(item.first, aMemo) };
-                            ref const v{ deep_copy(item.second, aMemo) };
+                            if (as<dict_object>(aObject)->items.size() != size)
+                                return error("RuntimeError", "dictionary changed size during iteration");
+                            ref const key{ borrowed(as<dict_object>(aObject)->items[i].first) };
+                            ref const value{ borrowed(as<dict_object>(aObject)->items[i].second) };
+                            ref const k{ deep_copy(key.get(), aMemo) };
+                            ref const v{ k ? deep_copy(value.get(), aMemo) : nullptr };
                             if (!k || !v)
                                 return nullptr;
                             dict_set(result.get(), k.get(), v.get());
                         }
+                        if (as<dict_object>(aObject)->items.size() != size)
+                            return error("RuntimeError", "dictionary changed size during iteration");
                         return result.release_ownership();
                     }
                 default:
                     break;
+                }
+                // (a bound method: of its function and a deep copy of its instance (copy.py's _deepcopy_method))
+                if (auto const t = python_type(aObject); t != nullptr && std::string_view{ t->name } == "method")
+                {
+                    ref const function{ getattr(aObject, "__func__") };
+                    ref const self{ function ? getattr(aObject, "__self__") : nullptr };
+                    ref const selfCopy{ self ? deep_copy(self.get(), aMemo) : nullptr };
+                    if (!selfCopy)
+                        return nullptr;
+                    result = ref{ make_bound_method(function.get(), selfCopy.get()) };
+                    dict_set(aMemo, id.get(), result.get());
+                    return result.release_ownership();
                 }
                 if (is_instance(aObject))
                 {
@@ -1116,7 +1218,7 @@ namespace neos::python_runtime
                         return result.release_ownership();
                     }
                     clear_error();
-                    if (own_state(aObject))
+                    if (own_state(aObject) || exception_type_name(aObject) != nullptr || has_own_reduction(aObject))
                     {
                         bool reduced = false;
                         if (auto const copied = reduce_copy(aObject, aMemo, reduced); reduced)

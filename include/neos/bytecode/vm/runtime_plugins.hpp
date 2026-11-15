@@ -71,6 +71,11 @@ namespace neos
                 };
                 // false if neos was built without libffi
                 bool available();
+                // (neos_rt_host::string_result, version 21) a plugin function's NEOS_RT_STRING result: of the size that the plugin gave
+                // for it (set_string_result: on the calling thread, for that pointer), else up to its first NUL (null: empty); a size 
+                // given applies to one result (it is taken)
+                std::string_view string_result(char const* aString);
+                void set_string_result(char const* aString, std::size_t aSize);
                 // true if there is a runtime plugin for the namespace aNamespace (it is not loaded)
                 bool plugin_available(std::string const& aNamespace);
                 // (the debugger) the hooks (a neos_rt_debug const*: see neos/runtime/debug.h) of the runtime plugin for the namespace 

@@ -160,6 +160,10 @@ namespace neos::python_runtime::detail::email_quoprimime_module
         void make_email_quoprimime()
         {
             static module_writer const& w = writer("email.quoprimime");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email.quoprimime", "ascii_letters", import_attribute("string", "ascii_letters"));
+            define("email.quoprimime", "digits", import_attribute("string", "digits"));
+            define("email.quoprimime", "hexdigits", import_attribute("string", "hexdigits"));
             // Copyright (C) 2001-2006 Python Software Foundation
             // Author: Ben Gertzfield
             // Contact: email-sig@python.org
@@ -178,7 +182,7 @@ namespace neos::python_runtime::detail::email_quoprimime_module
             // Safe header bytes which need no encoding.
             (w.function("<module>", "<module>", {  }, [](arguments a) -> py
                 {
-                    for (py const& item : iterate{ (py{ make_bytes(std::string{ "\x2d\x21\x2a\x2b\x2f", 5 }) } + (Mod<"string">().attr("ascii_letters")).method("encode", { S<"ascii">() })) + (Mod<"string">().attr("digits")).method("encode", { S<"ascii">() }) })
+                    for (py const& item : iterate{ (py{ make_bytes(std::string{ "\x2d\x21\x2a\x2b\x2f", 5 }) } + (G<"email.quoprimime.ascii_letters">()).method("encode", { S<"ascii">() })) + (G<"email.quoprimime.digits">()).method("encode", { S<"ascii">() }) })
                     {
                         set_global("email.quoprimime", "c", item);
                         (G<"email.quoprimime._QUOPRI_HEADER_MAP">()).set_item(G<"email.quoprimime.c">(), (B<"chr">())(G<"email.quoprimime.c">()));
@@ -429,7 +433,7 @@ namespace neos::python_runtime::detail::email_quoprimime_module
                                 continue;
                             }
                             // Decode if in form =AB
-                            else if ((((i + (I<2>())) < n) && (Mod<"string">().attr("hexdigits")).contains(line[i + (I<1>())]) && (Mod<"string">().attr("hexdigits")).contains(line[i + (I<2>())])))
+                            else if ((((i + (I<2>())) < n) && (G<"email.quoprimime.hexdigits">()).contains(line[i + (I<1>())]) && (G<"email.quoprimime.hexdigits">()).contains(line[i + (I<2>())])))
                             {
                                 decoded = inplace(NEOS_PY_ADD, decoded, (G<"email.quoprimime.unquote">())(line[B<"slice">()(i, i + (I<3>()), none())]));
                                 i = inplace(NEOS_PY_ADD, i, I<3>());
@@ -487,9 +491,6 @@ namespace neos::python_runtime::detail::email_quoprimime_module
                 if (auto const doc = email_quoprimime_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
-                aAttributes.emplace_back("ascii_letters", import_attribute("string", "ascii_letters").release());
-                aAttributes.emplace_back("digits", import_attribute("string", "digits").release());
-                aAttributes.emplace_back("hexdigits", import_attribute("string", "hexdigits").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -498,6 +499,14 @@ namespace neos::python_runtime::detail::email_quoprimime_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email.quoprimime", email_quoprimime_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email.quoprimime", email_quoprimime_module, assigned);
     }
 }

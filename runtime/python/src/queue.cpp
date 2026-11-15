@@ -66,6 +66,7 @@ namespace neos::python_runtime
                 std::deque<object*> items;      ///< (a PriorityQueue's: a heap)
                 long long maxsize = 0;
                 long long unfinished = 0;
+                bool shutdown = false;          ///< (is_shutdown: shutdown() was called)
                 ~queue_object() { for (auto i : items) release(i); }
             };
 
@@ -157,6 +158,7 @@ namespace neos::python_runtime
 
             object* empty_error() { return error("_queue.Empty", ""); }
             object* full_error() { return error("queue.Full", ""); }
+            object* shut_down_error() { return error("queue.ShutDown", ""); }
 
             // (wait with the GIL released: false if it timed out)
             template <typename Predicate>
@@ -182,6 +184,9 @@ namespace neos::python_runtime
             {
                 auto& q = as_queue(aSelf);
                 std::unique_lock<std::mutex> lock{ q.mutex };
+                // (a queue that is shut down: ShutDown, also for a put waiting for room when it is shut down)
+                if (q.shutdown)
+                    return (lock.unlock(), shut_down_error());
                 if (q.maxsize > 0)
                 {
                     auto const room = [&]() { return static_cast<long long>(q.items.size()) < q.maxsize; };
@@ -190,8 +195,14 @@ namespace neos::python_runtime
                         if (!room())
                             return (lock.unlock(), full_error());
                     }
-                    else if (!wait(lock, q.notFull, aTimeout, room))
-                        return (lock.unlock(), full_error());
+                    else
+                    {
+                        wait(lock, q.notFull, aTimeout, [&]() { return room() || q.shutdown; });
+                        if (q.shutdown)
+                            return (lock.unlock(), shut_down_error());
+                        if (!room())
+                            return (lock.unlock(), full_error());
+                    }
                 }
                 retain(aItem);
                 if (q.kind == queue_object::Priority)
@@ -217,13 +228,22 @@ namespace neos::python_runtime
                 auto& q = as_queue(aSelf);
                 std::unique_lock<std::mutex> lock{ q.mutex };
                 auto const available = [&]() { return !q.items.empty(); };
+                // (a queue that is shut down: its items, then ShutDown, also for a get waiting for one)
+                if (q.shutdown && !available())
+                    return (lock.unlock(), shut_down_error());
                 if (!aBlock)
                 {
                     if (!available())
                         return (lock.unlock(), empty_error());
                 }
-                else if (!wait(lock, q.notEmpty, aTimeout, available))
-                    return (lock.unlock(), empty_error());
+                else
+                {
+                    wait(lock, q.notEmpty, aTimeout, [&]() { return available() || q.shutdown; });
+                    if (q.shutdown && !available())
+                        return (lock.unlock(), shut_down_error());
+                    if (!available())
+                        return (lock.unlock(), empty_error());
+                }
                 object* item = nullptr;
                 switch (q.kind)
                 {
@@ -327,6 +347,45 @@ namespace neos::python_runtime
                         std::unique_lock<std::mutex> lock{ q.mutex };
                         wait(lock, q.allTasksDone, -1.0, [&]() { return q.unfinished == 0; });
                         return none();
+                    } },
+                // (shutdown(immediate=False): puts raise ShutDown, and gets once the queue is empty; immediate: the queue is emptied
+                // (each item a task done) and join() returns)
+                { "shutdown", false, [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("shutdown", aArgs, aKwargs, { "immediate" }, 0u, 0u, a))
+                            return nullptr;
+                        bool immediate = false;
+                        if (a[0] != nullptr)
+                        {
+                            auto const t = truth(a[0]);
+                            if (t < 0)
+                                return nullptr;
+                            immediate = t == 1;
+                        }
+                        auto& q = as_queue(aSelf);
+                        std::deque<object*> removed;
+                        {
+                            std::lock_guard<std::mutex> lock{ q.mutex };
+                            q.shutdown = true;
+                            if (immediate)
+                            {
+                                for (auto i : q.items)
+                                {
+                                    removed.push_back(i);
+                                    if (q.unfinished > 0)
+                                        --q.unfinished;
+                                }
+                                q.items.clear();
+                            }
+                        }
+                        if (immediate)
+                            q.allTasksDone.notify_all();
+                        q.notEmpty.notify_all();
+                        q.notFull.notify_all();
+                        for (auto i : removed)
+                            release(i);
+                        return none();
                     } }
             };
 
@@ -354,6 +413,11 @@ namespace neos::python_runtime
                             return make_function(m.name, call_method, const_cast<queue_method*>(&m), aSelf);
                     if (!simple && std::strcmp(aName, "maxsize") == 0)
                         return make_int(q.maxsize);
+                    if (!simple && std::strcmp(aName, "is_shutdown") == 0)
+                    {
+                        std::lock_guard<std::mutex> lock{ q.mutex };
+                        return make_bool(q.shutdown);
+                    }
                     if (!simple && std::strcmp(aName, "unfinished_tasks") == 0)
                     {
                         std::lock_guard<std::mutex> lock{ q.mutex };
@@ -418,7 +482,7 @@ namespace neos::python_runtime
                     aAttributes.emplace_back(c.name, context()->type_new(context(), c.name, c.qualified,
                         [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object* { return new_queue(aData, as<tuple_object>(aArgs)->items, aKwargs); },
                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(c.kind)), instance_of));
-                for (auto const& e : { std::pair{ "Empty", "_queue.Empty" }, std::pair{ "Full", "queue.Full" } })
+                for (auto const& e : { std::pair{ "Empty", "_queue.Empty" }, std::pair{ "Full", "queue.Full" }, std::pair{ "ShutDown", "queue.ShutDown" } })
                 {
                     if (!is_exception_class(e.second))
                         user_exception_bases()[e.second] = { "Exception" };
@@ -428,6 +492,23 @@ namespace neos::python_runtime
             }
 
             inline bool const sQueue = register_module("queue", queue_module);
+
+            // (_queue (CPython's Modules/_queuemodule.c: the C SimpleQueue and Empty that Lib/queue.py imports): queue's SimpleQueue and Empty,
+            // the same objects)
+            bool queue_c_module(std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                for (auto name : { "SimpleQueue", "Empty" })
+                {
+                    auto const value = module_attribute("queue", name);
+                    if (value == nullptr)
+                        return false;
+                    aAttributes.emplace_back(name, value);
+                }
+                aAttributes.emplace_back("__doc__", make_str("C implementation of the Python queue module.\nThis module is an implementation detail, please do not use it directly."));
+                return true;
+            }
+
+            inline bool const sQueueC = register_module("_queue", queue_c_module);
         }
     }
 }

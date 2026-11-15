@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -64,6 +65,8 @@ namespace neos::python_runtime
     namespace detail
     {
         // --- the GIL
+
+        bool signal_interrupt_main(long long aSignal);  // (services.cpp: _thread.interrupt_main's simulated signal)
 
         namespace
         {
@@ -265,16 +268,31 @@ namespace neos::python_runtime
                 }
                 if (!aBlocking)
                     return false;
-                bool const acquired = wait_for(l.mutex, l.condition, aTimeout, [&]() { return !l.locked; });
-                if (!acquired)
-                    return false;
-                std::lock_guard<std::mutex> lock{ l.mutex };
-                if (l.locked)
-                    return lock_acquire(l, aBlocking, aTimeout);
-                l.locked = true;
-                l.owner = me;
-                l.count = 1;
-                return true;
+                // (until it is unlocked and this thread takes it (another may take it first: then it waits again, for the time that 
+                // remains; not while holding the lock's mutex, which the wait takes))
+                auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>{ aTimeout < 0.0 ? 0.0 : aTimeout };
+                for (auto timeout = aTimeout;;)
+                {
+                    bool const acquired = wait_for(l.mutex, l.condition, timeout, [&]() { return !l.locked; });
+                    if (!acquired)
+                        return false;
+                    {
+                        std::lock_guard<std::mutex> lock{ l.mutex };
+                        if (!l.locked)
+                        {
+                            l.locked = true;
+                            l.owner = me;
+                            l.count = 1;
+                            return true;
+                        }
+                    }
+                    if (aTimeout >= 0.0)
+                    {
+                        timeout = std::chrono::duration<double>{ deadline - std::chrono::steady_clock::now() }.count();
+                        if (timeout <= 0.0)
+                            return false;
+                    }
+                }
             }
 
             bool lock_release(lock_object& l)
@@ -356,6 +374,20 @@ namespace neos::python_runtime
                         auto& l = as_lock(aSelf);
                         std::lock_guard<std::mutex> lock{ l.mutex };
                         return make_bool(l.locked && (!l.reentrant || l.owner == thread_ident()));
+                    } },
+                // (_at_fork_reinit(): unlocked (in a child after fork: a thread of the parent's could hold it; its mutex and condition 
+                // are made again, as _PyThread_at_fork_reinit makes a new lock (the old ones are not destroyed)))
+                { "_at_fork_reinit", [](object* aSelf, std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (!aArgs.empty())
+                            return error("TypeError", "_at_fork_reinit() takes no arguments (" + std::to_string(aArgs.size()) + " given)");
+                        auto& l = as_lock(aSelf);
+                        new (&l.mutex) std::mutex{};
+                        new (&l.condition) std::condition_variable{};
+                        l.locked = false;
+                        l.owner = 0;
+                        l.count = 0;
+                        return none();
                     } }
             };
 
@@ -1049,6 +1081,7 @@ namespace neos::python_runtime
                 long long ident = 0;
                 bool daemon = false;
                 object* thread = nullptr;   ///< (the Thread (borrowed: the running thread holds a reference))
+                void* mainContext = nullptr;    ///< (the main program's context: the thread runs it (its run's program is switched to))
             };
 
             neos_py_type sThreadStateType = make_type("threading._state", "_state", retain_object, release_object<thread_state>);
@@ -1099,7 +1132,10 @@ namespace neos::python_runtime
 
             void run_thread(object* aThread, thread_state* aState)
             {
-                host()->thread_attach(sContext);
+                // (the main program (a program that a module of its own was compiled to, or exec's, can start the thread): the thread's 
+                // functions switch to their own programs from it)
+                host()->thread_attach(aState->mainContext != nullptr ? aState->mainContext : sContext);
+                thread_main_program(aState->mainContext != nullptr ? aState->mainContext : sContext);
                 gil_acquire();
                 tCurrentThread = aThread;
                 {
@@ -1157,6 +1193,7 @@ namespace neos::python_runtime
                 }
                 if (sContext == nullptr)
                     sContext = host()->thread_context();
+                state->mainContext = main_program_context();
                 gil_activate();
                 retain(aThread);
                 retain(&state->h.base);
@@ -1661,6 +1698,277 @@ namespace neos::python_runtime
                 { "stack_size", [](std::vector<object*> const&, object*) -> object* { return make_int(0); } }
             };
 
+            // --- threading._RLock (_PyRLock): ported from CPython 3.13.18's Lib/threading.py (class _RLock: a reentrant lock made of a lock,
+            // its owner and its count, as attributes of the instance)
+
+            // (the name of the running Thread whose identity is aIdent (_active[owner].name); null if there is none)
+            object* thread_name_of(object* aIdent)
+            {
+                long long ident = 0;
+                if (!is_int_like(aIdent) || !to_index(aIdent, ident))
+                {
+                    clear_error();
+                    return nullptr;
+                }
+                std::vector<object*> threads;
+                {
+                    std::lock_guard<std::mutex> lock{ sThreadsMutex };
+                    for (auto t : sThreads)
+                        threads.push_back((retain(t), t));
+                }
+                if (ref const main{ main_thread() })
+                    threads.push_back((retain(main.get()), main.get()));
+                else
+                    clear_error();
+                object* result = nullptr;
+                for (auto t : threads)
+                {
+                    if (result == nullptr)
+                        if (auto const state = state_of(t); state != nullptr && state->ident == ident)
+                            result = getattr(t, "name");
+                    if (failed())
+                        clear_error();
+                    release(t);
+                }
+                return result;
+            }
+
+            // (self._owner == get_ident(): -1 if the comparison raised)
+            int owned(object* aSelf)
+            {
+                ref const owner{ getattr(aSelf, "_owner") };
+                if (!owner)
+                    return -1;
+                ref const me{ make_int(thread_ident()) };
+                ref const equal{ compare(NEOS_PY_EQ, owner.get(), me.get()) };
+                return equal ? truth(equal.get()) : -1;
+            }
+
+            // (release(): self._count decremented; at zero, unowned and its lock released)
+            object* pyrlock_release(object* aSelf)
+            {
+                auto const mine = owned(aSelf);
+                if (mine < 0)
+                    return nullptr;
+                if (mine == 0)
+                    return error("RuntimeError", "cannot release un-acquired lock");
+                ref const count{ getattr(aSelf, "_count") };
+                ref const one{ make_int(1) };
+                ref const decremented{ count ? binary(NEOS_PY_SUBTRACT, count.get(), one.get(), false) : nullptr };
+                if (!decremented || setattr(aSelf, "_count", decremented.get()) < 0)
+                    return nullptr;
+                auto const nonzero = truth(decremented.get());
+                if (nonzero < 0)
+                    return nullptr;
+                if (nonzero == 0)
+                {
+                    ref const block{ getattr(aSelf, "_block") };
+                    if (!block || setattr(aSelf, "_owner", none()) < 0)
+                        return nullptr;
+                    ref const r{ call_method_named(block.get(), "release", {}) };
+                    if (!r)
+                        return nullptr;
+                }
+                return none();
+            }
+
+            builtin_entry const sPyRLockMethods[] =
+            {
+                { "__init__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock.__init__", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        ref const block{ make_lock(false) };
+                        ref const count{ make_int(0) };
+                        if (setattr(aArgs[0], "_block", block.get()) < 0 || setattr(aArgs[0], "_owner", none()) < 0 || setattr(aArgs[0], "_count", count.get()) < 0)
+                            return nullptr;
+                        return none();
+                    } },
+                { "__repr__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock.__repr__", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        auto const self = aArgs[0];
+                        ref owner{ getattr(self, "_owner") };
+                        if (!owner)
+                            return nullptr;
+                        if (ref name{ thread_name_of(owner.get()) })
+                            owner = std::move(name);
+                        ref const block{ getattr(self, "_block") };
+                        ref const locked{ block ? call_method_named(block.get(), "locked", {}) : nullptr };
+                        ref const cls{ class_of(self) };
+                        ref const module{ cls ? getattr(cls.get(), "__module__") : nullptr };
+                        ref const qualname{ cls ? getattr(cls.get(), "__qualname__") : nullptr };
+                        ref const count{ getattr(self, "_count") };
+                        if (!locked || !module || !qualname || !count)
+                            return nullptr;
+                        std::string ownerText, moduleText, qualnameText;
+                        long long countValue = 0;
+                        if (!repr_of(owner.get(), ownerText) || !str_of(module.get(), moduleText) || !str_of(qualname.get(), qualnameText) || !to_index(count.get(), countValue))
+                            return nullptr;
+                        return make_str(std::string{ "<" } + (truth(locked.get()) == 1 ? "locked" : "unlocked") + " " + moduleText + "." + qualnameText + " object owner=" +
+                            ownerText + " count=" + std::to_string(countValue) + " at " + object_address(self) + ">");
+                    } },
+                { "_at_fork_reinit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock._at_fork_reinit", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        ref const block{ getattr(aArgs[0], "_block") };
+                        ref const r{ block ? call_method_named(block.get(), "_at_fork_reinit", {}) : nullptr };
+                        ref const count{ make_int(0) };
+                        if (!r || setattr(aArgs[0], "_owner", none()) < 0 || setattr(aArgs[0], "_count", count.get()) < 0)
+                            return nullptr;
+                        return none();
+                    } },
+                { "acquire", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock.acquire", aArgs, aKwargs, { "blocking", "timeout" }, 0u, 0u, a))
+                            return nullptr;
+                        auto const self = aArgs[0];
+                        ref const me{ make_int(thread_ident()) };
+                        auto const mine = owned(self);
+                        if (mine < 0)
+                            return nullptr;
+                        if (mine == 1)
+                        {
+                            ref const count{ getattr(self, "_count") };
+                            ref const one{ make_int(1) };
+                            ref const incremented{ count ? binary(NEOS_PY_ADD, count.get(), one.get(), false) : nullptr };
+                            if (!incremented || setattr(self, "_count", incremented.get()) < 0)
+                                return nullptr;
+                            return make_int(1);
+                        }
+                        ref const block{ getattr(self, "_block") };
+                        if (!block)
+                            return nullptr;
+                        auto const blocking = a[0] != nullptr ? (retain(a[0]), a[0]) : make_bool(true);
+                        auto const timeout = a[1] != nullptr ? (retain(a[1]), a[1]) : make_int(-1);
+                        ref const rc{ call_method_named(block.get(), "acquire", { blocking, timeout }) };
+                        if (!rc)
+                            return nullptr;
+                        auto const acquired = truth(rc.get());
+                        if (acquired < 0)
+                            return nullptr;
+                        if (acquired == 1)
+                        {
+                            ref const one{ make_int(1) };
+                            if (setattr(self, "_owner", me.get()) < 0 || setattr(self, "_count", one.get()) < 0)
+                                return nullptr;
+                        }
+                        return (retain(rc.get()), rc.get());
+                    } },
+                { "release", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock.release", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        return pyrlock_release(aArgs[0]);
+                    } },
+                { "__exit__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock.__exit__", aArgs, aKwargs, { "t", "v", "tb" }, 3u, 0u, a))
+                            return nullptr;
+                        return pyrlock_release(aArgs[0]);
+                    } },
+                { "_acquire_restore", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock._acquire_restore", aArgs, aKwargs, { "state" }, 1u, 0u, a))
+                            return nullptr;
+                        ref const block{ getattr(aArgs[0], "_block") };
+                        ref const r{ block ? call_method_named(block.get(), "acquire", {}) : nullptr };
+                        if (!r)
+                            return nullptr;
+                        // (self._count, self._owner = state)
+                        std::vector<object*> items;
+                        bool const collected = collect(a[0], items);
+                        struct releaser { std::vector<object*>& items; ~releaser() { for (auto i : items) release(i); } } const released{ items };
+                        if (!collected)
+                            return nullptr;
+                        if (items.size() != 2u)
+                            return error("ValueError", items.size() < 2u ? "not enough values to unpack (expected 2, got " + std::to_string(items.size()) + ")" :
+                                "too many values to unpack (expected 2)");
+                        if (setattr(aArgs[0], "_count", items[0]) < 0 || setattr(aArgs[0], "_owner", items[1]) < 0)
+                            return nullptr;
+                        return none();
+                    } },
+                { "_release_save", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock._release_save", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        auto const self = aArgs[0];
+                        ref const count{ getattr(self, "_count") };
+                        if (!count)
+                            return nullptr;
+                        auto const nonzero = truth(count.get());
+                        if (nonzero < 0)
+                            return nullptr;
+                        if (nonzero == 0)
+                            return error("RuntimeError", "cannot release un-acquired lock");
+                        ref const owner{ getattr(self, "_owner") };
+                        ref const zero{ make_int(0) };
+                        ref const block{ getattr(self, "_block") };
+                        if (!owner || !block || setattr(self, "_count", zero.get()) < 0 || setattr(self, "_owner", none()) < 0)
+                            return nullptr;
+                        ref const r{ call_method_named(block.get(), "release", {}) };
+                        if (!r)
+                            return nullptr;
+                        return make_tuple({ (retain(count.get()), count.get()), (retain(owner.get()), owner.get()) });
+                    } },
+                { "_is_owned", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock._is_owned", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        auto const mine = owned(aArgs[0]);
+                        return mine < 0 ? nullptr : make_bool(mine == 1);
+                    } },
+                { "_recursion_count", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!method_arguments("_RLock._recursion_count", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        auto const mine = owned(aArgs[0]);
+                        if (mine < 0)
+                            return nullptr;
+                        if (mine == 0)
+                            return make_int(0);
+                        return getattr(aArgs[0], "_count");
+                    } }
+            };
+
+            object* sPyRLockClass = nullptr;
+
+            object* pyrlock_class()
+            {
+                if (sPyRLockClass == nullptr)
+                {
+                    std::vector<std::pair<std::string, object*>> ns;
+                    for (auto const& m : sPyRLockMethods)
+                        ns.emplace_back(m.name, make_builtin(m));
+                    // (__enter__ = acquire)
+                    for (auto const& m : sPyRLockMethods)
+                        if (std::strcmp(m.name, "acquire") == 0)
+                            ns.emplace_back("__enter__", make_builtin(m));
+                    ref const doc{ make_str("This class implements reentrant lock objects.\n\n    A reentrant lock must be released by the thread that acquired it. Once a\n"
+                        "    thread has acquired a reentrant lock, the same thread may acquire it\n    again without blocking; the thread must release it once for each time it\n"
+                        "    has acquired it.\n\n    ") };
+                    ns.emplace_back("__doc__", (retain(doc.get()), doc.get()));
+                    sPyRLockClass = make_class("threading", "_RLock", {}, ns);
+                    for (auto& n : ns)
+                        release(n.second);
+                }
+                if (sPyRLockClass != nullptr)
+                    retain(sPyRLockClass);
+                return sPyRLockClass;
+            }
+
             bool threading_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
                 for (auto const& f : sThreadingFunctions)
@@ -1678,6 +1986,14 @@ namespace neos::python_runtime
                 if (dangling == nullptr)
                     return false;
                 aAttributes.emplace_back("_dangling", dangling);
+                // (_RLock (Python's), also _PyRLock; _CRLock: _thread.RLock (C's))
+                auto const pyrlock = pyrlock_class();
+                if (pyrlock == nullptr)
+                    return false;
+                aAttributes.emplace_back("_RLock", pyrlock);
+                aAttributes.emplace_back("_PyRLock", (retain(pyrlock), pyrlock));
+                static builtin_entry const sCRLock{ "RLock", [](std::vector<object*> const&, object*) -> object* { return make_lock(true); } };
+                aAttributes.emplace_back("_CRLock", make_builtin(sCRLock));
                 {
                     // (the main thread is one of them (CPython's threading makes it when it is imported))
                     ref const main{ main_thread() };
@@ -1745,7 +2061,14 @@ namespace neos::python_runtime
                         gil_acquire();
                         return make_int(state->ident);
                     } },
-                { "interrupt_main", [](std::vector<object*> const&, object*) -> object* { return none(); } },
+                { "interrupt_main", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        long long signal = SIGINT;
+                        if (!parse_arguments("interrupt_main", aArgs, aKwargs, { "signum" }, 0u, 1u, a) || (a[0] != nullptr && !to_index(a[0], signal)))
+                            return nullptr;
+                        return signal_interrupt_main(signal) ? none() : nullptr;
+                    } },
                 { "exit", [](std::vector<object*> const&, object*) -> object* { return error("SystemExit", ""); } },
                 { "stack_size", [](std::vector<object*> const&, object*) -> object* { return make_int(0); } }
             };

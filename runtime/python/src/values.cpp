@@ -469,8 +469,18 @@ namespace neos::python_runtime
             }
         }
 
+        bool native_recursion_enter();  // (objects.cpp)
+        void native_recursion_leave();
+
         object* bound_function_call(object* aFunction, object* aSelf, std::span<object* const> aArgs, object* aKwargs)
         {
+            // (a recursive call: RecursionError beyond the limit (or near the stack's end), as CPython's for Python code (not a crash))
+            if (!native_recursion_enter())
+                return nullptr;
+            struct leave { ~leave() { native_recursion_leave(); } } const left;
+            // (a thread that has waited for the GIL runs (as CPython's eval loop lets it when a Python function begins: a loop of the 
+            // runtime's Python code (e.g. asyncio's run_forever, calling mocks) would otherwise never let it))
+            gil_check();
             auto& f = as_native_function(aFunction);
             ref const owner = ref::borrowed(aFunction);
             auto const& signature = *f.signature;

@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::email__policybase_module
         void make_email__policybase()
         {
             static module_writer const& w = writer("email._policybase");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("email._policybase", "_has_surrogates", import_attribute("email.utils", "_has_surrogates"));
             define("email._policybase", "__all__", py_list({ S<"Policy">(), S<"Compat32">(), S<"compat32">() }));
             define("email._policybase", "_PolicyBase", w.make_class("_PolicyBase", {  }, {
                 { "__init__", w.method("_PolicyBase", "__init__", {  }, [](arguments a) -> py
@@ -351,7 +353,7 @@ namespace neos::python_runtime::detail::email__policybase_module
                         py name = a[1];
                         py value = a[2];
                         py_raise(B<"NotImplementedError">());
-                    })) }, }));
+                    })) }, }, nullptr, Mod<"abc">().attr("ABCMeta")));
 
             define("email._policybase", "Compat32", (G<"email._policybase._extend_docstrings">())(w.make_class("Compat32", { G<"email._policybase.Policy">() }, {
                 { "mangle_from_", boolean(true) },
@@ -365,7 +367,7 @@ namespace neos::python_runtime::detail::email__policybase_module
                             // Assume it is already a header object
                             return value;
                         }
-                        if ((Mod<"email.utils">().attr("_has_surrogates"))(value).truthy())
+                        if ((G<"email._policybase._has_surrogates">())(value).truthy())
                         {
                             return (Mod<"email.header">().attr("Header")).call({ value }, { { "charset", Mod<"email.charset">().attr("UNKNOWN8BIT") }, { "header_name", name } });
                         }
@@ -430,7 +432,7 @@ namespace neos::python_runtime::detail::email__policybase_module
                         parts.method("append", { (S<"%s: ">()) % name });
                         if (isinstance(value, B<"str">()))
                         {
-                            if ((Mod<"email.utils">().attr("_has_surrogates"))(value).truthy())
+                            if ((G<"email._policybase._has_surrogates">())(value).truthy())
                             {
                                 if (sanitize.truthy())
                                 {
@@ -491,7 +493,6 @@ namespace neos::python_runtime::detail::email__policybase_module
                 aAttributes.emplace_back("abc", py{ fn_import("abc") }.release());
                 aAttributes.emplace_back("header", import_attribute("email", "header").release());
                 aAttributes.emplace_back("_charset", import_attribute("email", "charset").release());
-                aAttributes.emplace_back("_has_surrogates", import_attribute("email.utils", "_has_surrogates").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -500,6 +501,14 @@ namespace neos::python_runtime::detail::email__policybase_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("email._policybase", email__policybase_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("email._policybase", email__policybase_module, assigned);
     }
 }

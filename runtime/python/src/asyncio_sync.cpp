@@ -1944,6 +1944,8 @@ namespace neos::python_runtime::detail::asyncio
         void make_streams()
         {
             static module_writer const& w = writer("streams");
+            // (its imports (e.g. "from .log import logger", "import signal"): its globals, which its code reads (unittest.mock.patch can replace them))
+            define("streams", "logger", object_of("log.logger"));
             define("streams", "__all__", py_tuple({ S<"StreamReader">(), S<"StreamWriter">(), S<"StreamReaderProtocol">(), S<"open_connection">(), S<"start_server">() }));
             if ((B<"hasattr">())(Mod<"socket">(), S<"AF_UNIX">()).truthy())
             {
@@ -2069,7 +2071,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.set_attr("_paused", boolean(true));
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r pauses writing">(), self });
+                            (G<"streams.logger">()).method("debug", { S<"%r pauses writing">(), self });
                         }
                         return none();
                     }) },
@@ -2082,7 +2084,7 @@ namespace neos::python_runtime::detail::asyncio
                         self.set_attr("_paused", boolean(false));
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r resumes writing">(), self });
+                            (G<"streams.logger">()).method("debug", { S<"%r resumes writing">(), self });
                         }
                         for (py const& item : iterate{ self.attr("_drain_waiters") })
                         {
@@ -3255,6 +3257,8 @@ namespace neos::python_runtime::detail::asyncio
         void make_subprocess()
         {
             static module_writer const& w = writer("subprocess");
+            // (its imports (e.g. "from .log import logger", "import signal"): its globals, which its code reads (unittest.mock.patch can replace them))
+            define("subprocess", "logger", object_of("log.logger"));
             define("subprocess", "__all__", py_tuple({ S<"create_subprocess_exec">(), S<"create_subprocess_shell">() }));
             define("subprocess", "PIPE", py{ -1 } /* subprocess.PIPE */);
             define("subprocess", "STDOUT", py{ -2 } /* subprocess.STDOUT */);
@@ -3499,7 +3503,7 @@ namespace neos::python_runtime::detail::asyncio
                                 self.attr("stdin").method("write", { input });
                                 if (debug.truthy())
                                 {
-                                    (G<"log.logger">()).method("debug", { S<"%r communicate: feed stdin (%s bytes)">(), self, py{ input.size() } });
+                                    (G<"subprocess.logger">()).method("debug", { S<"%r communicate: feed stdin (%s bytes)">(), self, py{ input.size() } });
                                 }
                             }
                             py_await(self.attr("stdin").method("drain"));
@@ -3514,7 +3518,7 @@ namespace neos::python_runtime::detail::asyncio
                                 // write() and drain() can raise these exceptions.
                                 if (debug.truthy())
                                 {
-                                    (G<"log.logger">()).method("debug", { S<"%r communicate: stdin got %r">(), self, exc });
+                                    (G<"subprocess.logger">()).method("debug", { S<"%r communicate: stdin got %r">(), self, exc });
                                 }
                             }
                             else
@@ -3522,7 +3526,7 @@ namespace neos::python_runtime::detail::asyncio
                         }
                         if (debug.truthy())
                         {
-                            (G<"log.logger">()).method("debug", { S<"%r communicate: close stdin">(), self });
+                            (G<"subprocess.logger">()).method("debug", { S<"%r communicate: close stdin">(), self });
                         }
                         self.attr("stdin").method("close");
                         return none();
@@ -3554,13 +3558,13 @@ namespace neos::python_runtime::detail::asyncio
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
                             name = (fd == (I<1>()) ? S<"stdout">() : S<"stderr">());
-                            (G<"log.logger">()).method("debug", { S<"%r communicate: read %s">(), self, name });
+                            (G<"subprocess.logger">()).method("debug", { S<"%r communicate: read %s">(), self, name });
                         }
                         output = py_await(stream.method("read"));
                         if (self.attr("_loop").method("get_debug").truthy())
                         {
                             name = (fd == (I<1>()) ? S<"stdout">() : S<"stderr">());
-                            (G<"log.logger">()).method("debug", { S<"%r communicate: close %s">(), self, name });
+                            (G<"subprocess.logger">()).method("debug", { S<"%r communicate: close %s">(), self, name });
                         }
                         transport.method("close");
                         return output;

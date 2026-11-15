@@ -160,6 +160,8 @@ namespace neos::python_runtime::detail::wave_module
         void make_wave()
         {
             static module_writer const& w = writer("wave");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("wave", "namedtuple", import_attribute("collections", "namedtuple"));
             define("wave", "__all__", py_list({ S<"open">(), S<"Error">(), S<"Wave_read">(), S<"Wave_write">() }));
             define("wave", "Error", w.make_class("Error", { B<"Exception">() }, {
  }));
@@ -169,7 +171,7 @@ namespace neos::python_runtime::detail::wave_module
             // Derived from uuid.UUID("00000001-0000-0010-8000-00aa00389b71").bytes_le
             define("wave", "KSDATAFORMAT_SUBTYPE_PCM", py{ make_bytes(std::string{ "\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71", 16 }) });
             define("wave", "_array_fmts", py_tuple({ none(), S<"b">(), S<"h">(), none(), S<"i">() }));
-            define("wave", "_wave_params", (Mod<"collections">().attr("namedtuple"))(S<"_wave_params">(), S<"nchannels sampwidth framerate nframes comptype compname">()));
+            define("wave", "_wave_params", (G<"wave.namedtuple">())(S<"_wave_params">(), S<"nchannels sampwidth framerate nframes comptype compname">()));
             define("wave", "_byteswap", w.function("_byteswap", "_byteswap", { py_positional("data"), py_positional("width") }, [](arguments a) -> py
                 {
                     py data = a[0];
@@ -1210,7 +1212,6 @@ namespace neos::python_runtime::detail::wave_module
                 }
                 if (auto const doc = wave_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("namedtuple", import_attribute("collections", "namedtuple").release());
                 aAttributes.emplace_back("builtins", py{ fn_import("builtins") }.release());
                 aAttributes.emplace_back("struct", py{ fn_import("struct") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
@@ -1222,6 +1223,14 @@ namespace neos::python_runtime::detail::wave_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("wave", wave_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("wave", wave_module, assigned);
     }
 }

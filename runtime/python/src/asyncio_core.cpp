@@ -208,14 +208,16 @@ namespace neos::python_runtime::detail::asyncio
 
         py extract_stack(py f, py limit)
         {
-            // (the frames of the program: the runtime's functions have none)
-            if (f.is_none())
+            // (the frames of the program: the runtime's functions have none; a thread that runs only the runtime's code (e.g. an executor's 
+            // worker, whose callbacks make handles) has none at all: none to extract)
+            bool const anyFrames = !f.is_none() || [&]() { auto const frames = capture_frames(); return frames != nullptr && !frames->empty(); }();
+            if (f.is_none() && anyFrames)
                 f = M("sys", "_getframe")();
             if (limit.is_none())
                 limit = object_of("constants.DEBUG_STACK_DEPTH");
             py const traceback{ fn_import("traceback") };
-            py const stack = traceback.attr("StackSummary").attr("extract").call({ traceback.attr("walk_stack")(f) }, { { "limit", limit },
-                { "lookup_lines", boolean(false) } });
+            py const stack = traceback.attr("StackSummary").attr("extract").call({ anyFrames ? traceback.attr("walk_stack")(f) : py_list() }, 
+                { { "limit", limit }, { "lookup_lines", boolean(false) } });
             stack.method("reverse");
             return stack;
         }

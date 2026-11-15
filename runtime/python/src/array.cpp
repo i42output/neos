@@ -504,7 +504,19 @@ namespace neos::python_runtime
                         return -1;
                     }
                     if (aValue != nullptr)
-                        return set_item(*self.descriptor, self.item(static_cast<std::size_t>(i)), aValue) ? 0 : -1;
+                    {
+                        // (the value converted first (its __index__ can change the array), then the index checked again (gh-142555))
+                        char converted[16] = {};
+                        if (!set_item(*self.descriptor, converted, aValue))
+                            return -1;
+                        if (i >= static_cast<long long>(self.size()))
+                        {
+                            error("IndexError", "array assignment index out of range");
+                            return -1;
+                        }
+                        std::memcpy(self.item(static_cast<std::size_t>(i)), converted, self.descriptor->size);
+                        return 0;
+                    }
                     start = i;
                     stop = i + 1;
                     step = 1;
@@ -675,8 +687,8 @@ namespace neos::python_runtime
                 return value;
             }
 
-            // (array._array_reconstructor(arraytype, typecode, mformat_code, items))
-            object* array_reconstructor(std::vector<object*> const& aArgs, object* aKwargs)
+            // (array._array_reconstructor(arraytype, typecode, mformat_code, items): an array (of array.array))
+            object* array_reconstruct(std::vector<object*> const& aArgs, object* aKwargs)
             {
                 std::vector<object*> a;
                 if (!parse_arguments("_array_reconstructor", aArgs, aKwargs, { "arraytype", "typecode", "mformat_code", "items" }, 4u, 4u, a))
@@ -695,15 +707,19 @@ namespace neos::python_runtime
                     if (!sub)
                         return nullptr;
                     if (truth(sub.get()) != 1)
-                        return error("TypeError", repr_text(a[0]) + " is not a subtype of array.array");
+                    {
+                        ref const typeName{ getattr(a[0], "__name__") };
+                        if (!typeName)
+                            return nullptr;
+                        return error("TypeError", text_of(typeName.get()) + " is not a subtype of array.array");
+                    }
                 }
                 auto const typecodeText = str_of_value(a[1]);
                 if (typecodeText == nullptr)
                     return error("TypeError", std::string{ "_array_reconstructor() argument 2 must be a unicode character, not " } + type_name(a[1]));
                 auto const characters = to_code_points(*typecodeText);
                 if (characters.size() != 1u)
-                    return error("TypeError", std::string{ "_array_reconstructor() argument 2 must be a unicode character, not a string of length " } +
-                        std::to_string(characters.size()));
+                    return error("TypeError", std::string{ "_array_reconstructor() argument 2 must be a unicode character, not " } + type_name(a[1]));
                 auto descriptor = descriptor_of(characters[0]);
                 if (descriptor == nullptr)
                     return error("ValueError", "second argument must be a valid type code");
@@ -715,8 +731,13 @@ namespace neos::python_runtime
                 std::string_view items;
                 if (type_name(a[3]) != std::string_view{ "bytes" } || !bytes_like(a[3], items))
                     return error("TypeError", std::string{ "fourth argument should be bytes, not " } + type_name(a[3]));
+                // (no decoding (the fast path): the bytes (frombytes's check))
                 if (mformat == machine_format_of(descriptor->code))
+                {
+                    if (items.size() % descriptor->size != 0u)
+                        return error("ValueError", "bytes length not a multiple of item size");
                     return make_array(descriptor, std::string{ items });
+                }
                 auto const& mf = sMachineFormats[mformat];
                 if (items.size() % mf.size != 0u)
                     return error("ValueError", "string length not a multiple of item size");
@@ -779,6 +800,25 @@ namespace neos::python_runtime
                 return new_array(descriptor, converted.get());
             }
 
+            // (array._array_reconstructor(arraytype, typecode, mformat_code, items): an array of arraytype (make_array: array_new of the type, 
+            // without its __init__))
+            object* array_reconstructor(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                ref result{ array_reconstruct(aArgs, aKwargs) };
+                if (!result)
+                    return nullptr;
+                std::vector<object*> a;
+                ref const arrayType{ array_type_object() };
+                if (!arrayType || !parse_arguments("_array_reconstructor", aArgs, aKwargs, { "arraytype", "typecode", "mformat_code", "items" }, 4u, 4u, a))
+                    return nullptr;
+                if (a[0] == arrayType.get())
+                    return result.release_ownership();
+                ref const make{ getattr(arrayType.get(), "__new__") };
+                if (!make)
+                    return nullptr;
+                return invoke(make.get(), { new_reference(a[0]), make_str(std::string(1u, as_array(result.get()).descriptor->code)), result.release_ownership() });
+            }
+
             // --- methods
 
             char const* const sMethods[] =
@@ -821,6 +861,46 @@ namespace neos::python_runtime
                     return false;
                 aResult = r == 0 ? s : r == 3 ? std::numeric_limits<long long>::min() : std::numeric_limits<long long>::max();
                 return true;
+            }
+
+            // (array.__reduce_ex__(self, value): (type(self), (typecode, list), self.__dict__) below protocol 3 (or of a machine format
+            // that is not known), else (_array_reconstructor, (type(self), typecode, mformat_code, bytes), self.__dict__) (None: no __dict__))
+            object* array_reduce_ex(object* aSelf, object* aProtocol)
+            {
+                auto& self = as_array(builtin_value(aSelf));
+                if (!is_int_like(aProtocol))
+                    return error("TypeError", "__reduce_ex__ argument should be an integer");
+                long long protocol = 0;
+                if (!to_index(aProtocol, protocol))
+                    return nullptr;
+                ref const type{ class_of(aSelf) };
+                if (!type)
+                    return nullptr;
+                ref dict{ is_array(aSelf) ? nullptr : getattr(aSelf, "__dict__") };
+                if (!dict)
+                {
+                    if (!is_array(aSelf))
+                    {
+                        ref const e{ take_exception() };
+                        if (e && !exception_is(e.get(), "AttributeError"))
+                            return (raise_exception(e.get()), nullptr);
+                    }
+                    dict = ref{ new_reference(none()) };
+                }
+                auto const mformat = machine_format_of(self.descriptor->code);
+                auto const code = std::string(1u, self.descriptor->code);
+                if (mformat == UNKNOWN_FORMAT || protocol < 3)
+                {
+                    auto const list = array_list(self);
+                    if (list == nullptr)
+                        return nullptr;
+                    return make_tuple({ new_reference(type.get()), make_tuple({ make_str(code), list }), dict.release_ownership() });
+                }
+                ref const reconstructor{ module_attribute("array", "_array_reconstructor") };
+                if (!reconstructor)
+                    return nullptr;
+                return make_tuple({ new_reference(reconstructor.get()), make_tuple({ new_reference(type.get()), make_str(code), make_int(mformat),
+                    make_bytes(self.data) }), dict.release_ownership() });
             }
 
             object* array_method(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
@@ -994,32 +1074,7 @@ namespace neos::python_runtime
                     return value.release_ownership();
                 }
                 if (name == "__reduce_ex__")
-                {
-                    if (!arguments({ "value" }, 1u))
-                        return nullptr;
-                    if (!is_int_like(a[0]))
-                        return error("TypeError", "__reduce_ex__ argument should be an integer");
-                    long long protocol = 0;
-                    if (!to_index(a[0], protocol))
-                        return nullptr;
-                    ref const arrayType{ array_type_object() };
-                    if (!arrayType)
-                        return nullptr;
-                    auto const mformat = machine_format_of(self.descriptor->code);
-                    auto const code = std::string(1u, self.descriptor->code);
-                    if (mformat == UNKNOWN_FORMAT || protocol < 3)
-                    {
-                        auto const list = array_list(self);
-                        if (list == nullptr)
-                            return nullptr;
-                        return make_tuple({ new_reference(arrayType.get()), make_tuple({ make_str(code), list }), new_reference(none()) });
-                    }
-                    ref const reconstructor{ module_attribute("array", "_array_reconstructor") };
-                    if (!reconstructor)
-                        return nullptr;
-                    return make_tuple({ new_reference(reconstructor.get()), make_tuple({ new_reference(arrayType.get()), make_str(code), make_int(mformat),
-                        make_bytes(self.data) }), new_reference(none()) });
-                }
+                    return arguments({ "value" }, 1u) ? array_reduce_ex(selfObject, a[0]) : nullptr;
                 if (name == "remove")
                 {
                     if (!arguments({ "v" }, 1u))
@@ -1249,7 +1304,46 @@ namespace neos::python_runtime
                     }
                     return get_item(array, self.index++);
                 };
-                type.getattr = [](neos_py_context*, object*, char const*) -> object* { return nullptr; };
+                // (__reduce__: (iter, (array,), index), or (iter, ((),)) when exhausted; __setstate__(index): clamped to the array's size)
+                type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
+                {
+                    // (__reduce_ex__(protocol): object's, which calls the type's own __reduce__)
+                    if (std::strcmp(aName, "__reduce__") == 0 || std::strcmp(aName, "__reduce_ex__") == 0)
+                        return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
+                            {
+                                auto const& items = as<tuple_object>(aArgs)->items;
+                                bool const ex = aData != nullptr;
+                                if (items.size() != (ex ? 2u : 1u))
+                                    return error("TypeError", ex ? "__reduce_ex__() takes exactly one argument (" + std::to_string(items.size() - 1u) + " given)" :
+                                        "array_arrayiterator.__reduce__() takes no arguments (" + std::to_string(items.size() - 1u) + " given)");
+                                auto& self = *reinterpret_cast<array_iterator_object*>(items[0]);
+                                ref const iterFunction{ fn_builtin("iter") };
+                                if (!iterFunction)
+                                    return nullptr;
+                                if (self.array == nullptr)
+                                    return make_tuple({ new_reference(iterFunction.get()), make_tuple({ make_tuple() }) });
+                                return make_tuple({ new_reference(iterFunction.get()), make_tuple({ new_reference(self.array) }), 
+                                    make_int(static_cast<long long>(self.index)) });
+                            }, std::strcmp(aName, "__reduce_ex__") == 0 ? const_cast<char*>("ex") : nullptr, aSelf);
+                    if (std::strcmp(aName, "__setstate__") == 0)
+                        return make_function("__setstate__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                            {
+                                auto const& items = as<tuple_object>(aArgs)->items;
+                                if (items.size() != 2u)
+                                    return error("TypeError", "array_arrayiterator.__setstate__() takes exactly one argument (" + std::to_string(items.size() - 1u) + " given)");
+                                auto& self = *reinterpret_cast<array_iterator_object*>(items[0]);
+                                long long index = 0;
+                                if (!to_index(items[1], index))
+                                    return nullptr;
+                                if (self.array != nullptr)
+                                {
+                                    auto const size = static_cast<long long>(as_array(self.array).size());
+                                    self.index = static_cast<std::size_t>(index < 0 ? 0 : index > size ? size : index);
+                                }
+                                return new_reference(none());
+                            }, nullptr, aSelf);
+                    return nullptr;
+                };
                 return type;
             }
 
@@ -1288,6 +1382,33 @@ namespace neos::python_runtime
 
             int array_instancecheck(neos_py_context*, void*, object* aObject) { return is_array(aObject) ? 1 : 0; }
 
+            // (the value of an instance of a subclass: array_new's (keyword arguments: refused unless the subclass has an __init__ of its 
+            // own, as array_new's check of tp_init))
+            object* array_construct(object* aArgs, object* aKwargs, object* aOwner)
+            {
+                bool const ownInit = aOwner != nullptr && has_special_method(aOwner, "__init__");
+                return array_new(context(), nullptr, aArgs, ownInit ? nullptr : aKwargs);
+            }
+
+            // (array.array's methods that its subclasses' instances find (as CPython's method descriptors): __reduce_ex__ (of the instance: its 
+            // type and __dict__))
+            object* array_type_attribute(char const* aName)
+            {
+                if (std::strcmp(aName, "__reduce_ex__") != 0)
+                    return nullptr;
+                return make_function("__reduce_ex__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                    {
+                        auto const& items = as<tuple_object>(aArgs)->items;
+                        if (items.empty())
+                            return error("TypeError", "unbound method array.__reduce_ex__() needs an argument");
+                        if (!is_array(builtin_value(items[0])))
+                            return error("TypeError", std::string{ "descriptor '__reduce_ex__' for 'array.array' objects doesn't apply to a '" } + type_name(items[0]) + "' object");
+                        if (items.size() != 2u)
+                            return error("TypeError", "array.__reduce_ex__() takes exactly one argument (" + std::to_string(items.size() - 1u) + " given)");
+                        return array_reduce_ex(items[0], items[1]);
+                    }, nullptr);
+            }
+
             bool array_buffer(object* aObject, buffer_info& aResult)
             {
                 auto& self = as_array(aObject);
@@ -1300,12 +1421,24 @@ namespace neos::python_runtime
             bool array_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
                 buffer_providers()[&sArrayType.base] = buffer_provider{ array_buffer, array_exports };
+                native_bases()["array.array"] = native_base_hooks{ array_construct, nullptr, true };
+                register_type_attributes("array.array", array_type_attribute);
                 auto const type = context()->type_new(context(), "array", "array.array", array_new, nullptr, array_instancecheck);
                 aAttributes.emplace_back("array", type);
                 aAttributes.emplace_back("ArrayType", new_reference(type));
                 aAttributes.emplace_back("typecodes", make_str("bBuwhHiIlLqQfd"));
                 static builtin_entry const sReconstructor{ "_array_reconstructor", array_reconstructor };
                 aAttributes.emplace_back("_array_reconstructor", make_builtin(sReconstructor));
+                // (array.array is a MutableSequence (collections.abc.MutableSequence.register(array.array), as array_modexec registers it))
+                if (ref const sequence{ module_attribute("collections.abc", "MutableSequence") })
+                {
+                    ref const registerMethod{ getattr(sequence.get(), "register") };
+                    ref const registered{ registerMethod ? invoke(registerMethod.get(), { new_reference(type) }) : nullptr };
+                    if (!registered)
+                        return false;
+                }
+                else
+                    return false;
                 return true;
             }
 

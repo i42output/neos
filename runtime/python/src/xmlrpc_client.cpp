@@ -161,6 +161,10 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
         void make_xmlrpc_client()
         {
             static module_writer const& w = writer("xmlrpc.client");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("xmlrpc.client", "datetime", import_attribute("datetime", "datetime"));
+            define("xmlrpc.client", "Decimal", import_attribute("decimal", "Decimal"));
+            define("xmlrpc.client", "BytesIO", import_attribute("io", "BytesIO"));
             // 
             // XML-RPC CLIENT LIBRARY
             // $Id$
@@ -371,7 +375,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
             define("xmlrpc.client", "_strftime", w.function("_strftime", "_strftime", { py_positional("value") }, [](arguments a) -> py
                 {
                     py value = a[0];
-                    if (isinstance(value, Mod<"datetime">().attr("datetime")))
+                    if (isinstance(value, G<"xmlrpc.client.datetime">()))
                     {
                         return (G<"xmlrpc.client._iso8601_format">())(value);
                     }
@@ -416,7 +420,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                             s = self.attr("value");
                             o = other.attr("value");
                         }
-                        else if (isinstance(other, Mod<"datetime">().attr("datetime")))
+                        else if (isinstance(other, G<"xmlrpc.client.datetime">()))
                         {
                             s = self.attr("value");
                             o = (G<"xmlrpc.client._iso8601_format">())(other);
@@ -557,7 +561,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
             define("xmlrpc.client", "_datetime_type", w.function("_datetime_type", "_datetime_type", { py_positional("data") }, [](arguments a) -> py
                 {
                     py data = a[0];
-                    return (Mod<"datetime">().attr("datetime")).method("strptime", { data, S<"%Y%m%dT%H:%M:%S">() });
+                    return (G<"xmlrpc.client.datetime">()).method("strptime", { data, S<"%Y%m%dT%H:%M:%S">() });
                 }));
 
             // #
@@ -1792,7 +1796,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                         write(S<"</struct></value>\n">());
                         del_item(self.attr("memo"), i);
                         return none();
-                    })); return t; }(); t.set_item(Mod<"datetime">().attr("datetime"), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
+                    })); return t; }(); t.set_item(G<"xmlrpc.client.datetime">(), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py value = a[1];
@@ -1977,7 +1981,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                         write(S<"</struct></value>\n">());
                         del_item(self.attr("memo"), i);
                         return none();
-                    })); return t; }(); t.set_item(Mod<"datetime">().attr("datetime"), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
+                    })); return t; }(); t.set_item(G<"xmlrpc.client.datetime">(), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py value = a[1];
@@ -2161,7 +2165,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                         write(S<"</struct></value>\n">());
                         del_item(self.attr("memo"), i);
                         return none();
-                    })); return t; }(); t.set_item(Mod<"datetime">().attr("datetime"), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
+                    })); return t; }(); t.set_item(G<"xmlrpc.client.datetime">(), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py value = a[1];
@@ -2362,7 +2366,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                         write(S<"</struct></value>\n">());
                         del_item(self.attr("memo"), i);
                         return none();
-                    })); return t; }(); t.set_item(Mod<"datetime">().attr("datetime"), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
+                    })); return t; }(); t.set_item(G<"xmlrpc.client.datetime">(), w.method("Marshaller", "dump_datetime", { py_positional("value"), py_positional("write") }, [](arguments a) -> py
                     {
                         py self = a[0];
                         py value = a[1];
@@ -3128,7 +3132,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     }) },
@@ -3217,7 +3221,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }() },
@@ -3318,7 +3322,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -3418,7 +3422,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -3540,7 +3544,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -3682,7 +3686,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -3838,7 +3842,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -4007,7 +4011,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -4185,7 +4189,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -4369,7 +4373,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -4559,7 +4563,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -4760,7 +4764,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py self = a[0];
                         py data = a[1];
-                        self.method("append", { (Mod<"decimal">().attr("Decimal"))(data) });
+                        self.method("append", { (G<"xmlrpc.client.Decimal">())(data) });
                         self.set_attr("_value", I<0>());
                         return none();
                     })); return t; }(); t.set_item(S<"string">(), w.method("Unmarshaller", "end_string", { py_positional("data") }, [](arguments a) -> py
@@ -5134,7 +5138,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                     {
                         py_raise(B<"NotImplementedError">());
                     }
-                    f = (Mod<"io">().attr("BytesIO"))();
+                    f = (G<"xmlrpc.client.BytesIO">())();
                     {
                         py const manager22 = (Mod<"gzip">().attr("GzipFile")).call({  }, { { "mode", S<"wb">() }, { "fileobj", f }, { "compresslevel", I<1>() } });
                         py const exit22 = pyclass::special_method(manager22, "__exit__");
@@ -5185,7 +5189,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                         py_raise(B<"NotImplementedError">());
                     }
                     {
-                        py const manager23 = (Mod<"gzip">().attr("GzipFile")).call({  }, { { "mode", S<"rb">() }, { "fileobj", (Mod<"io">().attr("BytesIO"))(data) } });
+                        py const manager23 = (Mod<"gzip">().attr("GzipFile")).call({  }, { { "mode", S<"rb">() }, { "fileobj", (G<"xmlrpc.client.BytesIO">())(data) } });
                         py const exit23 = pyclass::special_method(manager23, "__exit__");
                         py const value23 = pyclass::special_method(manager23, "__enter__")(manager23);
                         gzf = value23;
@@ -5251,7 +5255,7 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                         {
                             py_raise(B<"NotImplementedError">());
                         }
-                        self.set_attr("io", (Mod<"io">().attr("BytesIO"))(response.method("read")));
+                        self.set_attr("io", (G<"xmlrpc.client.BytesIO">())(response.method("read")));
                         (Mod<"gzip">().attr("GzipFile")).method("__init__", { self }, { { "mode", S<"rb">() }, { "fileobj", self.attr("io") } });
                         return none();
                     }) },
@@ -5829,13 +5833,10 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
                 aAttributes.emplace_back("base64", py{ fn_import("base64") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
-                aAttributes.emplace_back("datetime", import_attribute("datetime", "datetime").release());
-                aAttributes.emplace_back("Decimal", import_attribute("decimal", "Decimal").release());
                 aAttributes.emplace_back("http", py{ fn_import("http") }.release());
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
                 aAttributes.emplace_back("expat", import_attribute("xml.parsers", "expat").release());
                 aAttributes.emplace_back("errno", py{ fn_import("errno") }.release());
-                aAttributes.emplace_back("BytesIO", import_attribute("io", "BytesIO").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -5844,6 +5845,14 @@ namespace neos::python_runtime::detail::xmlrpc_client_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("xmlrpc.client", xmlrpc_client_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("xmlrpc.client", xmlrpc_client_module, assigned);
     }
 }

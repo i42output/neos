@@ -733,7 +733,14 @@ namespace neos::python_runtime
                     char flag = 0;
                     if (std::strchr("-_0^#", aFormat[i + 1u]) != nullptr && i + 2u < aFormat.size())
                         flag = aFormat[++i];
+                    // (glibc's width (e.g. %4Y) and E and O modifiers (the C locale's are the directives' own))
+                    std::size_t width = 0u;
+                    while (i + 2u < aFormat.size() && aFormat[i + 1u] >= '0' && aFormat[i + 1u] <= '9' && width < 1024u)
+                        width = width * 10u + static_cast<std::size_t>(aFormat[++i] - '0');
+                    if (i + 2u < aFormat.size() && (aFormat[i + 1u] == 'E' || aFormat[i + 1u] == 'O'))
+                        ++i;
                     char d = aFormat[++i];
+                    auto const mark = result.size();
                     bool colon = false;
                     if (d == ':' && i + 1u < aFormat.size() && aFormat[i + 1u] == 'z')
                     {
@@ -826,7 +833,15 @@ namespace neos::python_runtime
                     case '%': result += '%'; break;
                     default:
                         result += aFormat.substr(start, i + 1u - start);
-                        break;
+                        continue;
+                    }
+                    // (a width: the conversion padded to it (numbers with '0' (the space-padded ones, and '_' and '-', with ' '), text with ' ' ('0': 
+                    // '0')))
+                    if (width > 0u && result.size() - mark < width)
+                    {
+                        bool const numeric = std::strchr("CdegGHIjklmMsSuUVwWyY", d) != nullptr;
+                        char const fill = flag == '_' || flag == '-' ? ' ' : flag == '0' ? '0' : numeric ? (std::strchr("ekl", d) != nullptr ? ' ' : '0') : ' ';
+                        result.insert(mark, width - (result.size() - mark), fill);
                     }
                 }
                 aResult = std::move(result);
@@ -867,10 +882,11 @@ namespace neos::python_runtime
                     if (!digits_at(s, p + 1u, 2u, week))
                         return true;
                     p += 3u;
-                    if (p < s.size() && (extended ? s[p] == '-' : std::isdigit(static_cast<unsigned char>(s[p])) != 0))
+                    // (a day (parse_isoformat_date's: if there is more of the text; what follows it is not checked))
+                    if (p < s.size())
                     {
-                        if (extended)
-                            ++p;
+                        if (extended && s[p++] != '-')
+                            return true;
                         if (!digits_at(s, p, 1u, day))
                             return true;
                         ++p;
@@ -1031,6 +1047,41 @@ namespace neos::python_runtime
                 return aText;
             }
 
+            // (_strptime's GH-70647 warning: a format with a day of month (%d) and no year (%Y, %y or %G) (a DeprecationWarning; false: 
+            // raised (an error)))
+            bool day_without_year(std::string const& aFormat)
+            {
+                bool year = false, dayOfMonth = false;
+                for (std::size_t i = 0u; i < aFormat.size(); ++i)
+                    if (aFormat[i] == '%')
+                    {
+                        // (the directive: after its flags and width (and an O or E modifier))
+                        std::size_t j = i + 1u;
+                        while (j < aFormat.size() && std::strchr("-_0^#", aFormat[j]) != nullptr)
+                            ++j;
+                        while (j < aFormat.size() && aFormat[j] >= '0' && aFormat[j] <= '9')
+                            ++j;
+                        if (j < aFormat.size() && (aFormat[j] == 'O' || aFormat[j] == 'E'))
+                            ++j;
+                        if (j < aFormat.size())
+                        {
+                            year = year || aFormat[j] == 'Y' || aFormat[j] == 'y' || aFormat[j] == 'G';
+                            dayOfMonth = dayOfMonth || aFormat[j] == 'd';
+                        }
+                        i = j;
+                    }
+                if (!dayOfMonth || year)
+                    return true;
+                ref const warn{ module_attribute("warnings", "warn") };
+                if (!warn)
+                    return false;
+                return static_cast<bool>(ref{ invoke(warn.get(), { make_str("Parsing dates involving a day of month without a year specified is ambiguious\n"
+                    "and fails to parse leap day. The default behavior will change in Python 3.15\n"
+                    "to either always raise an exception or to use a different default year (TBD).\n"
+                    "To avoid trouble, add a specific year to the input & format.\n"
+                    "See https://github.com/python/cpython/issues/70647."), exception_class("DeprecationWarning") }) });
+            }
+
             bool strptime_of(std::string const& aText, std::string const& aFormat, strptime_result& aResult)
             {
                 std::optional<long long> year, isoYear, isoWeek, weekday, julian;
@@ -1072,6 +1123,8 @@ namespace neos::python_runtime
                             return false;
                         }
                     }
+                if (!day_without_year(aFormat))
+                    return false;
                 std::size_t p = 0u;
                 auto const mismatch = [&]() -> bool
                 {
@@ -2903,6 +2956,48 @@ namespace neos::python_runtime
                 return from_timestamp(timestamp.get(), aTz, aDatetime);
             }
 
+            // (_find_isoformat_datetime_separator: where a datetime's separator is (its date's formats are distinguished by characters 4 and 
+            // 5; a week date's separator can be its 7th or 8th character); -1: invalid)
+            long long iso_separator(std::string const& s)
+            {
+                auto const len = static_cast<long long>(s.size());
+                auto const digit = [&](long long i) { return i < len && s[static_cast<std::size_t>(i)] >= '0' && s[static_cast<std::size_t>(i)] <= '9'; };
+                if (len == 7)
+                    return 7;
+                if (len > 4 && s[4] == '-')
+                {
+                    // (YYYY-???)
+                    if (len > 5 && s[5] == 'W')
+                    {
+                        // (YYYY-W??)
+                        if (len < 8)
+                            return -1;
+                        if (len > 8 && s[8] == '-')
+                        {
+                            // (YYYY-Www-D (10) or YYYY-Www-HH (8))
+                            if (len == 9)
+                                return -1;
+                            if (len > 10 && digit(10))
+                                return 8;
+                            return 10;
+                        }
+                        return 8;
+                    }
+                    return 10;
+                }
+                if (len > 4 && s[4] == 'W')
+                {
+                    // (YYYYWww (7) or YYYYWwwd (8): to the last of the digits)
+                    long long i = 7;
+                    while (i < len && digit(i))
+                        ++i;
+                    if (i < 9)
+                        return i;
+                    return i % 2 == 0 ? 7 : 8;
+                }
+                return 8;
+            }
+
             object* from_iso_format(object* aText, int aKind)    // (0: date, 1: time, 2: datetime)
             {
                 if (kind_of(aText) != NEOS_PY_STR)
@@ -2921,10 +3016,16 @@ namespace neos::python_runtime
                 }
                 std::size_t length = 0u;
                 int y = 0, m = 0, d = 0;
-                if (!parse_iso_date(s, length, y, m, d))
-                    return nullptr;
-                if (length == 0u || (aKind == 0 && length != s.size()))
+                // (a date: of 7, 8 or 10 characters; a datetime's: up to its separator (parse_isoformat_date's: what follows its fields is not 
+                // checked))
+                long long const separator = aKind == 2 ? iso_separator(s) : static_cast<long long>(s.size());
+                if (separator < 0 || separator > static_cast<long long>(s.size()) || (aKind == 0 && separator != 7 && separator != 8 && separator != 10))
                     return invalid_iso(aText);
+                if (!parse_iso_date(s.substr(0u, static_cast<std::size_t>(separator)), length, y, m, d))
+                    return nullptr;
+                if (length == 0u)
+                    return invalid_iso(aText);
+                length = static_cast<std::size_t>(separator);
                 if (aKind == 2 && length < s.size())
                 {
                     // (a separator (any character), then a time)
@@ -3017,6 +3118,15 @@ namespace neos::python_runtime
                     } }
             };
 
+            // (a DeprecationWarning (PyErr_WarnEx(PyExc_DeprecationWarning, aMessage, 1)): false if it is raised (an error))
+            bool deprecated(char const* aMessage)
+            {
+                ref const warn{ module_attribute("warnings", "warn") };
+                if (!warn)
+                    return false;
+                return static_cast<bool>(ref{ invoke(warn.get(), { make_str(aMessage), exception_class("DeprecationWarning"), make_int(1) }) });
+            }
+
             builtin_entry const sDatetimeClassMethods[] =
             {
                 { "today", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return no_arguments("today", aArgs, aKwargs) ? now(nullptr, true) : nullptr; } },
@@ -3030,6 +3140,9 @@ namespace neos::python_runtime
                 { "utcnow", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         if (!no_arguments("utcnow", aArgs, aKwargs))
+                            return nullptr;
+                        if (!deprecated("datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware "
+                            "objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC)."))
                             return nullptr;
                         ref const aware{ now(none(), true) };
                         ref const u{ utc() };
@@ -3049,6 +3162,9 @@ namespace neos::python_runtime
                     {
                         auto const t = one_argument("utcfromtimestamp", aArgs, aKwargs);
                         if (t == nullptr)
+                            return nullptr;
+                        if (!deprecated("datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use "
+                            "timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC)."))
                             return nullptr;
                         long long seconds = 0;
                         int us = 0;
@@ -3270,6 +3386,65 @@ namespace neos::python_runtime
         object* datetime_class_function(std::string const& aClass, char const* aName)
         {
             return class_attribute(aClass, aName);
+        }
+
+        // (a subclass's (aClass's) attribute of its base aBase (e.g. "datetime.datetime"): a class method (an alternate constructor, e.g. 
+        // fromisoformat) of the subclass: its result an instance of the subclass (cls(fields...), as CPython's); other attributes (min, max, 
+        // resolution): the base's; null (no exception): none)
+        object* datetime_subclass_attribute(object* aClass, std::string const& aBase, char const* aName)
+        {
+            builtin_entry const* entry = nullptr;
+            auto const find = [&](auto const& aMethods)
+            {
+                for (auto const& m : aMethods)
+                    if (std::strcmp(aName, m.name) == 0)
+                        entry = &m;
+            };
+            if (aBase == "datetime.date")
+                find(sDateClassMethods);
+            else if (aBase == "datetime.time")
+                find(sTimeClassMethods);
+            else if (aBase == "datetime.datetime")
+                find(sDatetimeClassMethods);
+            if (entry == nullptr)
+                return class_attribute(aBase, aName);
+            return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
+            {
+                auto const& args = tuple_items(aArgs);
+                auto const cls = args.at(0u);
+                ref const result{ static_cast<builtin_entry const*>(aData)->function(std::vector<object*>{ args.begin() + 1, args.end() }, aKwargs) };
+                if (!result || !(is_date(result.get()) || is_time(result.get()) || is_datetime(result.get())))
+                    return result.get() != nullptr ? new_reference(result.get()) : nullptr;
+                std::vector<char const*> names;
+                if (is_datetime(result.get()))
+                    names = { "year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo" };
+                else if (is_date(result.get()))
+                    names = { "year", "month", "day" };
+                else
+                    names = { "hour", "minute", "second", "microsecond", "tzinfo" };
+                std::vector<object*> fields;
+                for (auto n : names)
+                {
+                    auto const value = getattr(result.get(), n);
+                    if (value == nullptr)
+                    {
+                        for (auto f : fields)
+                            release(f);
+                        return nullptr;
+                    }
+                    fields.push_back(value);
+                }
+                ref const fieldArgs{ make_tuple(std::move(fields)) };
+                ref const keywords{ make_dict() };
+                if (!is_date(result.get()))
+                {
+                    ref const fold{ getattr(result.get(), "fold") };
+                    ref const key{ make_str("fold") };
+                    if (!fold || dict_set(keywords.get(), key.get(), fold.get()) != 0)
+                        return nullptr;
+                }
+                return call(cls, fieldArgs.get(), keywords.get());
+            }, const_cast<builtin_entry*>(entry), aClass);
         }
     }
 }

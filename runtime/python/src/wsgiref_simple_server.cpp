@@ -160,12 +160,17 @@ namespace neos::python_runtime::detail::wsgiref_simple_server_module
         void make_wsgiref_simple_server()
         {
             static module_writer const& w = writer("wsgiref.simple_server");
+            // (its names imported from other modules ("from m import name"): its globals, which its code reads (as CPython's: e.g. unittest.mock.patch replaces them))
+            define("wsgiref.simple_server", "BaseHTTPRequestHandler", import_attribute("http.server", "BaseHTTPRequestHandler"));
+            define("wsgiref.simple_server", "HTTPServer", import_attribute("http.server", "HTTPServer"));
+            define("wsgiref.simple_server", "SimpleHandler", import_attribute("wsgiref.handlers", "SimpleHandler"));
+            define("wsgiref.simple_server", "python_implementation", import_attribute("platform", "python_implementation"));
             define("wsgiref.simple_server", "__version__", S<"0.2">());
             define("wsgiref.simple_server", "__all__", py_list({ S<"WSGIServer">(), S<"WSGIRequestHandler">(), S<"demo_app">(), S<"make_server">() }));
             define("wsgiref.simple_server", "server_version", (S<"WSGIServer/">()) + (G<"wsgiref.simple_server.__version__">()));
-            define("wsgiref.simple_server", "sys_version", ((Mod<"platform">().attr("python_implementation"))() + (S<"/">())) + (Mod<"sys">().attr("version")).method("split")[I<0>()]);
+            define("wsgiref.simple_server", "sys_version", ((G<"wsgiref.simple_server.python_implementation">())() + (S<"/">())) + (Mod<"sys">().attr("version")).method("split")[I<0>()]);
             define("wsgiref.simple_server", "software_version", ((G<"wsgiref.simple_server.server_version">()) + (S<" ">())) + (G<"wsgiref.simple_server.sys_version">()));
-            define("wsgiref.simple_server", "ServerHandler", w.make_class("ServerHandler", { Mod<"wsgiref.handlers">().attr("SimpleHandler") }, {
+            define("wsgiref.simple_server", "ServerHandler", w.make_class("ServerHandler", { G<"wsgiref.simple_server.SimpleHandler">() }, {
                 { "server_software", G<"wsgiref.simple_server.software_version">() },
                 { "close", w.method("ServerHandler", "close", {  }, [](arguments a) -> py
                     {
@@ -183,7 +188,7 @@ namespace neos::python_runtime::detail::wsgiref_simple_server_module
                                 pending1 = py_take_exception();
                             }
                             finally1:
-                            (Mod<"wsgiref.handlers">().attr("SimpleHandler")).method("close", { self });
+                            (G<"wsgiref.simple_server.SimpleHandler">()).method("close", { self });
                             if (pending1)
                                 py_reraise(*pending1);
                             if (flow1 == 1)
@@ -192,12 +197,12 @@ namespace neos::python_runtime::detail::wsgiref_simple_server_module
                         return none();
                     }) }, }));
 
-            define("wsgiref.simple_server", "WSGIServer", w.make_class("WSGIServer", { Mod<"http.server">().attr("HTTPServer") }, {
+            define("wsgiref.simple_server", "WSGIServer", w.make_class("WSGIServer", { G<"wsgiref.simple_server.HTTPServer">() }, {
                 { "application", none() },
                 { "server_bind", w.method("WSGIServer", "server_bind", {  }, [](arguments a) -> py
                     {
                         py self = a[0];
-                        (Mod<"http.server">().attr("HTTPServer")).method("server_bind", { self });
+                        (G<"wsgiref.simple_server.HTTPServer">()).method("server_bind", { self });
                         self.method("setup_environ");
                         return none();
                     }) },
@@ -229,7 +234,7 @@ namespace neos::python_runtime::detail::wsgiref_simple_server_module
                         return none();
                     }) }, }));
 
-            define("wsgiref.simple_server", "WSGIRequestHandler", w.make_class("WSGIRequestHandler", { Mod<"http.server">().attr("BaseHTTPRequestHandler") }, {
+            define("wsgiref.simple_server", "WSGIRequestHandler", w.make_class("WSGIRequestHandler", { G<"wsgiref.simple_server.BaseHTTPRequestHandler">() }, {
                 { "server_version", (S<"WSGIServer/">()) + (G<"wsgiref.simple_server.__version__">()) },
                 { "get_environ", w.method("WSGIRequestHandler", "get_environ", {  }, [](arguments a) -> py
                     {
@@ -379,12 +384,8 @@ namespace neos::python_runtime::detail::wsgiref_simple_server_module
                 }
                 if (auto const doc = wsgiref_simple_server_docs::doc(""))
                     aAttributes.emplace_back("__doc__", py{ doc }.release());
-                aAttributes.emplace_back("BaseHTTPRequestHandler", import_attribute("http.server", "BaseHTTPRequestHandler").release());
-                aAttributes.emplace_back("HTTPServer", import_attribute("http.server", "HTTPServer").release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
-                aAttributes.emplace_back("SimpleHandler", import_attribute("wsgiref.handlers", "SimpleHandler").release());
-                aAttributes.emplace_back("python_implementation", import_attribute("platform", "python_implementation").release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());
                 return py::none();
@@ -393,6 +394,14 @@ namespace neos::python_runtime::detail::wsgiref_simple_server_module
             return result != nullptr;
         }
 
-        inline bool const sModule = register_module("wsgiref.simple_server", wsgiref_simple_server_module);
+        // (an attribute of the module assigned (or deleted: aValue null) from outside its code (e.g. by unittest.mock.patch): the object that 
+        // its functions read (see module_assigner; deleted: they keep the last))
+        void assigned(char const* aModule, char const* aName, object* aValue)
+        {
+            if (aValue != nullptr)
+                define(aModule, aName, py::borrowed(aValue));
+        }
+
+        inline bool const sModule = register_module("wsgiref.simple_server", wsgiref_simple_server_module, assigned);
     }
 }

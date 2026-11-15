@@ -140,6 +140,29 @@ namespace neos::python_runtime
                     auto const& it = *reinterpret_cast<view_iterator_object*>(aSelf);
                     return it.dict == nullptr || it.size != as<dict_object>(it.dict)->items.size() ? 0 : static_cast<long long>(it.size - it.index);
                 };
+                // (pickling: __reduce__ (and __reduce_ex__): (iter, (a list of the items it has yet to give,)), as CPython's dictiter_reduce)
+                type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
+                {
+                    if (std::strcmp(aName, "__reduce__") != 0 && std::strcmp(aName, "__reduce_ex__") != 0)
+                        return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
+                    return make_function(aName, [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                    {
+                        auto const& args = tuple_items(aArgs);
+                        auto const& it = *reinterpret_cast<view_iterator_object*>(args.at(0u));
+                        std::vector<object*> rest;
+                        if (it.dict != nullptr && it.size == as<dict_object>(it.dict)->items.size())
+                            for (auto i = it.index; i < it.size; ++i)
+                                rest.push_back(view_item(*as<dict_object>(it.dict), i, it.which));
+                        ref const iterFunction{ fn_builtin("iter") };
+                        if (!iterFunction)
+                        {
+                            for (auto r : rest)
+                                release(r);
+                            return nullptr;
+                        }
+                        return make_tuple({ new_reference(iterFunction.get()), make_tuple({ make_list(std::move(rest)) }) });
+                    }, nullptr, aSelf);
+                };
                 return type;
             }
 
