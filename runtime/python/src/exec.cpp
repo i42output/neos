@@ -46,9 +46,11 @@
 // bound in it that the module does not bind are found by its names' lookups (python::global_lookup))
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <set>
 #include <string>
@@ -134,22 +136,110 @@ namespace neos::python_runtime
             bool is_code(object* aObject) { return aObject != nullptr && aObject->type == &sCodeType.base; }
             code_object& as_code(object* aObject) { return *reinterpret_cast<code_object*>(aObject); }
 
-            // (the source of compile's, exec's and eval's argument: str, or bytes (UTF-8))
+            // (an encoding's name as CPython's tokenizer normalizes it (get_normal_name): utf-8 and iso-8859-1's spellings)
+            std::string normal_encoding_name(std::string const& aName)
+            {
+                std::string buffer;
+                for (std::size_t i = 0u; i < aName.size() && i < 12u; ++i)
+                    buffer += aName[i] == '_' ? '-' : static_cast<char>(std::tolower(static_cast<unsigned char>(aName[i])));
+                if (buffer == "utf-8" || buffer.starts_with("utf-8-"))
+                    return "utf-8";
+                if (buffer == "latin-1" || buffer == "iso-8859-1" || buffer == "iso-latin-1" || buffer.starts_with("latin-1-") || 
+                    buffer.starts_with("iso-8859-1-") || buffer.starts_with("iso-latin-1-"))
+                    return "iso-8859-1";
+                return aName;
+            }
+
+            // (a line's encoding declaration (PEP 263, as CPython's tokenizer's get_coding_spec and check_coding_spec): false if the line 
+            // is not a comment or blank (no later line is looked at))
+            bool coding_spec(std::string_view aLine, std::optional<std::string>& aSpec)
+            {
+                std::size_t i = 0u;
+                while (i < aLine.size() && (aLine[i] == ' ' || aLine[i] == '\t' || aLine[i] == '\f'))
+                    ++i;
+                if (i < aLine.size() && aLine[i] == '#')
+                {
+                    for (auto j = i; j + 6u <= aLine.size(); ++j)
+                    {
+                        if (aLine.substr(j, 6u) != "coding")
+                            continue;
+                        auto k = j + 6u;
+                        if (k >= aLine.size() || (aLine[k] != ':' && aLine[k] != '='))
+                            continue;
+                        do
+                            ++k;
+                        while (k < aLine.size() && (aLine[k] == ' ' || aLine[k] == '\t'));
+                        auto const begin = k;
+                        while (k < aLine.size() && (std::isalnum(static_cast<unsigned char>(aLine[k])) || aLine[k] == '-' || aLine[k] == '_' || aLine[k] == '.'))
+                            ++k;
+                        if (k > begin)
+                        {
+                            aSpec = normal_encoding_name(std::string{ aLine.substr(begin, k - begin) });
+                            break;
+                        }
+                    }
+                    return true;
+                }
+                return i >= aLine.size() || aLine[i] == '\n' || aLine[i] == '\r';
+            }
+
+            // (a SyntaxError of the exception raised (its str()))
+            bool syntax_error_of_exception()
+            {
+                ref const e{ take_exception() };
+                std::string text;
+                if (!str_of(e.get(), text))
+                    clear_error();
+                error("SyntaxError", text);
+                return false;
+            }
+
+            // (the source of compile's, exec's and eval's argument: str, or bytes (decoded as its encoding declaration or byte order mark say 
+            // (PEP 263), else UTF-8); its newlines are \n (as CPython's tokenizer translates them); no NULs)
             bool source_of(object* aObject, char const* aFunction, std::string& aSource)
             {
                 if (kind_of(aObject) == NEOS_PY_STR)
-                {
                     aSource = as<str_object>(aObject)->value;
-                    return true;
-                }
-                std::string_view data;
-                if (bytes_like(aObject, data))
+                else if (std::string_view data; bytes_like(aObject, data))
                 {
-                    aSource.assign(data);
-                    return true;
+                    if (data.find('\0') != std::string_view::npos)
+                        return (error("SyntaxError", "source code string cannot contain null bytes"), false);
+                    bool const bom = data.starts_with("\xef\xbb\xbf");
+                    if (bom)
+                        data.remove_prefix(3u);
+                    std::optional<std::string> spec;
+                    auto const first = data.find('\n');
+                    auto const line1 = data.substr(0u, first == std::string_view::npos ? data.size() : first + 1u);
+                    if (coding_spec(line1, spec) && !spec && first != std::string_view::npos)
+                    {
+                        auto const second = data.find('\n', first + 1u);
+                        coding_spec(data.substr(first + 1u, second == std::string_view::npos ? std::string_view::npos : second - first), spec);
+                    }
+                    if (bom && spec && *spec != "utf-8")
+                        return (error("SyntaxError", "encoding problem: " + *spec + " with BOM"), false);
+                    auto const encoding = spec ? *spec : std::string{ "utf-8" };
+                    if (!decode(data, encoding, "strict", aSource))
+                        return syntax_error_of_exception();
                 }
-                error("TypeError", std::string{ aFunction } + "() arg 1 must be a string, bytes or code object");
-                return false;
+                else
+                {
+                    error("TypeError", std::string{ aFunction } + "() arg 1 must be a string, bytes or code object");
+                    return false;
+                }
+                if (aSource.find('\0') != std::string::npos)
+                    return (error("SyntaxError", "source code string cannot contain null bytes"), false);
+                if (aSource.find('\r') != std::string::npos)
+                {
+                    std::string translated;
+                    translated.reserve(aSource.size());
+                    for (std::size_t i = 0u; i < aSource.size(); ++i)
+                        if (aSource[i] != '\r')
+                            translated += aSource[i];
+                        else if (i + 1u >= aSource.size() || aSource[i + 1u] != '\n')
+                            translated += '\n';
+                    aSource = std::move(translated);
+                }
+                return true;
             }
 
             // (a compile error of a source: SyntaxError (or IndentationError, TabError) with its location (the compiler's diagnostic: 

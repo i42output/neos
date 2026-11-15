@@ -63,6 +63,7 @@
 #include <neos/language/unicode_names.hpp>
 #include "compiler.hpp"
 #include "tokens.hpp"
+#include "../../../runtime/python/src/codec_tables.hpp"   // (the single-byte codecs' tables: source encodings (PEP 263))
 
 namespace neos::compilers::python
 {
@@ -2459,6 +2460,16 @@ namespace neos::compilers::python
         }
         // the functions' docstrings (a string literal that is the first statement of a def's body)
         {
+            // (a generator's, coroutine's or async generator's: its body function's (the rewrite moved its body, the docstring first, there))
+            std::map<std::string, std::string> generatorBodies;
+            auto const body_of = [](std::string_view aLine, std::size_t aAfter) -> std::string
+            {
+                auto const start = aLine.find_first_not_of(" \t", aAfter);
+                auto end = start;
+                while (end < aLine.size() && name_character(aLine[end]))
+                    ++end;
+                return start == std::string_view::npos ? std::string{} : std::string{ aLine.substr(start, end - start) };
+            };
             std::size_t lineStart = 0u;
             while (lineStart < text.size())
             {
@@ -2491,7 +2502,10 @@ namespace neos::compilers::python
                         for (auto const& [call, flavour] : { std::pair{ "return __generator(", 'G' }, std::pair{ "return __coroutine(", 'C' },
                             std::pair{ "return __async_generator(", 'A' } })
                             if (auto const at = line.find(call); at != std::string_view::npos && (line.substr(0u, at).ends_with(": ") || line.substr(0u, at).ends_with("; ")))
+                            {
                                 iPyFlavours[name] = flavour;
+                                generatorBodies[name] = body_of(line, at + std::string_view{ call }.size());
+                            }
                         auto const bodyIndent = text.find_first_not_of(" \t", next) - next;
                         for (auto l = next; l < text.size();)
                         {
@@ -2506,7 +2520,10 @@ namespace neos::compilers::python
                                     for (auto const& [call, flavour] : { std::pair{ "return __generator(", 'G' }, std::pair{ "return __coroutine(", 'C' }, 
                                         std::pair{ "return __async_generator(", 'A' } })
                                         if (auto const at = bodyLine.find(call); at != std::string_view::npos && (at == indent || bodyLine.substr(0u, at).ends_with("; ")))
+                                        {
                                             iPyFlavours[name] = flavour;
+                                            generatorBodies[name] = body_of(bodyLine, at + std::string_view{ call }.size());
+                                        }
                             }
                             l = e == std::string::npos ? text.size() : e + 1u;
                         }
@@ -2584,6 +2601,9 @@ namespace neos::compilers::python
                 }
                 lineStart = lineEnd + 1u;
             }
+            for (auto const& [function, body] : generatorBodies)
+                if (auto const doc = iPyDocstrings.find(body); doc != iPyDocstrings.end() && !iPyDocstrings.contains(function))
+                    iPyDocstrings[function] = doc->second;
         }
         // (the names of the functions that the rewrites made, as their closures, generators, coroutines and classes name them: their 
         // frames' names)
@@ -7762,6 +7782,8 @@ namespace neos::compilers::python
         iPyModules.clear();
         iPySyntax.clear();
         iPyPreparsed.clear();
+        iPyDecoded.clear();
+        iPyEncodingErrors.clear();
         iPyScriptDirectory = std::nullopt;
         iPyIntrospective.clear();
         // (source that the program compiles while it runs is compiled on its own: the program's own flag stands)
@@ -8399,6 +8421,143 @@ namespace neos::compilers::python
         return aName.empty() ? package : package + "." + aName;
     }
 
+    namespace
+    {
+        // --- a source's encoding (PEP 263, as CPython's tokenizer): a UTF-8 byte order mark, or an encoding declaration in a comment of its
+        // first or second line; its text decoded to UTF-8 (UTF-8, latin-1 and the single-byte codecs of CPython's encodings: the others 
+        // are not decoded)
+
+        // (a declaration's encoding as CPython's tokenizer names it (get_normal_name): utf-8's and latin-1's spellings)
+        std::string normal_encoding_name(std::string const& aName)
+        {
+            std::string normal;
+            for (std::size_t i = 0u; i < aName.size() && i < 12u; ++i)
+                normal += aName[i] == '_' ? '-' : static_cast<char>(std::tolower(static_cast<unsigned char>(aName[i])));
+            if (normal == "utf-8" || normal.starts_with("utf-8-"))
+                return "utf-8";
+            if (normal == "latin-1" || normal == "iso-8859-1" || normal == "iso-latin-1" || normal.starts_with("latin-1-") || 
+                normal.starts_with("iso-8859-1-") || normal.starts_with("iso-latin-1-"))
+                return "iso-8859-1";
+            return aName;
+        }
+
+        // (the codec module of an encoding's name (encodings.normalize_encoding and its aliases, as the runtime's find_codec))
+        std::string source_codec(std::string const& aName)
+        {
+            std::string codec;
+            bool punct = false;
+            for (auto c : aName)
+            {
+                auto const u = static_cast<unsigned char>(c);
+                if (u < 0x80u && (std::isalnum(u) || c == '.'))
+                {
+                    if (punct && !codec.empty())
+                        codec += '_';
+                    codec += static_cast<char>(std::tolower(u));
+                    punct = false;
+                }
+                else
+                    punct = true;
+            }
+            auto dotted = codec;
+            std::replace(dotted.begin(), dotted.end(), '.', '_');
+            for (auto const& name : { codec, dotted })
+                for (auto const& a : neos::python_runtime::detail::codec_tables::sAliases)
+                    if (name == a.alias)
+                        return a.module;
+            return codec;
+        }
+
+        // (a line's declaration (get_coding_spec and check_coding_spec): false if the line is not a comment or blank)
+        bool source_coding_spec(std::string_view aLine, std::optional<std::string>& aSpec)
+        {
+            std::size_t i = 0u;
+            while (i < aLine.size() && (aLine[i] == ' ' || aLine[i] == '\t' || aLine[i] == '\f'))
+                ++i;
+            if (i < aLine.size() && aLine[i] == '#')
+            {
+                for (auto j = i; j + 6u <= aLine.size(); ++j)
+                {
+                    if (aLine.substr(j, 6u) != "coding")
+                        continue;
+                    auto k = j + 6u;
+                    if (k >= aLine.size() || (aLine[k] != ':' && aLine[k] != '='))
+                        continue;
+                    do
+                        ++k;
+                    while (k < aLine.size() && (aLine[k] == ' ' || aLine[k] == '\t'));
+                    auto const begin = k;
+                    while (k < aLine.size() && (std::isalnum(static_cast<unsigned char>(aLine[k])) || aLine[k] == '-' || aLine[k] == '_' || aLine[k] == '.'))
+                        ++k;
+                    if (k > begin)
+                    {
+                        aSpec = std::string{ aLine.substr(begin, k - begin) };
+                        break;
+                    }
+                }
+                return true;
+            }
+            return i >= aLine.size() || aLine[i] == '\n' || aLine[i] == '\r';
+        }
+
+        // (the source decoded, if its encoding is not UTF-8 or it has a byte order mark; aError: an encoding that is not one, or not UTF-8 with 
+        // a byte order mark (CPython's SyntaxError))
+        std::optional<std::string> decoded_source(std::string_view aSource, std::string& aError)
+        {
+            bool const bom = aSource.starts_with("\xef\xbb\xbf");
+            auto data = bom ? aSource.substr(3u) : aSource;
+            std::optional<std::string> spec;
+            auto const first = data.find('\n');
+            auto const line1 = data.substr(0u, first == std::string_view::npos ? data.size() : first + 1u);
+            if (source_coding_spec(line1, spec) && !spec && first != std::string_view::npos)
+            {
+                auto const second = data.find('\n', first + 1u);
+                source_coding_spec(data.substr(first + 1u, second == std::string_view::npos ? std::string_view::npos : second - first), spec);
+            }
+            auto const normal = spec ? normal_encoding_name(*spec) : std::string{ "utf-8" };
+            auto const codec = source_codec(normal);
+            if (spec)
+            {
+                if (bom && normal != "utf-8")
+                {
+                    aError = "encoding problem: " + normal + " with BOM";
+                    return std::nullopt;
+                }
+                bool known = false;
+                for (auto const& m : neos::python_runtime::detail::codec_tables::sModules)
+                    if (codec == m.module)
+                        known = m.text;
+                if (!known && codec != "utf_8" && codec != "latin_1")
+                {
+                    aError = "unknown encoding: " + normal;
+                    return std::nullopt;
+                }
+            }
+            bool const ascii = std::all_of(data.begin(), data.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80u; });
+            if (codec == "utf_8" || ascii || bom)
+                return bom ? std::optional<std::string>{ std::string{ data } } : std::nullopt;
+            std::string result;
+            result.reserve(data.size() * 2u);
+            if (codec == "latin_1")
+            {
+                for (auto c : data)
+                    append_utf8(result, static_cast<std::uint32_t>(static_cast<unsigned char>(c)));
+                return result;
+            }
+            for (auto const& t : neos::python_runtime::detail::codec_tables::sCharmaps)
+                if (codec == t.module)
+                {
+                    for (auto c : data)
+                    {
+                        auto const u = t.table[static_cast<unsigned char>(c)];
+                        append_utf8(result, u == 0xFFFEu ? 0xFFFDu : static_cast<std::uint32_t>(u));
+                    }
+                    return result;
+                }
+            return std::nullopt;
+        }
+    }
+
     std::optional<std::size_t> compiler::py_module_of(std::string const& aName)
     {
         if (aName.empty())
@@ -8485,6 +8644,11 @@ namespace neos::compilers::python
             module.path = std::filesystem::absolute(path, ec).lexically_normal().generic_string();
             module.package = package;
             module.source = contents.str();
+            std::string encodingError;
+            if (auto const decoded = decoded_source(module.source, encodingError))
+                module.source = *decoded;
+            else if (!encodingError.empty())
+                iPyEncodingErrors[module.source] = encodingError;
             if (!module.source.empty() && module.source.back() != '\n')
                 module.source += '\n';
             module.number = iPyModules.size() + 1u;
@@ -8596,6 +8760,23 @@ namespace neos::compilers::python
 
     void compiler::preparse(i_source_fragment& aFragment)
     {
+        // (the main script's encoding (PEP 263): its text as UTF-8 (a module's source is decoded when it is read (py_module_of); the source 
+        // that the program compiles while it runs is text))
+        if (std::string const source = aFragment.source().to_std_string(); !aFragment.imported() && !py_exec_mode() && !iPyDecoded.contains(source) && 
+            !iPyPreparsed.contains(source))
+        {
+            std::string encodingError;
+            if (auto const decoded = decoded_source(source, encodingError))
+            {
+                iPyDecoded.insert(*decoded);
+                aFragment.set_source(neolib::string_view{ *decoded });
+            }
+            else if (!encodingError.empty())
+                iPyEncodingErrors[source] = encodingError;
+        }
+        // (an encoding that is not one: CPython's SyntaxError)
+        if (auto const e = iPyEncodingErrors.find(aFragment.source().to_std_string()); e != iPyEncodingErrors.end())
+            generator().throw_error(aFragment.source().begin(), neolib::string{ e->second }, "syntax error"_s);
         if (!aFragment.imported() && !iPyScriptDirectory)
         {
             auto const& directory = aFragment.source_directory_path();

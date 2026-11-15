@@ -97,6 +97,33 @@ namespace neos::concepts::ada
                 return neolib::string_view{ "language.function.return" };
             case construct::Exit:
                 return neolib::string_view{ "language.statement.break" };
+            // (a unit's with clauses, and use clauses: what they name is made visible)
+            case construct::With:
+            case construct::Use:
+            case construct::UseType:
+                return neolib::string_view{ "language.import" };
+            // (declarations, other than of subprograms and packages (above) and of objects (a local, above: an outline has a statement 
+            // that is one as a declaration))
+            case construct::Type:
+            case construct::TypeIncomplete:
+            case construct::TypePrivate:
+            case construct::TypePrivateExtension:
+            case construct::Subtype:
+            case construct::NumberDeclaration:
+            case construct::Exception:
+            case construct::RenamingObject:
+            case construct::RenamingException:
+            case construct::RenamingPackage:
+            case construct::RenamingSubprogram:
+            case construct::RenamingGeneric:
+            case construct::Instantiation:
+            case construct::Generic:
+            case construct::TaskType:
+            case construct::TaskSingle:
+            case construct::ProtectedType:
+            case construct::ProtectedSingle:
+            case construct::Stub:
+                return neolib::string_view{ "language.declaration" };
             case construct::NullStatement:
             case construct::Assignment:
             case construct::Call:

@@ -867,6 +867,7 @@ namespace neos::python_runtime::detail::email_utils_module
                 aAttributes.emplace_back("re", py{ fn_import("re") }.release());
                 aAttributes.emplace_back("time", py{ fn_import("time") }.release());
                 aAttributes.emplace_back("datetime", py{ fn_import("datetime") }.release());
+                py{ fn_import("urllib.parse") };    // (import urllib.parse: the submodule too)
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
                 aAttributes.emplace_back("mktime_tz", import_attribute("email._parseaddr", "mktime_tz").release());
                 aAttributes.emplace_back("parsedate", import_attribute("email._parseaddr", "parsedate").release());

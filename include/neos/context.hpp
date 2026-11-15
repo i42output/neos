@@ -90,7 +90,9 @@ namespace neos
             Return,
             Statement,
             Alternative,    ///< (of the branch that it is in: e.g. an else, an elif, an except)
-            Jump            ///< (a break, a continue or a throw (a return is Return))
+            Jump,           ///< (a break, a continue or a throw (a return is Return))
+            Declaration,    ///< (of a type, an object or another entity (not a function or a class, which have kinds of their own))
+            Import          ///< (what makes another module's declarations available: e.g. an import, or Ada's with and use clauses)
         };
         struct outline_node
         {
@@ -169,6 +171,9 @@ namespace neos
         // (the schema aSchemaPath): the syntax highlighting configuration's (highlighting.json: the one beside the schema, overridden by the 
         // user's (~/.neos/highlighting.json; on Windows %LOCALAPPDATA%\neos\highlighting.json)); none: not configured
         static std::vector<std::string> highlight_colours(std::string const& aSchemaPath, std::string const& aTheme);
+        // the colours ("#RRGGBB") of an outline's kinds of node (by kind; empty: none) in a theme for a language (the schema aSchemaPath): 
+        // those of the theme's "outline" in the syntax highlighting configuration (see highlight_colours); none: not configured
+        static std::vector<std::string> outline_colours(std::string const& aSchemaPath, std::string const& aTheme);
         // the outline of a source in the language of the schema aSchemaPath (as it is parsed, not as the language's own pass over it (if 
         // any) rewrites it): its nodes, each after the node that it is in (its children in the order of the source); empty if the source 
         // does not parse

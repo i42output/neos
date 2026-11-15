@@ -894,6 +894,7 @@ namespace neos::python_runtime::detail::mimetypes_module
                 aAttributes.emplace_back("os", py{ fn_import("os") }.release());
                 aAttributes.emplace_back("sys", py{ fn_import("sys") }.release());
                 aAttributes.emplace_back("posixpath", py{ fn_import("posixpath") }.release());
+                py{ fn_import("urllib.parse") };    // (import urllib.parse: the submodule too)
                 aAttributes.emplace_back("urllib", py{ fn_import("urllib") }.release());
                 for (auto const& [name, value] : s.attributes)
                     aAttributes.emplace_back(name, value.reference());

@@ -127,10 +127,6 @@ namespace neos::python_runtime
                     { return exactly("is_", aArgs, aKwargs, 2u) ? make_bool(aArgs[0] == aArgs[1]) : nullptr; } },
                 { "is_not", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     { return exactly("is_not", aArgs, aKwargs, 2u) ? make_bool(aArgs[0] != aArgs[1]) : nullptr; } },
-                { "is_none", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
-                    { return exactly("is_none", aArgs, aKwargs, 1u) ? make_bool(kind_of(aArgs[0]) == NEOS_PY_NONE) : nullptr; } },
-                { "is_not_none", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
-                    { return exactly("is_not_none", aArgs, aKwargs, 1u) ? make_bool(kind_of(aArgs[0]) != NEOS_PY_NONE) : nullptr; } },
                 { "contains", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         if (!exactly("contains", aArgs, aKwargs, 2u))
@@ -163,27 +159,21 @@ namespace neos::python_runtime
                     {
                         if (!exactly("indexOf", aArgs, aKwargs, 2u))
                             return nullptr;
-                        std::vector<object*> items;
-                        if (!collect(aArgs[0], items))
+                        // (CPython's PySequence_Index: iterating until the match (an iterator is left at the position after it))
+                        ref const it{ iter(aArgs[0]) };
+                        if (!it)
                             return nullptr;
-                        long long index = -1;
-                        bool ok = true;
-                        for (std::size_t i = 0u; i < items.size(); ++i)
+                        for (long long index = 0;; ++index)
                         {
-                            if (ok && index < 0)
-                            {
-                                auto const e = equal(items[i], aArgs[1]);
-                                ok = e >= 0;
-                                if (e > 0)
-                                    index = static_cast<long long>(i);
-                            }
-                            release(items[i]);
+                            ref const item{ next(it.get()) };
+                            if (!item)
+                                return failed() ? nullptr : error("ValueError", "sequence.index(x): x not in sequence");
+                            auto const e = equal(item.get(), aArgs[1]);
+                            if (e < 0)
+                                return nullptr;
+                            if (e > 0)
+                                return make_int(index);
                         }
-                        if (!ok)
-                            return nullptr;
-                        if (index < 0)
-                            return error("ValueError", "sequence.index(x): x not in sequence");
-                        return make_int(index);
                     } },
                 { "getitem", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     { return exactly("getitem", aArgs, aKwargs, 2u) ? getitem(aArgs[0], aArgs[1]) : nullptr; } },
@@ -219,17 +209,11 @@ namespace neos::python_runtime
                             return error("TypeError", "length_hint expected at most 2 arguments");
                         // (CPython's PyObject_LengthHint: its len() (unless that is a TypeError), else its __length_hint__() (unless it has none or 
                         // that is NotImplemented), else the default)
-                        auto const fallback = [&]() -> object*
-                        {
-                            if (aArgs.size() == 2u)
-                            {
-                                long long d = 0;
-                                if (!to_index(aArgs[1], d))
-                                    return error("TypeError", std::string{ "'" } + type_name(aArgs[1]) + "' object cannot be interpreted as an integer");
-                                return make_int(d);
-                            }
-                            return make_int(0);
-                        };
+                        // (the default: a Py_ssize_t argument (converted before anything else, as CPython's argument clinic's))
+                        long long d = 0;
+                        if (aArgs.size() == 2u && !to_index(aArgs[1], d))
+                            return nullptr;
+                        auto const fallback = [d]() -> object* { return make_int(d); };
                         auto const n = length(aArgs[0]);
                         if (n >= 0)
                             return make_int(n);
@@ -245,7 +229,15 @@ namespace neos::python_runtime
                         ref const empty{ make_tuple() };
                         ref const result{ call(hint.get(), empty.get(), nullptr) };
                         if (!result)
+                        {
+                            // (a TypeError: the default)
+                            ref const exception{ take_exception() };
+                            if (exception && exception_is(exception.get(), "TypeError"))
+                                return fallback();
+                            if (exception)
+                                reraise_exception(exception.get());
                             return nullptr;
+                        }
                         if (result.get() == not_implemented())
                             return fallback();
                         if (kind_of(result.get()) != NEOS_PY_INT && kind_of(result.get()) != NEOS_PY_BOOL)
@@ -284,6 +276,32 @@ namespace neos::python_runtime
             neos_py_type sAttrGetterType = make_getter_type(1);
             neos_py_type sMethodCallerType = make_getter_type(2);
             char const* const sGetterNames[] = { "itemgetter", "attrgetter", "methodcaller" };
+            // (their docstrings and text signatures (CPython's Modules/_operator.c: itemgetter_doc, attrgetter_doc and methodcaller_doc))
+            char const* const sGetterSignatures[] = { "(item, /, *items)", "(attr, /, *attrs)", "(name, /, *args, **kwargs)" };
+            char const* const sGetterDocs[] = {
+                "Return a callable object that fetches the given item(s) from its operand.\n"
+                "After f = itemgetter(2), the call f(r) returns r[2].\n"
+                "After g = itemgetter(2, 5, 3), the call g(r) returns (r[2], r[5], r[3])",
+                "Return a callable object that fetches the given attribute(s) from its operand.\n"
+                "After f = attrgetter('name'), the call f(r) returns r.name.\n"
+                "After g = attrgetter('name', 'date'), the call g(r) returns (r.name, r.date).\n"
+                "After h = attrgetter('name.first', 'name.last'), the call h(r) returns\n"
+                "(r.name.first, r.name.last).",
+                "Return a callable object that calls the given method on its operand.\n"
+                "After f = methodcaller('name'), the call f(r) returns r.name().\n"
+                "After g = methodcaller('name', 'date', foo=1), the call g(r) returns\n"
+                "r.name('date', foo=1)." };
+
+            // (the type's __doc__ and __text_signature__ (e.g. operator.attrgetter.__text_signature__: "(attr, /, *attrs)"))
+            template <int Kind>
+            object* getter_type_attribute(char const* aName)
+            {
+                if (std::strcmp(aName, "__doc__") == 0)
+                    return make_str(sGetterDocs[Kind]);
+                if (std::strcmp(aName, "__text_signature__") == 0)
+                    return make_str(sGetterSignatures[Kind]);
+                return nullptr;
+            }
 
             // (a dotted attribute name: e.g. "a.b")
             object* dotted_getattr(object* aObject, std::string const& aName)
@@ -403,6 +421,11 @@ namespace neos::python_runtime
                                 items.push_back(borrowed(i));
                             return make_tuple({ borrowed(cls.get()), make_tuple(std::move(items)) });
                         } };
+                    // (an instance's __doc__: its type's; its __text_signature__: its call's (CPython's: "(obj, /)"))
+                    if (std::strcmp(aName, "__doc__") == 0)
+                        return make_str(sGetterDocs[reinterpret_cast<getter_object*>(aSelf)->kind]);
+                    if (std::strcmp(aName, "__text_signature__") == 0)
+                        return make_str("(obj, /)");
                     return reduce_method(aSelf, aName, sReduce);
                 };
                 return type;
@@ -438,15 +461,27 @@ namespace neos::python_runtime
 
             bool operator_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
+                static bool const sRegistered = []()
+                {
+                    register_type_attributes("operator.itemgetter", getter_type_attribute<0>);
+                    register_type_attributes("operator.attrgetter", getter_type_attribute<1>);
+                    register_type_attributes("operator.methodcaller", getter_type_attribute<2>);
+                    return true;
+                }();
+                (void)sRegistered;
                 for (auto const& o : sOperators)
                 {
-                    aAttributes.emplace_back(o.name, make_function(o.name, call_operator, const_cast<operator_entry*>(&o)));
+                    // (its dunder name (e.g. __add__): the same function (Lib/operator.py's __add__ = add))
+                    auto const function = make_function(o.name, call_operator, const_cast<operator_entry*>(&o));
+                    aAttributes.emplace_back(o.name, function);
                     aAttributes.emplace_back(std::string{ "__" } + (o.name[std::strlen(o.name) - 1u] == '_' ? std::string{ o.name, std::strlen(o.name) - 1u } :
-                        std::string{ o.name }) + "__", make_function(o.name, call_operator, const_cast<operator_entry*>(&o)));
+                        std::string{ o.name }) + "__", new_reference(function));
                 }
                 for (auto const& f : sOperatorFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
                 set_functions_module(aAttributes, "_operator");
+                // (Lib/operator.py's __all__)
+                aAttributes.emplace_back("__all__", make_list({ make_str("abs"), make_str("add"), make_str("and_"), make_str("attrgetter"), make_str("call"), make_str("concat"), make_str("contains"), make_str("countOf"), make_str("delitem"), make_str("eq"), make_str("floordiv"), make_str("ge"), make_str("getitem"), make_str("gt"), make_str("iadd"), make_str("iand"), make_str("iconcat"), make_str("ifloordiv"), make_str("ilshift"), make_str("imatmul"), make_str("imod"), make_str("imul"), make_str("index"), make_str("indexOf"), make_str("inv"), make_str("invert"), make_str("ior"), make_str("ipow"), make_str("irshift"), make_str("is_"), make_str("is_not"), make_str("isub"), make_str("itemgetter"), make_str("itruediv"), make_str("ixor"), make_str("le"), make_str("length_hint"), make_str("lshift"), make_str("lt"), make_str("matmul"), make_str("methodcaller"), make_str("mod"), make_str("mul"), make_str("ne"), make_str("neg"), make_str("not_"), make_str("or_"), make_str("pos"), make_str("pow"), make_str("rshift"), make_str("setitem"), make_str("sub"), make_str("truediv"), make_str("truth"), make_str("xor") }));
                 for (std::uintptr_t i = 0u; i < 3u; ++i)
                     aAttributes.emplace_back(sGetterNames[i], context()->type_new(context(), sGetterNames[i], (std::string{ "operator." } + sGetterNames[i]).c_str(),
                         new_getter, reinterpret_cast<void*>(i), getter_instancecheck));

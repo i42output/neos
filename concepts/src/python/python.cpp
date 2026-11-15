@@ -334,6 +334,8 @@ namespace neos::concepts::python
         template <> struct python_construct_generic<construct::Break> { static constexpr auto Name = "language.statement.break"; };
         template <> struct python_construct_generic<construct::Continue> { static constexpr auto Name = "language.statement.continue"; };
         template <> struct python_construct_generic<construct::Raise> { static constexpr auto Name = "language.statement.throw"; };
+        template <> struct python_construct_generic<construct::Import> { static constexpr auto Name = "language.import"; };
+        template <> struct python_construct_generic<construct::ImportFrom> { static constexpr auto Name = "language.import"; };
         template <> struct python_construct_generic<construct::Target> { static constexpr auto Name = "language.function.local"; };
         template <> struct python_construct_generic<construct::TargetGroup> { static constexpr auto Name = "language.function.local"; };
         template <> struct python_construct_generic<construct::ForTargets> { static constexpr auto Name = "language.function.local"; };

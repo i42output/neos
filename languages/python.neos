@@ -155,7 +155,7 @@
 
     NL $ python.indentation ::= { [ S ] , [ comment ] , newline } + , [ S ] ;
     comment $ language.comment ::= "#" , { ! U+000A .. U+000A } ;
-    S ::= { U+0020 | U+0009 | ( '\\' , newline ) } + ;
+    S ::= { U+0020 | U+0009 | U+000C | ( '\\' , newline ) } + ;
     newline ::= ( U+000D , U+000A ) | U+000A ;
 
     ellipsis ::= "..." ;

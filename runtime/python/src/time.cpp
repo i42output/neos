@@ -43,12 +43,18 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <string>
 #include <thread>
 #include <vector>
 #include "objects.hpp"
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <time.h>
+#endif
 
 namespace neos::python_runtime
 {
@@ -483,6 +489,118 @@ namespace neos::python_runtime
                 }
                 return ok ? none() : nullptr;
             }
+
+            // (clock_gettime, clock_gettime_ns, clock_getres, clock_settime, clock_settime_ns and pthread_getcpuclockid (POSIX, as 
+            // Modules/timemodule.c's), and the clocks' constants)
+            bool clock_id_of(char const* aFunction, std::vector<object*> const& aArgs, object* aKwargs, std::size_t aCount, std::vector<object*>& aResult, 
+                clockid_t& aClock)
+            {
+                if (!parse_arguments(aFunction, aArgs, aKwargs, aCount == 1u ? std::vector<char const*>{ "clk_id" } : std::vector<char const*>{ "clk_id", "time" }, 
+                    aCount, aCount, aResult))
+                    return false;
+                long long id = 0;
+                if (!to_index(aResult[0], id))
+                    return false;
+                aClock = static_cast<clockid_t>(id);
+                return true;
+            }
+
+            object* clock_error()
+            {
+                ref const e{ make_exception("OSError", { make_int(errno), make_str(std::strerror(errno)) }) };
+                if (e)
+                    raise_exception(e.get());
+                return nullptr;
+            }
+
+            builtin_entry const sClockFunctions[] =
+            {
+                { "clock_gettime", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        clockid_t clock{};
+                        if (!clock_id_of("clock_gettime", aArgs, aKwargs, 1u, a, clock))
+                            return nullptr;
+                        timespec t{};
+                        if (::clock_gettime(clock, &t) != 0)
+                            return clock_error();
+                        return make_float(static_cast<double>(t.tv_sec) + static_cast<double>(t.tv_nsec) * 1e-9);
+                    } },
+                { "clock_gettime_ns", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        clockid_t clock{};
+                        if (!clock_id_of("clock_gettime_ns", aArgs, aKwargs, 1u, a, clock))
+                            return nullptr;
+                        timespec t{};
+                        if (::clock_gettime(clock, &t) != 0)
+                            return clock_error();
+                        return make_int(static_cast<long long>(t.tv_sec) * 1000000000ll + static_cast<long long>(t.tv_nsec));
+                    } },
+                { "clock_getres", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        clockid_t clock{};
+                        if (!clock_id_of("clock_getres", aArgs, aKwargs, 1u, a, clock))
+                            return nullptr;
+                        timespec t{};
+                        if (::clock_getres(clock, &t) != 0)
+                            return clock_error();
+                        return make_float(static_cast<double>(t.tv_sec) + static_cast<double>(t.tv_nsec) * 1e-9);
+                    } },
+                { "clock_settime", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        clockid_t clock{};
+                        if (!clock_id_of("clock_settime", aArgs, aKwargs, 2u, a, clock))
+                            return nullptr;
+                        double seconds = 0.0;
+                        if (!to_double(a[1], seconds))
+                            return nullptr;
+                        timespec t{};
+                        t.tv_sec = static_cast<time_t>(std::floor(seconds));
+                        t.tv_nsec = static_cast<long>((seconds - std::floor(seconds)) * 1e9);
+                        if (!host_unrestricted("time.clock_settime"))
+                            return nullptr;
+                        if (::clock_settime(clock, &t) != 0)
+                            return clock_error();
+                        return none();
+                    } },
+                { "clock_settime_ns", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        clockid_t clock{};
+                        if (!clock_id_of("clock_settime_ns", aArgs, aKwargs, 2u, a, clock))
+                            return nullptr;
+                        long long ns = 0;
+                        if (!to_index(a[1], ns))
+                            return nullptr;
+                        timespec t{};
+                        t.tv_sec = static_cast<time_t>(ns / 1000000000ll);
+                        t.tv_nsec = static_cast<long>(ns % 1000000000ll);
+                        if (!host_unrestricted("time.clock_settime_ns"))
+                            return nullptr;
+                        if (::clock_settime(clock, &t) != 0)
+                            return clock_error();
+                        return none();
+                    } },
+                { "pthread_getcpuclockid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("pthread_getcpuclockid", aArgs, aKwargs, { "thread_id" }, 1u, 1u, a))
+                            return nullptr;
+                        long long id = 0;
+                        if (!to_index(a[0], id))
+                            return nullptr;
+                        clockid_t clock{};
+                        if (auto const e = ::pthread_getcpuclockid(reinterpret_cast<pthread_t>(static_cast<std::uintptr_t>(id)), &clock); e != 0)
+                        {
+                            errno = e;
+                            return clock_error();
+                        }
+                        return make_int(static_cast<long long>(clock));
+                    } }
+            };
 #endif
 
             bool time_module(std::vector<std::pair<std::string, object*>>& aAttributes)
@@ -492,6 +610,24 @@ namespace neos::python_runtime
 #if !defined(_WIN32)
                 static builtin_entry const sTzset{ "tzset", fn_tzset };
                 aAttributes.emplace_back("tzset", make_builtin(sTzset));
+                for (auto const& f : sClockFunctions)
+                    aAttributes.emplace_back(f.name, make_builtin(f));
+                for (auto const& [name, value] : std::initializer_list<std::pair<char const*, long long>>{ { "CLOCK_REALTIME", CLOCK_REALTIME }, 
+                    { "CLOCK_MONOTONIC", CLOCK_MONOTONIC }, { "CLOCK_PROCESS_CPUTIME_ID", CLOCK_PROCESS_CPUTIME_ID }, { "CLOCK_THREAD_CPUTIME_ID", CLOCK_THREAD_CPUTIME_ID }
+#if defined(CLOCK_MONOTONIC_RAW)
+                    , { "CLOCK_MONOTONIC_RAW", CLOCK_MONOTONIC_RAW }
+#endif
+#if defined(CLOCK_BOOTTIME)
+                    , { "CLOCK_BOOTTIME", CLOCK_BOOTTIME }
+#endif
+#if defined(CLOCK_TAI)
+                    , { "CLOCK_TAI", CLOCK_TAI }
+#endif
+#if defined(CLOCK_UPTIME_RAW)
+                    , { "CLOCK_UPTIME_RAW", CLOCK_UPTIME_RAW }
+#endif
+                    })
+                    aAttributes.emplace_back(name, make_int(value));
 #endif
                 aAttributes.emplace_back("struct_time", type_object_for("struct_time", "time.struct_time"));
                 // (struct_time's fields (its tm_zone and tm_gmtoff included))

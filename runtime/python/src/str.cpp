@@ -51,6 +51,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        object* str_format_map(object* aSelf, object* aMapping);    // (objects.cpp)
+
         // --- UTF-8 and code points
 
         std::u32string to_code_points(std::string_view aText)
@@ -957,35 +959,13 @@ namespace neos::python_runtime
                 return make_str(std::move(result));
             }
 
+            // (str.format_map(mapping): the mapping's items looked up as the fields need them (e.g. a dict subclass's __missing__, or a re.Match))
             object* format_map_method(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs)
             {
                 std::vector<object*> a;
                 if (!parse_arguments("str.format_map", aArgs, aKwargs, { "mapping" }, 1u, 1u, a))
                     return nullptr;
-                ref const format{ getattr(aSelf, "format") };
-                if (!format)
-                    return nullptr;
-                ref const empty{ make_tuple() };
-                if (kind_of(a[0]) == NEOS_PY_DICT)
-                    return call(format.get(), empty.get(), a[0]);
-                // (another mapping: its items)
-                ref const items{ call_method_named(a[0], "items", {}) };
-                if (!items)
-                    return nullptr;
-                ref const d{ make_dict() };
-                std::vector<object*> pairs;
-                if (!collect(items.get(), pairs))
-                    return nullptr;
-                for (auto p : pairs)
-                {
-                    ref const pair{ p };
-                    ref const k{ getitem(pair.get(), ref{ make_int(0) }.get()) };
-                    ref const v{ getitem(pair.get(), ref{ make_int(1) }.get()) };
-                    if (!k || !v)
-                        return nullptr;
-                    dict_set(d.get(), k.get(), v.get());
-                }
-                return call(format.get(), empty.get(), d.get());
+                return str_format_map(aSelf, a[0]);
             }
 
             str_method_entry const sStrMethods[] =

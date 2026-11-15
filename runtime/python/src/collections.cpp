@@ -636,6 +636,68 @@ namespace neos::python_runtime
                         }
                         return make_bool(true);
                     } },
+                // (__ne__: not __eq__ (CPython's odict_richcompare))
+                { "__ne__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 2u)
+                            return error("TypeError", "expected 1 argument");
+                        ref const eq{ call_method_named(aArgs[0], "__eq__", { new_reference(aArgs[1]) }) };
+                        if (!eq || eq.get() == not_implemented())
+                            return eq ? new_reference(eq.get()) : nullptr;
+                        auto const t = truth(eq.get());
+                        return t < 0 ? nullptr : make_bool(t == 0);
+                    } },
+                // (|, reflected | and |= (Lib/collections/__init__.py's OrderedDict.__or__, __ror__ and __ior__): of the class)
+                { "__or__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 2u)
+                            return error("TypeError", "expected 1 argument");
+                        if (kind_of(builtin_value(aArgs[1])) != NEOS_PY_DICT)
+                            return new_reference(not_implemented());
+                        ref const cls{ class_of(aArgs[0]) };
+                        ref const result{ call_with(cls.get(), { new_reference(aArgs[0]) }) };
+                        ref const updated{ result ? call_method_named(result.get(), "update", { new_reference(aArgs[1]) }) : nullptr };
+                        return updated ? new_reference(result.get()) : nullptr;
+                    } },
+                { "__ror__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 2u)
+                            return error("TypeError", "expected 1 argument");
+                        if (kind_of(builtin_value(aArgs[1])) != NEOS_PY_DICT)
+                            return new_reference(not_implemented());
+                        ref const cls{ class_of(aArgs[0]) };
+                        ref const result{ call_with(cls.get(), { new_reference(aArgs[1]) }) };
+                        ref const updated{ result ? call_method_named(result.get(), "update", { new_reference(aArgs[0]) }) : nullptr };
+                        return updated ? new_reference(result.get()) : nullptr;
+                    } },
+                { "__ior__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 2u)
+                            return error("TypeError", "expected 1 argument");
+                        ref const updated{ call_method_named(aArgs[0], "update", { new_reference(aArgs[1]) }) };
+                        return updated ? new_reference(aArgs[0]) : nullptr;
+                    } },
+                // (__sizeof__: the dict's and its linked list's (CPython's odict_sizeof: a node pointer for each of the dict's slots and a
+                // node (key, hash, next, prev) for each item))
+                { "__sizeof__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        auto const value = builtin_value(aArgs.at(0));
+                        // (the dict's: sys.getsizeof's less the GC header)
+                        ref const getsizeof{ module_attribute("sys", "getsizeof") };
+                        ref const size{ getsizeof ? call_with(getsizeof.get(), { new_reference(value) }) : nullptr };
+                        if (!size)
+                            return nullptr;
+                        long long n = 0;
+                        if (!to_index(size.get(), n))
+                            return nullptr;
+                        n -= 16;
+                        auto const items = as<dict_object>(value)->items.size();
+                        std::size_t slots = 8u;
+                        while (slots * 2u / 3u < items)
+                            slots *= 2u;
+                        n += static_cast<long long>(sizeof(void*) * slots + (items != 0u ? 4u * sizeof(void*) * items : 0u));
+                        return make_int(n);
+                    } },
                 { "copy", [](std::vector<object*> const& aArgs, object*) -> object*
                     {
                         ref const cls{ class_of(aArgs.at(0)) };
@@ -1939,6 +2001,23 @@ namespace neos::python_runtime
                 auto const cls = make_class("collections", aName, bases, ns);
                 for (auto& n : ns)
                     release(n.second);
+                // (a class of an abstract base class (e.g. ChainMap's MutableMapping): its abstract methods are those its methods do not implement 
+                // (as ABCMeta.__new__'s))
+                if (cls != nullptr && aBase != nullptr)
+                {
+                    ref const abstracts{ getattr(aBase, "__abstractmethods__") };
+                    clear_error();
+                    if (abstracts)
+                    {
+                        ref const update{ module_attribute("abc", "update_abstractmethods") };
+                        ref const updated{ update ? call_with(update.get(), { new_reference(cls) }) : nullptr };
+                        if (!updated)
+                        {
+                            release(cls);
+                            return nullptr;
+                        }
+                    }
+                }
                 return cls;
             }
 
@@ -2444,7 +2523,11 @@ namespace neos::python_runtime
                     static builtin_entry const sParents{ "parents", parents_getter };
                     ref const getter{ make_builtin(sParents) };
                     std::vector<std::pair<std::string, object*>> extra{ { "parents", b_property({ getter.get() }, nullptr) }, { "__hash__", (retain(none()), none()) } };
-                    aAttributes.emplace_back("ChainMap", class_with("ChainMap", sChainMapMethods, std::size(sChainMapMethods), nullptr, std::move(extra)));
+                    // (a class of collections.abc's MutableMapping, as Lib/collections/__init__.py's)
+                    ref const mutableMapping{ module_attribute("collections.abc", "MutableMapping") };
+                    if (!mutableMapping)
+                        return false;
+                    aAttributes.emplace_back("ChainMap", class_with("ChainMap", sChainMapMethods, std::size(sChainMapMethods), mutableMapping.get(), std::move(extra)));
                 }
                 auto const result = py_guarded([&]()
                 {

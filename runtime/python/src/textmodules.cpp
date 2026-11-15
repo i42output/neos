@@ -1738,6 +1738,7 @@ namespace neos::python_runtime
             }
 
             char const sBase85Alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
+            char const sZ85Alphabet[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
 
             std::string base85_encode(std::string const& aData, bool aPad, bool aAscii85)
             {
@@ -1956,6 +1957,43 @@ namespace neos::python_runtime
                             return nullptr;
                         return make_bytes(result);
                     } },
+                // (z85encode(s) and z85decode(s) (CPython 3.13's): base85 in ZeroMQ's alphabet (translated))
+                { "z85encode", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string data;
+                        if (!parse_arguments("z85encode", aArgs, aKwargs, { "s" }, 1u, 0u, a) || !binary_argument(a[0], data, false))
+                            return nullptr;
+                        auto text = base85_encode(data, false, false);
+                        for (auto& c : text)
+                            c = sZ85Alphabet[std::strchr(sBase85Alphabet, c) - sBase85Alphabet];
+                        return make_bytes(text);
+                    } },
+                { "z85decode", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string text, result;
+                        if (!parse_arguments("z85decode", aArgs, aKwargs, { "s" }, 1u, 0u, a) || !binary_argument(a[0], text, true))
+                            return nullptr;
+                        // (z85's characters as base85's; base85's that are not z85's (;_`|~): NUL, which is not a digit)
+                        for (auto& c : text)
+                        {
+                            auto const z = c != '\0' ? std::strchr(sZ85Alphabet, c) : nullptr;
+                            if (z != nullptr)
+                                c = sBase85Alphabet[z - sZ85Alphabet];
+                            else if (std::strchr(";_`|~", c) != nullptr && c != '\0')
+                                c = '\0';
+                        }
+                        if (!base85_decode(text, result, false))
+                        {
+                            ref const e{ take_exception() };
+                            std::string message = text_of(e.get());
+                            if (auto const at = message.find("base85"); at != std::string::npos)
+                                message.replace(at, 6u, "z85");
+                            return error("ValueError", message);
+                        }
+                        return make_bytes(result);
+                    } },
                 { "a85encode", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
@@ -1980,9 +2018,115 @@ namespace neos::python_runtime
                             text = text.substr(text.starts_with("<~") ? 2u : 0u);
                             text.resize(text.size() - 2u);
                         }
-                        if (!base85_decode(text, result, true))
+                        // (as Lib/base64.py's: z (four NULs), y with foldspaces (four spaces), ignorechars skipped; a last group padded with u)
+                        bool const foldspaces = a[1] != nullptr && truth(a[1]) == 1;
+                        std::string ignorechars = " \t\n\r\v";
+                        if (a[3] != nullptr && !binary_argument(a[3], ignorechars, false))
                             return nullptr;
+                        std::string group;
+                        text += "uuuu";
+                        for (auto const x : text)
+                        {
+                            if (x >= '!' && x <= 'u')
+                            {
+                                group += x;
+                                if (group.size() == 5u)
+                                {
+                                    std::uint64_t acc = 0u;
+                                    for (auto c : group)
+                                        acc = 85u * acc + static_cast<unsigned>(c - 33);
+                                    if (acc > 0xFFFFFFFFull)
+                                        return error("ValueError", "Ascii85 overflow");
+                                    for (int k = 3; k >= 0; --k)
+                                        result += static_cast<char>(acc >> (8 * k));
+                                    group.clear();
+                                }
+                            }
+                            else if (x == 'z')
+                            {
+                                if (!group.empty())
+                                    return error("ValueError", "z inside Ascii85 5-tuple");
+                                result.append(4u, '\0');
+                            }
+                            else if (foldspaces && x == 'y')
+                            {
+                                if (!group.empty())
+                                    return error("ValueError", "y inside Ascii85 5-tuple");
+                                result.append(4u, ' ');
+                            }
+                            else if (ignorechars.find(x) != std::string::npos)
+                                continue;
+                            else
+                                return error("ValueError", std::string{ "Non-Ascii85 digit found: " } + x);
+                        }
+                        result.resize(result.size() - std::min(result.size(), 4u - group.size()));
                         return make_bytes(result);
+                    } },
+                // (the legacy interface: encode(input, output) and decode(input, output) (binary files), as Lib/base64.py's)
+                { "encode", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("encode", aArgs, aKwargs, { "input", "output" }, 2u, 0u, a))
+                            return nullptr;
+                        constexpr long long maxBinSize = (76 / 4) * 3;
+                        ref const b2a{ module_attribute("binascii", "b2a_base64") };
+                        if (!b2a)
+                            return nullptr;
+                        for (;;)
+                        {
+                            ref s{ call_method_named(a[0], "read", { make_int(maxBinSize) }) };
+                            if (!s)
+                                return nullptr;
+                            std::string data;
+                            if (!binary_argument(s.get(), data, false))
+                                return nullptr;
+                            if (data.empty())
+                                break;
+                            while (static_cast<long long>(data.size()) < maxBinSize)
+                            {
+                                ref const ns{ call_method_named(a[0], "read", { make_int(maxBinSize - static_cast<long long>(data.size())) }) };
+                                std::string more;
+                                if (!ns || !binary_argument(ns.get(), more, false))
+                                    return nullptr;
+                                if (more.empty())
+                                    break;
+                                data += more;
+                            }
+                            ref const line{ invoke(b2a.get(), { make_bytes(data) }) };
+                            if (!line)
+                                return nullptr;
+                            ref const written{ call_method_named(a[1], "write", { new_reference(line.get()) }) };
+                            if (!written)
+                                return nullptr;
+                        }
+                        return new_reference(none());
+                    } },
+                { "decode", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("decode", aArgs, aKwargs, { "input", "output" }, 2u, 0u, a))
+                            return nullptr;
+                        ref const a2b{ module_attribute("binascii", "a2b_base64") };
+                        if (!a2b)
+                            return nullptr;
+                        for (;;)
+                        {
+                            ref const line{ call_method_named(a[0], "readline", {}) };
+                            if (!line)
+                                return nullptr;
+                            auto const t = truth(line.get());
+                            if (t < 0)
+                                return nullptr;
+                            if (t == 0)
+                                break;
+                            ref const s{ invoke(a2b.get(), { new_reference(line.get()) }) };
+                            if (!s)
+                                return nullptr;
+                            ref const written{ call_method_named(a[1], "write", { new_reference(s.get()) }) };
+                            if (!written)
+                                return nullptr;
+                        }
+                        return new_reference(none());
                     } }
             };
 
@@ -1990,6 +2134,8 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sBase64Functions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                aAttributes.emplace_back("MAXLINESIZE", make_int(76));
+                aAttributes.emplace_back("MAXBINSIZE", make_int((76 / 4) * 3));
                 return true;
             }
 

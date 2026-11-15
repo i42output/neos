@@ -1058,6 +1058,10 @@ namespace neos
                     return outline_kind::Return;
                 if (is_any(aConcept, { "language.statement.break", "language.statement.continue", "language.statement.throw" }))
                     return outline_kind::Jump;
+                if (is_a(aConcept, "language.declaration"))
+                    return outline_kind::Declaration;
+                if (is_a(aConcept, "language.import"))
+                    return outline_kind::Import;
                 return {};
             };
             // (a type: language.type or one of its kinds (e.g. language.type.string))
@@ -1131,7 +1135,9 @@ namespace neos
             auto const add_statement = [&](node_t const& aStatement, std::uint32_t aParent) -> std::uint32_t
             {
                 auto const& node = inner(aStatement);
-                auto const kind = kind_of(name_of(node)).value_or(outline_kind::Statement);
+                // (a statement that is itself a local variable (e.g. one of Ada's object declarations) is its declaration)
+                auto const kind = kind_of(name_of(node)).value_or(
+                    is_a(name_of(aStatement), "language.function.local") ? outline_kind::Declaration : outline_kind::Statement);
                 auto const index = static_cast<std::uint32_t>(result.size());
                 result.push_back(outline_node{ aParent, kind, first_of(aStatement), last_of(aStatement), last_of(aStatement) });
                 if (!compound(kind))
@@ -1295,43 +1301,77 @@ namespace neos
         return result;
     }
 
+    namespace
+    {
+        // (a theme of the syntax highlighting configuration (highlighting.json: an object of themes) for a schema: aApply is called with 
+        // the installed configuration's (beside the schema), then with the user's, whose colours override its: ~/.neos/highlighting.json 
+        // (as vim's ~/.vim), or on Windows %LOCALAPPDATA%\neos\highlighting.json)
+        void highlighting_theme(std::string const& aSchemaPath, std::string const& aTheme, std::function<void(neolib::rjson_object const&)> const& aApply)
+        {
+            auto const apply = [&](std::filesystem::path const& aPath)
+            {
+                try
+                {
+                    std::ifstream file{ aPath };
+                    if (!file)
+                        return;
+                    neolib::rjson configuration{ file };
+                    auto const& themes = configuration.root().as<neolib::rjson_object>();
+                    if (!themes.has(aTheme))
+                        return;
+                    aApply(themes.at(aTheme).as<neolib::rjson_object>());
+                }
+                catch (...)
+                {
+                    // (a configuration that cannot be read is not applied)
+                }
+            };
+            apply(std::filesystem::path{ aSchemaPath }.parent_path() / "highlighting.json");
+#if defined(_WIN32)
+            if (auto const localAppData = std::getenv("LOCALAPPDATA"); localAppData != nullptr && *localAppData != '\0')
+                apply(std::filesystem::path{ localAppData } / "neos" / "highlighting.json");
+#else
+            if (auto const home = std::getenv("HOME"); home != nullptr && *home != '\0')
+                apply(std::filesystem::path{ home } / ".neos" / "highlighting.json");
+#endif
+        }
+    }
+
     std::vector<std::string> context::highlight_colours(std::string const& aSchemaPath, std::string const& aTheme)
     {
-        // (highlighting.json: an object of themes, each an object of the categories' colours: "comment", "keyword", "string", "number", 
-        // "constant", "type", "function", "parameter" and "variable"; the installed configuration's (beside the schema), then the user's, which override 
-        // them: ~/.neos/highlighting.json (as vim's ~/.vim), or on Windows %LOCALAPPDATA%\neos\highlighting.json)
+        // (a theme: an object of the categories' colours: "comment", "keyword", "string", "number", "constant", "type", "function", 
+        // "parameter" and "variable" (and of its outline's kinds' colours: see outline_colours))
         static char const* const sCategories[] = { "comment", "keyword", "string", "number", "constant", "type", "function", "parameter", "variable" };
         static_assert(std::size(sCategories) == static_cast<std::size_t>(highlight_category::Variable) + 1u);
         std::vector<std::string> result(std::size(sCategories));
-        auto const apply = [&](std::filesystem::path const& aPath)
+        highlighting_theme(aSchemaPath, aTheme, [&](neolib::rjson_object const& aColours)
         {
-            try
-            {
-                std::ifstream file{ aPath };
-                if (!file)
-                    return;
-                neolib::rjson configuration{ file };
-                auto const& themes = configuration.root().as<neolib::rjson_object>();
-                if (!themes.has(aTheme))
-                    return;
-                auto const& theme = themes.at(aTheme).as<neolib::rjson_object>();
-                for (std::size_t c = 0u; c < std::size(sCategories); ++c)
-                    if (theme.has(sCategories[c]))
-                        result[c] = std::string{ theme.at(sCategories[c]).as<neolib::rjson_string>() };
-            }
-            catch (...)
-            {
-                // (a configuration that cannot be read is not applied)
-            }
-        };
-        apply(std::filesystem::path{ aSchemaPath }.parent_path() / "highlighting.json");
-#if defined(_WIN32)
-        if (auto const localAppData = std::getenv("LOCALAPPDATA"); localAppData != nullptr && *localAppData != '\0')
-            apply(std::filesystem::path{ localAppData } / "neos" / "highlighting.json");
-#else
-        if (auto const home = std::getenv("HOME"); home != nullptr && *home != '\0')
-            apply(std::filesystem::path{ home } / ".neos" / "highlighting.json");
-#endif
+            for (std::size_t c = 0u; c < std::size(sCategories); ++c)
+                if (aColours.has(sCategories[c]))
+                    result[c] = std::string{ aColours.at(sCategories[c]).as<neolib::rjson_string>() };
+        });
+        if (std::all_of(result.begin(), result.end(), [](std::string const& aColour) { return aColour.empty(); }))
+            result.clear();
+        return result;
+    }
+
+    std::vector<std::string> context::outline_colours(std::string const& aSchemaPath, std::string const& aTheme)
+    {
+        // (a theme's "outline": an object of the outline's kinds' colours: "module", "function", "class", "parameter", "loop", "branch", 
+        // "return", "statement", "alternative", "jump", "declaration" and "import")
+        static char const* const sKinds[] = { "module", "function", "class", "parameter", "loop", "branch", "return", "statement", "alternative", "jump", 
+            "declaration", "import" };
+        static_assert(std::size(sKinds) == static_cast<std::size_t>(outline_kind::Import) + 1u);
+        std::vector<std::string> result(std::size(sKinds));
+        highlighting_theme(aSchemaPath, aTheme, [&](neolib::rjson_object const& aColours)
+        {
+            if (!aColours.has("outline"))
+                return;
+            auto const& kinds = aColours.at("outline").as<neolib::rjson_object>();
+            for (std::size_t k = 0u; k < std::size(sKinds); ++k)
+                if (kinds.has(sKinds[k]))
+                    result[k] = std::string{ kinds.at(sKinds[k]).as<neolib::rjson_string>() };
+        });
         if (std::all_of(result.begin(), result.end(), [](std::string const& aColour) { return aColour.empty(); }))
             result.clear();
         return result;

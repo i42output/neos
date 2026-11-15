@@ -619,6 +619,9 @@ namespace neos::python_runtime
             // (an operator of aLhs and aRhs (one of them aOwner, an instance) that is the type's of the instances rather than of their values
             // (e.g. date + timedelta: of the date's class, as CPython's))
             object* (*binary)(object* aOwner, int aOperation, object* aLhs, object* aRhs, int aInplace) = nullptr;
+            // (an assignment (aValue null: deletion) of an attribute of an instance (aOwner) that is the type's (e.g. functools.partial's 
+            // readonly func, args and keywords, as CPython's member descriptors): 0 done, -1 an error, 1 not the type's (the instance's))
+            int (*setattr)(object* aOwner, char const* aName, object* aValue) = nullptr;
         };
         std::map<std::string, native_base_hooks, std::less<>>& native_bases();
         void write_unraisable(object* aObject);         // (the pending exception: "Exception ignored in: <aObject>" and its report)

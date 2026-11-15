@@ -160,7 +160,7 @@ namespace neos::python_runtime
             class parser
             {
             public:
-                parser(std::u32string const& aPattern, int aFlags) : iPattern{ aPattern }, iFlags{ aFlags } {}
+                parser(std::u32string const& aPattern, int aFlags, bool aBytes = false) : iPattern{ aPattern }, iFlags{ aFlags }, iBytes{ aBytes } {}
             public:
                 std::unique_ptr<program> parse()
                 {
@@ -276,6 +276,7 @@ namespace neos::python_runtime
                     while (!at_end() && peek() == U'|')
                     {
                         ++iPosition;
+                        iItems = true;  // (not the first branch: no global flags)
                         alt->children.push_back(sequence(aFlags, aDepth));
                     }
                     if (alt->children.size() == 1u)
@@ -297,6 +298,7 @@ namespace neos::python_runtime
                         skip_verbose(aFlags);
                         item = quantified(std::move(item), aFlags, start);
                         seq->children.push_back(std::move(item));
+                        iItems = true;
                     }
                     return seq;
                 }
@@ -558,18 +560,37 @@ namespace neos::python_runtime
                     ++iPosition;
                     if (name.empty())
                         throw pattern_error{ "missing group name", aStart };
-                    ref const text{ make_str(name) };
+                    check_group_name(name, aStart);
+                    return name;
+                }
+                // (Source.checkgroupname: an identifier (a bytes pattern's: ASCII); the message has the name's repr (a bytes pattern's: ascii()))
+                void check_group_name(std::string const& aName, std::size_t aStart) const
+                {
+                    ref const text{ make_str(aName) };
+                    if (iBytes && !std::all_of(aName.begin(), aName.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x80u; }))
+                    {
+                        ref const ascii{ call_with_name("ascii", text.get()) };
+                        throw pattern_error{ "bad character in group name " + (ascii && kind_of(ascii.get()) == NEOS_PY_STR ? as<str_object>(ascii.get())->value : aName), aStart };
+                    }
                     ref const ok{ call_method_named(text.get(), "isidentifier", {}) };
                     if (!ok || truth(ok.get()) != 1)
-                        throw pattern_error{ "bad character in group name '" + name + "'", aStart };
-                    return name;
+                        throw pattern_error{ "bad character in group name " + repr_text(text.get()), aStart };
+                }
+                static object* call_with_name(char const* aBuiltin, object* aArgument)
+                {
+                    ref const function{ fn_builtin(aBuiltin) };
+                    if (!function)
+                        return nullptr;
+                    ref const args{ make_tuple({ new_reference(aArgument) }) };
+                    return call(function.get(), args.get(), nullptr);
                 }
                 int group_of(std::string const& aName, std::size_t aStart) const
                 {
                     for (auto const& n : iProgram->names)
                         if (n.first == aName)
                             return n.second;
-                    throw pattern_error{ "unknown group name '" + aName + "'", aStart };
+                    ref const text{ make_str(aName) };
+                    throw pattern_error{ "unknown group name " + repr_text(text.get()), aStart };
                 }
                 std::unique_ptr<node> group(int aFlags, std::size_t aDepth)
                 {
@@ -584,6 +605,9 @@ namespace neos::python_runtime
                         if (at_end())
                             throw pattern_error{ "unexpected end of pattern", iPosition };
                         auto const c = peek();
+                        // ("(?P" and "(?<" at the end: "unexpected end of pattern" (CPython's sourceget at the end))
+                        if ((c == U'P' || c == U'<') && iPosition + 1u >= iPattern.size())
+                            throw pattern_error{ "unexpected end of pattern", iPosition + 1u };
                         if (c == U':')
                             ++iPosition;
                         else if (c == U'P' && iPosition + 1u < iPattern.size() && iPattern[iPosition + 1u] == U'<')
@@ -645,14 +669,24 @@ namespace neos::python_runtime
                                 throw pattern_error{ "missing ), unterminated name", refStart };
                             ++iPosition;
                             auto n = make(node::Conditional, aFlags);
-                            if (!name.empty() && std::all_of(name.begin(), name.end(), [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)) != 0; }))
+                            // (as CPython's _parser: an ASCII decimal (0: "bad group number"), else a group's name (checkgroupname))
+                            if (name.empty())
+                                throw pattern_error{ "missing group name", refStart };
+                            if (std::all_of(name.begin(), name.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
                             {
+                                if (name.size() > 9u)
+                                    throw pattern_error{ "invalid group reference " + name, refStart };
                                 n->group = std::stoi(name);
-                                if (n->group == 0 || static_cast<std::size_t>(n->group) > iGroups)
+                                if (n->group == 0)
+                                    throw pattern_error{ "bad group number", refStart };
+                                if (static_cast<std::size_t>(n->group) > iGroups)
                                     throw pattern_error{ "invalid group reference " + name, refStart };
                             }
                             else
+                            {
+                                check_group_name(name, refStart);
                                 n->group = group_of(name, refStart);
+                            }
                             int flags = aFlags;
                             auto yes = sequence(flags, aDepth + 1u);
                             std::unique_ptr<node> no;
@@ -689,8 +723,9 @@ namespace neos::python_runtime
                             {
                                 if (removing)
                                     throw pattern_error{ "missing :", iPosition };
-                                // (global flags: only at the start)
-                                if (start != 0u)
+                                // (global flags: only at the start (as CPython's _parser: in the top level's first branch, before its items; 
+                                // whitespace and comments of a verbose pattern are no items))
+                                if (aDepth != 0u || iItems)
                                     throw pattern_error{ "global flags not at the start of the expression", start };
                                 ++iPosition;
                                 iFlags |= add;
@@ -843,6 +878,8 @@ namespace neos::python_runtime
                 std::u32string const& iPattern;
                 std::size_t iPosition = 0u;
                 int iFlags;
+                bool iBytes = false;    ///< (a bytes pattern's: its group names are ASCII)
+                bool iItems = false;    ///< (the top level's first branch has items (or a branch follows): global flags are no longer at the start)
                 std::size_t iGroups = 0u;
                 std::vector<int> iOpen;
                 program* iProgram = nullptr;
@@ -1315,14 +1352,37 @@ namespace neos::python_runtime
 
             object* raise_pattern_error(pattern_error const& e, object* aPattern)
             {
-                // (re.error(msg, pattern, pos): its str is "msg at position pos")
+                // (re.PatternError(msg, pattern, pos) (Lib/re/_constants.py's): its str is "msg at position pos", and " (line l, column c)" if the
+                // pattern has more than one line; its lineno and colno (None without a position))
                 std::string message = e.position == SIZE_MAX ? e.message : e.message + " at position " + std::to_string(e.position);
+                ref lineno{ borrowed(none()) };
+                ref colno{ borrowed(none()) };
+                if (e.position != SIZE_MAX && aPattern != nullptr && kind_of(aPattern) != NEOS_PY_NONE)
+                {
+                    std::u32string text;
+                    std::string_view bytes;
+                    if (kind_of(builtin_value(aPattern)) == NEOS_PY_STR)
+                        text = to_code_points(as<str_object>(builtin_value(aPattern))->value);
+                    else if (bytes_like(builtin_value(aPattern), bytes))
+                        text = bytes_code_points(bytes);
+                    auto const pos = std::min(e.position, text.size());
+                    auto const before = std::u32string_view{ text }.substr(0u, pos);
+                    auto const line = static_cast<long long>(std::count(before.begin(), before.end(), U'\n')) + 1;
+                    auto const lastNewline = before.rfind(U'\n');
+                    auto const column = static_cast<long long>(pos) - (lastNewline == std::u32string_view::npos ? -1ll : static_cast<long long>(lastNewline));
+                    lineno = ref{ make_int(line) };
+                    colno = ref{ make_int(column) };
+                    if (text.find(U'\n') != std::u32string::npos)
+                        message += " (line " + std::to_string(line) + ", column " + std::to_string(column) + ")";
+                }
                 ref const exception{ make_exception("re.PatternError", { make_str(message) }) };
                 ref const msg{ make_str(e.message) };
                 setattr(exception.get(), "msg", msg.get());
-                setattr(exception.get(), "pattern", aPattern);
+                setattr(exception.get(), "pattern", aPattern != nullptr ? aPattern : none());
                 ref const pos{ e.position == SIZE_MAX ? borrowed(none()) : make_int(static_cast<long long>(e.position)) };
                 setattr(exception.get(), "pos", pos.get());
+                setattr(exception.get(), "lineno", lineno.get());
+                setattr(exception.get(), "colno", colno.get());
                 fn_raise(exception.get());
                 return nullptr;
             }
@@ -1359,7 +1419,7 @@ namespace neos::python_runtime
                 std::shared_ptr<program> compiled;
                 try
                 {
-                    parser p{ text, implicitAscii ? (aFlags | FlagAscii) : aFlags };
+                    parser p{ text, implicitAscii ? (aFlags | FlagAscii) : aFlags, isBytes };
                     compiled = p.parse();
                 }
                 catch (pattern_error const& e)
@@ -1423,8 +1483,9 @@ namespace neos::python_runtime
                         if (n.first == as<str_object>(aGroup)->value)
                             return n.second;
                 }
-                else if (is_int_like(aGroup))
+                else if (kind_of(aGroup) != NEOS_PY_FLOAT)
                 {
+                    // (an int, or an object with __index__ (as CPython's getindex: PyIndex_Check))
                     long long i = 0;
                     if (to_index(aGroup, i) && i >= 0 && static_cast<std::size_t>(i) <= p.groups)
                         return i;
@@ -1448,6 +1509,13 @@ namespace neos::python_runtime
             bool expand_template(match_object const& m, std::u32string const& aTemplate, std::string& aResult)
             {
                 auto const& p = *as_pattern(m.pattern).compiled;
+                // (an error in the template: re.PatternError(msg, template, pos) (as CPython's _parser.parse_template))
+                auto const fail = [&](std::string const& aMessage, std::size_t aPosition) -> bool
+                {
+                    ref const templateObject{ make_piece(aTemplate, p.bytes) };
+                    raise_pattern_error(pattern_error{ aMessage, aPosition }, templateObject.get());
+                    return false;
+                };
                 // (a bytes pattern's: bytes)
                 auto const append_code_point = [&](std::string& aText, char32_t aCode)
                 {
@@ -1460,8 +1528,7 @@ namespace neos::python_runtime
                 {
                     if (g < 0 || static_cast<std::size_t>(g) > p.groups)
                     {
-                        error("re.PatternError", "invalid group reference " + std::to_string(g) + " at position " + std::to_string(aAt));
-                        return false;
+                        return fail("invalid group reference " + std::to_string(g), aAt);
                     }
                     auto const start = m.marks[2u * static_cast<std::size_t>(g)];
                     auto const end = m.marks[2u * static_cast<std::size_t>(g) + 1u];
@@ -1476,8 +1543,7 @@ namespace neos::python_runtime
                     {
                         if (c == U'\\')
                         {
-                            error("re.PatternError", "bad escape (end of pattern) at position " + std::to_string(i));
-                            return false;
+                            return fail("bad escape (end of pattern)", i);
                         }
                         append_code_point(aResult, c);
                         continue;
@@ -1486,28 +1552,46 @@ namespace neos::python_runtime
                     if (e == U'g')
                     {
                         if (i + 1u >= aTemplate.size() || aTemplate[i + 1u] != U'<')
-                        {
-                            error("re.PatternError", "missing < at position " + std::to_string(i + 1u));
-                            return false;
-                        }
+                            return fail("missing <", i + 1u);
+                        // (Source.getuntil(">", "group name"))
                         auto const close = aTemplate.find(U'>', i + 2u);
                         if (close == std::u32string::npos)
-                        {
-                            error("re.PatternError", "missing >, unterminated name at position " + std::to_string(i + 2u));
-                            return false;
-                        }
+                            return i + 2u >= aTemplate.size() ? fail("missing group name", aTemplate.size()) : fail("missing >, unterminated name", i + 2u);
+                        if (close == i + 2u)
+                            return fail("missing group name", i + 2u);
                         auto const name = from_code_points(std::u32string_view{ aTemplate }.substr(i + 2u, close - i - 2u));
                         long long g = -1;
-                        if (!name.empty() && std::all_of(name.begin(), name.end(), [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)) != 0; }))
+                        if (std::all_of(name.begin(), name.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+                        {
+                            // (an ASCII decimal: the group's number (MAXGROUPS: "invalid group reference"))
+                            if (name.size() > 9u)
+                                return fail("invalid group reference " + name, i + 2u);
                             g = std::stoll(name);
+                        }
                         else
                         {
+                            // (a name: an identifier (checkgroupname: a bytes template's ASCII), and a group's (else IndexError))
+                            ref const text{ make_str(name) };
+                            if (p.bytes && !std::all_of(name.begin(), name.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x80u; }))
+                            {
+                                ref const asciiFunction{ fn_builtin("ascii") };
+                                ref const args{ make_tuple({ new_reference(text.get()) }) };
+                                ref const ascii{ asciiFunction ? call(asciiFunction.get(), args.get(), nullptr) : nullptr };
+                                if (!ascii)
+                                    return false;
+                                return fail("bad character in group name " + as<str_object>(ascii.get())->value, i + 2u);
+                            }
+                            ref const ok{ call_method_named(text.get(), "isidentifier", {}) };
+                            if (!ok)
+                                return false;
+                            if (truth(ok.get()) != 1)
+                                return fail("bad character in group name " + repr_text(text.get()), i + 2u);
                             for (auto const& n : p.names)
                                 if (n.first == name)
                                     g = n.second;
                             if (g < 0)
                             {
-                                error("IndexError", "unknown group name '" + name + "'");
+                                error("IndexError", "unknown group name " + repr_text(text.get()));
                                 return false;
                             }
                         }
@@ -1522,10 +1606,21 @@ namespace neos::python_runtime
                         if (e == U'0' || (i + 2u < aTemplate.size() && aTemplate[i + 1u] >= U'0' && aTemplate[i + 1u] <= U'7' && aTemplate[i + 2u] >= U'0' &&
                             aTemplate[i + 2u] <= U'7' && e <= U'7'))
                         {
+                            auto const start = i;
                             char32_t value = e - U'0';
                             int digits = 1;
                             while (digits < 3 && i + 1u < aTemplate.size() && aTemplate[i + 1u] >= U'0' && aTemplate[i + 1u] <= U'7')
                                 value = value * 8u + (aTemplate[++i] - U'0'), ++digits;
+                            // (an octal escape of three digits: at most 0o377)
+                            if (e != U'0' && value > 0377u)
+                            {
+                                std::string escape = "\\";
+                                for (std::size_t k = start; k <= i; ++k)
+                                    escape += static_cast<char>(aTemplate[k]);
+                                return fail("octal escape value " + escape + " outside of range 0-0o377", start - 1u);
+                            }
+                            if (e == U'0')
+                                value &= 0xFFu;
                             append_code_point(aResult, value);
                             continue;
                         }
@@ -1552,8 +1647,7 @@ namespace neos::python_runtime
                         {
                             std::string text = "\\";
                             append_code_point(text, e);
-                            error("re.PatternError", "bad escape " + text + " at position " + std::to_string(i - 1u));
-                            return false;
+                            return fail("bad escape " + text, i - 1u);
                         }
                         aResult += '\\';
                         append_code_point(aResult, e);
@@ -1610,6 +1704,14 @@ namespace neos::python_runtime
                         return make_int(m.endpos);
                     if (name == "lastindex")
                         return m.lastindex < 0 ? borrowed(none()) : make_int(m.lastindex);
+                    // (regs: the groups' spans ((-1, -1): unmatched))
+                    if (name == "regs")
+                    {
+                        std::vector<object*> spans;
+                        for (std::size_t g = 0u; g <= p.groups; ++g)
+                            spans.push_back(make_tuple({ make_int(m.marks[2u * g]), make_int(m.marks[2u * g + 1u]) }));
+                        return make_tuple(std::move(spans));
+                    }
                     if (name == "lastgroup")
                     {
                         for (auto const& n : p.names)
@@ -1717,10 +1819,10 @@ namespace neos::python_runtime
             // (the string argument: str (a pattern's searches), or (a bytes pattern's) bytes-like)
             bool text_argument(object* aPattern, object* aString, std::shared_ptr<std::u32string>& aText)
             {
-                // (an instance of a subclass of str: its value)
+                // (an instance of a subclass of str or bytes: its value)
                 auto const value = kind_of(aString) == NEOS_PY_STR ? aString : builtin_value(aString);
                 std::string_view bytes;
-                bool const isBytes = kind_of(value) != NEOS_PY_STR && bytes_like(aString, bytes);
+                bool const isBytes = kind_of(value) != NEOS_PY_STR && (bytes_like(value, bytes) || bytes_like(aString, bytes));
                 if (as_pattern(aPattern).compiled->bytes)
                 {
                     if (!isBytes)
@@ -1770,7 +1872,7 @@ namespace neos::python_runtime
                 bool const isBytes = as_pattern(aPattern).compiled->bytes;
                 auto const value = aTemplate == nullptr ? nullptr : kind_of(aTemplate) == NEOS_PY_STR ? aTemplate : builtin_value(aTemplate);
                 std::string_view bytes;
-                if (isBytes && aTemplate != nullptr && kind_of(value) != NEOS_PY_STR && bytes_like(aTemplate, bytes))
+                if (isBytes && aTemplate != nullptr && kind_of(value) != NEOS_PY_STR && (bytes_like(value, bytes) || bytes_like(aTemplate, bytes)))
                 {
                     aResult = bytes_code_points(bytes);
                     return true;
@@ -1882,6 +1984,19 @@ namespace neos::python_runtime
                 return ok ? iter(result.get()) : nullptr;
             }
 
+            // (re.sub's, re.subn's and re.split's count (maxsplit) and flags given as positional arguments (aArgs beyond aFixed): deprecated 
+            // (CPython 3.13's Lib/re/__init__.py: "'count' is passed as positional argument", a DeprecationWarning))
+            bool positional_deprecated(std::vector<object*> const& aArgs, std::size_t aFixed, char const* aName)
+            {
+                if (aArgs.size() <= aFixed)
+                    return true;
+                ref const warn{ module_attribute("warnings", "warn") };
+                if (!warn)
+                    return false;
+                return static_cast<bool>(ref{ invoke(warn.get(), { make_str(std::string{ "'" } + aName + "' is passed as positional argument"),
+                    exception_class("DeprecationWarning"), make_int(1) }) });   // (a native function has no frame: stacklevel 1 is the caller's)
+            }
+
             object* subn(object* aPattern, object* aRepl, object* aString, long long aCount, bool aWithCount)
             {
                 std::shared_ptr<std::u32string> text;
@@ -1893,7 +2008,7 @@ namespace neos::python_runtime
                 // (an instance of a subclass of str: its value; a bytes pattern's: bytes-like)
                 auto const repl = kind_of(aRepl) == NEOS_PY_STR ? aRepl : builtin_value(aRepl);
                 std::string_view replBytes;
-                bool const callable = isBytes ? !(kind_of(repl) != NEOS_PY_STR && bytes_like(aRepl, replBytes)) : kind_of(repl) != NEOS_PY_STR;
+                bool const callable = isBytes ? !(kind_of(repl) != NEOS_PY_STR && (bytes_like(repl, replBytes) || bytes_like(aRepl, replBytes))) : kind_of(repl) != NEOS_PY_STR;
                 std::string literalText;
                 if (!callable)
                 {
@@ -1902,6 +2017,16 @@ namespace neos::python_runtime
                     literal = templateText.find(U'\\') == std::u32string::npos;
                     if (literal)
                         literalText = isBytes ? std::string{ replBytes } : as<str_object>(repl)->value;
+                    else
+                    {
+                        // (the template's errors: before any match (CPython compiles it first: e.g. re.sub('x', r'\8', ''))
+                        retain(aPattern);
+                        match_object const probe{ {}, aPattern, nullptr, std::make_shared<std::u32string>(),
+                            std::vector<long long>(2u * (as_pattern(aPattern).compiled->groups + 1u), -1), -1, 0, 0 };
+                        std::string ignored;
+                        if (!expand_template(probe, templateText, ignored))
+                            return nullptr;
+                    }
                 }
                 else if (!isBytes)
                 {
@@ -2197,7 +2322,8 @@ namespace neos::python_runtime
                 { "sub", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
-                        if (!parse_arguments("sub", aArgs, aKwargs, { "pattern", "repl", "string", "count", "flags" }, 3u, 0u, a))
+                        if (!parse_arguments("sub", aArgs, aKwargs, { "pattern", "repl", "string", "count", "flags" }, 3u, 0u, a) ||
+                            !positional_deprecated(aArgs, 3u, "count"))
                             return nullptr;
                         int flags = 0;
                         long long count = 0;
@@ -2209,7 +2335,8 @@ namespace neos::python_runtime
                 { "subn", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
-                        if (!parse_arguments("subn", aArgs, aKwargs, { "pattern", "repl", "string", "count", "flags" }, 3u, 0u, a))
+                        if (!parse_arguments("subn", aArgs, aKwargs, { "pattern", "repl", "string", "count", "flags" }, 3u, 0u, a) ||
+                            !positional_deprecated(aArgs, 3u, "count"))
                             return nullptr;
                         int flags = 0;
                         long long count = 0;
@@ -2221,7 +2348,8 @@ namespace neos::python_runtime
                 { "split", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
-                        if (!parse_arguments("split", aArgs, aKwargs, { "pattern", "string", "maxsplit", "flags" }, 2u, 0u, a))
+                        if (!parse_arguments("split", aArgs, aKwargs, { "pattern", "string", "maxsplit", "flags" }, 2u, 0u, a) ||
+                            !positional_deprecated(aArgs, 2u, "maxsplit"))
                             return nullptr;
                         int flags = 0;
                         long long maxsplit = 0;

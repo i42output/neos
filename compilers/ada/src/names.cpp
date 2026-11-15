@@ -1799,6 +1799,15 @@ namespace neos::compilers::ada
         {
             // (preferences: an object over others; a non-predefined operation; the innermost (first found))
             std::stable_partition(matching.begin(), matching.end(), [](entity* e) { return !e->overloadable(); });
+            // (a procedure call statement without actuals: a procedure or entry whose parameters all have defaults (6.4(9)) over one 
+            // that needs actuals (e.g. New_Line (Spacing := 1) over New_Line (File; Spacing := 1)); if none can be called without 
+            // actuals the first is the callee, as before (the statement reports its missing actual))
+            if (aExpected == iVoid)
+                std::stable_partition(matching.begin(), matching.end(), [](entity* e)
+                {
+                    return !e->overloadable() || ((e->kind == entity_kind::Procedure || e->kind == entity_kind::Entry) && e->sub != nullptr &&
+                        std::all_of(e->sub->parameters.begin(), e->sub->parameters.end(), [](parameter_info const& p) { return p.default_expression != nullptr; }));
+                });
             if (aExpected == nullptr && matching.size() > 1u && matching[0]->overloadable() && matching[1]->overloadable() &&
                 !(aName->is(construct::Character)))
             {

@@ -208,7 +208,37 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         if (!parse_arguments("getsizeof", aArgs, aKwargs, { "object", "default" }, 1u, 0u, a))
                             return nullptr;
-                        return make_int(size_of(a[0]));
+                        // (an instance of a class with a __sizeof__ of its own: its result and the pre-header (CPython's _PySys_GetSizeOf: the GC 
+                        // header and the managed dict's and weak references' pre-header); a TypeError: the default, if one is given)
+                        if (!has_special_method(a[0], "__sizeof__"))
+                            return make_int(size_of(a[0]));
+                        auto const failed = [&]() -> object*
+                        {
+                            if (a[1] == nullptr)
+                                return nullptr;
+                            ref const exception{ take_exception() };
+                            if (exception && exception_is(exception.get(), "TypeError"))
+                                return new_reference(a[1]);
+                            if (exception)
+                                reraise_exception(exception.get());
+                            return nullptr;
+                        };
+                        ref const method{ getattr(a[0], "__sizeof__") };
+                        ref const empty{ make_tuple() };
+                        ref const result{ method ? call(method.get(), empty.get(), nullptr) : nullptr };
+                        if (!result)
+                            return failed();
+                        if (!is_int_like(builtin_value(result.get())))
+                        {
+                            error("TypeError", "an integer is required");
+                            return failed();
+                        }
+                        long long size = 0;
+                        if (!to_index(builtin_value(result.get()), size))
+                            return failed();
+                        if (size < 0)
+                            return error("ValueError", "__sizeof__() should return >= 0");
+                        return make_unsigned(static_cast<std::uint64_t>(size) + 32u);
                     } },
                 { "getrefcount", [](std::vector<object*> const& aArgs, object*) -> object*
                     {

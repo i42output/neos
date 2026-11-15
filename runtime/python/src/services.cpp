@@ -69,6 +69,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1448,6 +1449,288 @@ namespace neos::python_runtime
                     } }
             };
 
+            // (print(*aItems, file=aFile (null: sys.stdout), end=aEnd) (steals aItems))
+            bool timeit_print(std::vector<object*> aItems, object* aFile = nullptr, char const* aEnd = nullptr)
+            {
+                ref const print{ fn_builtin("print") };
+                ref kw{ make_dict() };
+                if (aFile != nullptr)
+                    dict_set(kw.get(), ref{ make_str("file") }.get(), aFile);
+                if (aEnd != nullptr)
+                    dict_set(kw.get(), ref{ make_str("end") }.get(), ref{ make_str(aEnd) }.get());
+                ref const r{ print ? invoke(print.get(), std::move(aItems), kw.get()) : nullptr };
+                return static_cast<bool>(r);
+            }
+
+            // (dt as Lib/timeit.py's main's format_time: in its unit, or the largest that is not more than it)
+            std::string timeit_format_time(double aSeconds, std::optional<std::string> const& aUnit, int aPrecision)
+            {
+                static std::pair<char const*, double> const sUnits[] = { { "sec", 1.0 }, { "msec", 1e-3 }, { "usec", 1e-6 }, { "nsec", 1e-9 } };
+                std::string unit = "nsec";
+                double scale = 1e-9;
+                if (aUnit)
+                {
+                    for (auto const& u : sUnits)
+                        if (*aUnit == u.first)
+                            unit = u.first, scale = u.second;
+                }
+                else
+                    for (auto const& u : sUnits)
+                        if (aSeconds >= u.second)
+                        {
+                            unit = u.first;
+                            scale = u.second;
+                            break;
+                        }
+                ref const values{ make_tuple({ make_int(aPrecision), make_float(aSeconds / scale), make_str(unit) }) };
+                ref const text{ percent_format("%.*g %s", values.get()) };
+                return text ? as<str_object>(text.get())->value : std::string{};
+            }
+
+            // (main(args=None, *, _wrap_timer=None): Lib/timeit.py's command line (its return value: sys.exit's argument))
+            object* timeit_main(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!parse_arguments("main", aArgs, aKwargs, { "args", "_wrap_timer" }, 0u, 0u, a))
+                    return nullptr;
+                ref args{ a[0] != nullptr && kind_of(a[0]) != NEOS_PY_NONE ? new_reference(a[0]) : nullptr };
+                if (!args)
+                {
+                    ref const argv{ module_attribute("sys", "argv") };
+                    if (!argv)
+                        return nullptr;
+                    args = ref{ call_method_named(argv.get(), "__getitem__", { make_slice(ref{ make_int(1) }.get(), nullptr, nullptr) }) };
+                    if (!args)
+                        return nullptr;
+                }
+                ref const getopt{ module_attribute("getopt", "getopt") };
+                if (!getopt)
+                    return nullptr;
+                ref const parsed{ invoke(getopt.get(), { new_reference(args.get()), make_str("n:u:s:r:pvh"), make_list({ make_str("number="), make_str("setup="),
+                    make_str("repeat="), make_str("process"), make_str("verbose"), make_str("unit="), make_str("help") }) }) };
+                if (!parsed)
+                {
+                    ref const e{ take_exception() };
+                    ref const getoptError{ module_attribute("getopt", "error") };
+                    ref const is{ getoptError ? b_isinstance({ e.get(), getoptError.get() }, nullptr) : nullptr };
+                    if (!is || truth(is.get()) != 1)
+                    {
+                        reraise_exception(e.get());
+                        return nullptr;
+                    }
+                    if (!timeit_print({ new_reference(e.get()) }) || !timeit_print({ make_str("use -h/--help for command line help") }))
+                        return nullptr;
+                    return make_int(2);
+                }
+                auto const& pair = as<tuple_object>(parsed.get())->items;
+                ref const timeitModule{ fn_import("timeit") };
+                if (!timeitModule)
+                    return nullptr;
+                ref timer{ getattr(timeitModule.get(), "default_timer") };
+                ref const defaultRepeat{ getattr(timeitModule.get(), "default_repeat") };
+                if (!timer || !defaultRepeat)
+                    return nullptr;
+                std::vector<std::string> statement;
+                for (auto const item : as<list_object>(pair[1])->items)
+                    statement.push_back(text_of(item));
+                std::string stmt;
+                for (std::size_t i = 0u; i < statement.size(); ++i)
+                    stmt += (i > 0u ? "\n" : "") + statement[i];
+                if (stmt.empty())
+                    stmt = "pass";
+                long long number = 0, repeat = 0, verbose = 0;
+                int precision = 3;
+                if (!to_index(defaultRepeat.get(), repeat))
+                    return nullptr;
+                std::vector<std::string> setups;
+                std::optional<std::string> timeUnit;
+                for (auto const option : as<list_object>(pair[0])->items)
+                {
+                    auto const o = text_of(as<tuple_object>(option)->items[0]);
+                    auto const value = as<tuple_object>(option)->items[1];
+                    auto const integer = [&](long long& aResult)
+                    {
+                        ref const i{ invoke(ref{ fn_builtin("int") }.get(), { new_reference(value) }) };
+                        return i && to_index(i.get(), aResult);
+                    };
+                    if (o == "-n" || o == "--number")
+                    {
+                        if (!integer(number))
+                            return nullptr;
+                    }
+                    if (o == "-s" || o == "--setup")
+                        setups.push_back(text_of(value));
+                    if (o == "-u" || o == "--unit")
+                    {
+                        auto const unit = text_of(value);
+                        if (unit == "nsec" || unit == "usec" || unit == "msec" || unit == "sec")
+                            timeUnit = unit;
+                        else
+                        {
+                            ref const stderrStream{ module_attribute("sys", "stderr") };
+                            if (!stderrStream || !timeit_print({ make_str("Unrecognized unit. Please select nsec, usec, msec, or sec.") }, stderrStream.get()))
+                                return nullptr;
+                            return make_int(2);
+                        }
+                    }
+                    if (o == "-r" || o == "--repeat")
+                    {
+                        if (!integer(repeat))
+                            return nullptr;
+                        if (repeat <= 0)
+                            repeat = 1;
+                    }
+                    if (o == "-p" || o == "--process")
+                    {
+                        timer = ref{ module_attribute("time", "process_time") };
+                        if (!timer)
+                            return nullptr;
+                    }
+                    if (o == "-v" || o == "--verbose")
+                    {
+                        if (verbose != 0)
+                            ++precision;
+                        ++verbose;
+                    }
+                    if (o == "-h" || o == "--help")
+                    {
+                        ref const doc{ getattr(timeitModule.get(), "__doc__") };
+                        if (!doc || !timeit_print({ new_reference(doc.get()) }, nullptr, " "))
+                            return nullptr;
+                        return make_int(0);
+                    }
+                }
+                std::string setup;
+                for (std::size_t i = 0u; i < setups.size(); ++i)
+                    setup += (i > 0u ? "\n" : "") + setups[i];
+                if (setup.empty())
+                    setup = "pass";
+                // (the current directory: local imports work)
+                ref const path{ module_attribute("sys", "path") };
+                ref const curdir{ module_attribute("os", "curdir") };
+                if (!path || !curdir || !ref{ call_method_named(path.get(), "insert", { make_int(0), new_reference(curdir.get()) }) })
+                    return nullptr;
+                if (a[1] != nullptr && kind_of(a[1]) != NEOS_PY_NONE)
+                {
+                    timer = ref{ invoke(a[1], { new_reference(timer.get()) }) };
+                    if (!timer)
+                        return nullptr;
+                }
+                ref const timerClass{ getattr(timeitModule.get(), "Timer") };
+                ref const t{ timerClass ? invoke(timerClass.get(), { make_str(stmt), make_str(setup), new_reference(timer.get()) }) : nullptr };
+                if (!t)
+                    return nullptr;
+                // (except: t.print_exc(): the exception handled while its traceback is printed)
+                auto const print_exc = [&]() -> object*
+                {
+                    std::string const text = error_text();
+                    clear_error();
+                    ref const e{ fn_caught_natively(text.c_str()) };
+                    ref const r{ call_method_named(t.get(), "print_exc", {}) };
+                    fn_handled();
+                    return r ? make_int(1) : nullptr;
+                };
+                if (number == 0)
+                {
+                    // (number: so that 0.2 <= total time < 2.0)
+                    static builtin_entry const sCallback{ "callback", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            // (callback(number, time_taken, precision): "{num} loop{s} -> {secs:.{prec}g} sec")
+                            long long n = 0;
+                            double taken = 0.0;
+                            long long prec = 3;
+                            if (aArgs.size() != 3u || !to_index(aArgs[0], n) || !to_double(aArgs[1], taken) || !to_index(aArgs[2], prec))
+                                return failed() ? nullptr : error("TypeError", "callback(number, time_taken)");
+                            ref const values{ make_tuple({ make_int(prec), make_float(taken) }) };
+                            ref const secs{ percent_format("%.*g", values.get()) };
+                            if (!secs)
+                                return nullptr;
+                            return timeit_print({ make_str(std::to_string(n) + " loop" + (n != 1 ? "s" : "") + " -> " + as<str_object>(secs.get())->value + " sec") }) ? 
+                                new_reference(none()) : nullptr;
+                        } };
+                    ref callback{ new_reference(none()) };
+                    if (verbose != 0)
+                    {
+                        ref const partial{ module_attribute("functools", "partial") };
+                        ref const function{ make_builtin(sCallback) };
+                        // (precision as the callback's last argument: partial(lambda number, taken, precision: ..., precision=...) is not 
+                        // positional, so a wrapper of (number, time_taken) -> callback(number, time_taken, precision))
+                        static builtin_entry const sBound{ "callback", [](std::vector<object*> const& aArgs, object*) -> object*
+                            {
+                                if (aArgs.size() != 3u)
+                                    return error("TypeError", "callback(number, time_taken)");
+                                return sCallback.function({ aArgs[1], aArgs[2], aArgs[0] }, nullptr);
+                            } };
+                        callback = ref{ partial ? invoke(partial.get(), { make_builtin(sBound), make_int(precision) }) : nullptr };
+                        if (!callback)
+                            return nullptr;
+                    }
+                    ref const ranged{ call_method_named(t.get(), "autorange", { new_reference(callback.get()) }) };
+                    if (!ranged)
+                        return print_exc();
+                    if (!to_index(as<tuple_object>(ranged.get())->items[0], number))
+                        return nullptr;
+                    if (verbose != 0 && !timeit_print({}))
+                        return nullptr;
+                }
+                ref const rawTimings{ call_method_named(t.get(), "repeat", { make_int(repeat), make_int(number) }) };
+                if (!rawTimings)
+                    return print_exc();
+                std::vector<double> raw;
+                for (auto const item : as<list_object>(rawTimings.get())->items)
+                {
+                    double dt = 0.0;
+                    if (!to_double(item, dt))
+                        return nullptr;
+                    raw.push_back(dt);
+                }
+                if (verbose != 0)
+                {
+                    std::string text = "raw times: ";
+                    for (std::size_t i = 0u; i < raw.size(); ++i)
+                        text += (i > 0u ? ", " : "") + timeit_format_time(raw[i], timeUnit, precision);
+                    if (!timeit_print({ make_str(text) }) || !timeit_print({}))
+                        return nullptr;
+                }
+                std::vector<double> timings;
+                for (auto dt : raw)
+                    timings.push_back(dt / static_cast<double>(number));
+                auto const best = *std::min_element(timings.begin(), timings.end());
+                auto const worst = *std::max_element(timings.begin(), timings.end());
+                if (!timeit_print({ make_str(std::to_string(number) + " loop" + (number != 1 ? "s" : "") + ", best of " + std::to_string(repeat) + ": " + 
+                    timeit_format_time(best, timeUnit, precision) + " per loop") }))
+                    return nullptr;
+                if (worst >= best * 4.0)
+                {
+                    ref const warn{ module_attribute("warnings", "warn_explicit") };
+                    ref const r{ warn ? invoke(warn.get(), { make_str("The test results are likely unreliable. The worst time (" + timeit_format_time(worst, timeUnit, precision) +
+                        ") was more than four times slower than the best time (" + timeit_format_time(best, timeUnit, precision) + ")."), exception_class("UserWarning"), 
+                        make_str(""), make_int(0) }) : nullptr };
+                    if (!r)
+                        return nullptr;
+                }
+                return new_reference(none());
+            }
+
+            // (Lib/timeit.py's docstring)
+            char const sTimeitDoc[] = "Tool for measuring execution time of small code snippets.\n\nThis module avoids a number of common traps for measuring execution\ntimes.  See also Tim Peters' introduction to the Algorithms chapter in\nthe Python Cookbook, published by O'Reilly.\n\nLibrary usage: see the Timer class.\n\nCommand line usage:\n    python timeit.py [-n N] [-r N] [-s S] [-p] [-h] [--] [statement]\n\nOptions:\n  -n/--number N: how many times to execute 'statement' (default: see below)\n  -r/--repeat N: how many times to repeat the timer (default 5)\n  -s/--setup S: statement to be executed once initially (default 'pass').\n                Execution time of this setup statement is NOT timed.\n  -p/--process: use time.process_time() (default is time.perf_counter())\n  -v/--verbose: print raw timing results; repeat for more digits precision\n  -u/--unit: set the output time unit (nsec, usec, msec, or sec)\n  -h/--help: print this usage message and exit\n  --: separate options from statement, use when statement starts with -\n  statement: statement to be timed (default 'pass')\n\nA multi-line statement may be given by specifying each line as a\nseparate argument; indented lines are possible by enclosing an\nargument in quotes and using leading spaces.  Multiple -s options are\ntreated similarly.\n\nIf -n is not given, a suitable number of loops is calculated by trying\nincreasing numbers from the sequence 1, 2, 5, 10, 20, 50, ... until the\ntotal time is at least 0.2 seconds.\n\nNote: there is a certain baseline overhead associated with executing a\npass statement.  It differs between versions.  The code here doesn't try\nto hide it, but you should be aware of it.  The baseline overhead can be\nmeasured by invoking the program without arguments.\n\nClasses:\n\n    Timer\n\nFunctions:\n\n    timeit(string, string) -> float\n    repeat(string, string) -> list\n    default_timer() -> float\n\n";
+
+            builtin_entry const sTimeitMain[] =
+            {
+                { "main", timeit_main },
+                { "reindent", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        // (reindent(src, indent): src.replace("\n", "\n" + " " * indent))
+                        std::vector<object*> a;
+                        if (!parse_arguments("reindent", aArgs, aKwargs, { "src", "indent" }, 2u, 0u, a))
+                            return nullptr;
+                        long long indent = 0;
+                        if (!to_index(a[1], indent))
+                            return nullptr;
+                        return call_method_named(a[0], "replace", { make_str("\n"), make_str("\n" + std::string(static_cast<std::size_t>(std::max(indent, 0ll)), ' ')) });
+                    } }
+            };
+
             bool timeit_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
                 aAttributes.emplace_back("Timer", make_class_of("timeit", "Timer", {}, sTimerMethods));
@@ -1458,6 +1741,9 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("default_repeat", make_int(5));
                 aAttributes.emplace_back("dummy_src_name", make_str("<timeit-src>"));
                 aAttributes.emplace_back("__all__", make_list({ make_str("Timer"), make_str("timeit"), make_str("repeat"), make_str("default_timer") }));
+                for (auto const& f : sTimeitMain)
+                    aAttributes.emplace_back(f.name, make_builtin(f));
+                aAttributes.emplace_back("__doc__", make_str(sTimeitDoc));
                 return !failed();
             }
 

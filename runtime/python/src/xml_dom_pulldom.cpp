@@ -467,6 +467,7 @@ namespace neos::python_runtime::detail::xml_dom_pulldom_module
                         py xml;
                         if (self.attr("documentFactory").is_none())
                         {
+                            xml = module_of("xml.dom.minidom");    // (import xml.dom.minidom)
                             xml = module_of("xml");
                             self.set_attr("documentFactory", xml.attr("dom").attr("minidom").attr("Document").attr("implementation"));
                         }

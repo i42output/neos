@@ -744,6 +744,8 @@ set_target_properties(neos_openblas PROPERTIES IMPORTED_LOCATION "${NEOS_OPENBLA
 if(NEOS_CLANG_BUILTINS)
     list(GET NEOS_CLANG_BUILTINS -1 NEOS_CLANG_BUILTINS)
     set_property(TARGET neos_openblas APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${NEOS_CLANG_BUILTINS}")
+    # (and the Python runtime plugin's (compiled by clang-cl): its 128-bit integer division and remainder (__divti3, __modti3, ...))
+    target_link_libraries(python PRIVATE "${NEOS_CLANG_BUILTINS}")
 endif()
 add_dependencies(neos_openblas openblas)
 

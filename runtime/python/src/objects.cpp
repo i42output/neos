@@ -32,7 +32,7 @@
 
   Portions of this file are derived from CPython 3.13 (Objects/floatobject.c, Objects/complexobject.c,
   Objects/longobject.c, Objects/rangeobject.c, Objects/sliceobject.c, Objects/tupleobject.c, Objects/exceptions.c,
-  Python/bltinmodule.c, Python/pyhash.c, Python/errors.c (_PyErr_WriteUnraisableMsg), Modules/mathmodule.c and
+  Python/bltinmodule.c (also its functions' docstrings), Python/pyhash.c, Python/errors.c (_PyErr_WriteUnraisableMsg), Modules/mathmodule.c and
   Modules/cmathmodule.c; the reductions (pickling) of
   Objects/listobject.c, Objects/dictobject.c, Objects/unicodeobject.c, Objects/methodobject.c, Objects/typeobject.c and
   Objects/classobject.c (method_reduce); Objects/typeobject.c's object_set_class (__class__ assignment)),
@@ -2914,7 +2914,10 @@ namespace neos::python_runtime
                 }
                 return (retain(aLhs), aLhs);
             }
-            if (kind_of(aLhs) == NEOS_PY_DICT && aOperation == NEOS_PY_OR && (aInplace || kind_of(builtin_value(aRhs)) == NEOS_PY_DICT))
+            // (not a subclass's instance with a reflected | of its own (e.g. dict | OrderedDict: OrderedDict.__ror__, first (as CPython's 
+            // binary_op1: a subclass's reflected method before the base's)))
+            if (kind_of(aLhs) == NEOS_PY_DICT && aOperation == NEOS_PY_OR && (aInplace || (kind_of(builtin_value(aRhs)) == NEOS_PY_DICT &&
+                !(builtin_value(aRhs) != aRhs && has_special_method(aRhs, "__ror__")))))
             {
                 ref result{ aInplace ? (retain(aLhs), aLhs) : make_dict() };
                 if ((!aInplace && !dict_update(result.get(), aLhs)) || !dict_update(result.get(), aRhs))
@@ -3224,6 +3227,15 @@ namespace neos::python_runtime
                 case NEOS_PY_GE: return make_bool(order >= 0);
                 default: break;
                 }
+            }
+            // (two builtin methods (bound): equal if they are the same method of the same object (CPython's meth_richcompare: e.g. 
+            // l.append == l.append, each made when it is read); unbound ones are one object each (class_function): themselves)
+            if (kind_of(aLhs) == NEOS_PY_FUNCTION && kind_of(aRhs) == NEOS_PY_FUNCTION && (aOperation == NEOS_PY_EQ || aOperation == NEOS_PY_NE))
+            {
+                auto const& l = *as<function_object>(aLhs);
+                auto const& r = *as<function_object>(aRhs);
+                bool const same = aLhs == aRhs || (l.self != nullptr && l.self == r.self && l.function == r.function && l.data == r.data && l.name == r.name);
+                return make_bool(aOperation == NEOS_PY_EQ ? same : !same);
             }
             // (two slices (CPython 3.12's): their (start, stop, step)'s)
             if (kind_of(aLhs) == NEOS_PY_SLICE && kind_of(aRhs) == NEOS_PY_SLICE)
@@ -4587,6 +4599,15 @@ namespace neos::python_runtime
             return make_str(std::move(result));
         }
 
+        // (str.format_map(mapping): its fields looked up in the mapping itself (str.cpp's))
+        object* str_format_map(object* aSelf, object* aMapping)
+        {
+            std::string result;
+            if (!format_string(as<str_object>(builtin_value(aSelf))->value, {}, aMapping, result, 0))
+                return nullptr;
+            return make_str(std::move(result));
+        }
+
         // int's and float's methods
         object* int_bit_length(object* aSelf, std::vector<object*> const& aArgs, object*)
         {
@@ -5537,8 +5558,17 @@ namespace neos::python_runtime
                     }
                     return make_str(f.name);
                 }
+                // (a module's function (its module known): the module, as CPython's builtin function's __self__)
                 if (std::strcmp(aName, "__self__") == 0)
+                {
+                    if (f.self == nullptr && f.module != nullptr)
+                    {
+                        if (auto const module = fn_import(f.module))
+                            return module;
+                        clear_error();
+                    }
                     return new_reference(f.self != nullptr ? f.self : none());
+                }
                 if (std::strcmp(aName, "__isabstractmethod__") == 0 && abstract_builtins().contains(aObject))
                     return make_bool(true);
                 if (std::strcmp(aName, "__module__") == 0)
@@ -5564,8 +5594,17 @@ namespace neos::python_runtime
                     auto const& entry = aName[9] == '_' ? sReduce : sReduceEx;
                     return make_function(entry.name, call_builtin, const_cast<builtin_entry*>(&entry), aObject);
                 }
-                if (std::strcmp(aName, "__doc__") == 0 && f.doc != nullptr)
-                    return make_str(f.doc);
+                // (a docstring that begins with its signature (Argument Clinic's "name(...)\n--\n\n"): that is its __text_signature__ ("(...)"),
+                // and the rest its __doc__ (None if empty), as CPython's _PyType_GetTextSignatureFromInternalDoc and _PyType_GetDocFromInternalDoc)
+                if ((std::strcmp(aName, "__doc__") == 0 || std::strcmp(aName, "__text_signature__") == 0) && f.doc != nullptr)
+                {
+                    std::string_view const doc{ f.doc };
+                    auto const end = doc.starts_with(f.name + "(") ? doc.find(")\n--\n\n") : std::string_view::npos;
+                    if (aName[2] == 't')
+                        return end != std::string_view::npos ? make_str(std::string{ doc.substr(f.name.size(), end + 1u - f.name.size()) }) : new_reference(none());
+                    auto const text = end != std::string_view::npos ? doc.substr(end + 6u) : doc;
+                    return end != std::string_view::npos && text.empty() ? new_reference(none()) : make_str(std::string{ text });
+                }
                 if (std::strcmp(aName, "__doc__") == 0 || std::strcmp(aName, "__text_signature__") == 0)
                     return new_reference(none());
                 if (std::strcmp(aName, "__eq__") == 0 || std::strcmp(aName, "__ne__") == 0 || std::strcmp(aName, "__hash__") == 0 || 
@@ -5629,6 +5668,16 @@ namespace neos::python_runtime
             {
                 clear_error();
                 return class_doc(aObject);
+            }
+            // (an object's __init__: its type's, bound to it (CPython's method-wrapper, e.g. [].__init__))
+            if (std::strcmp(aName, "__init__") == 0)
+            {
+                clear_error();
+                ref const cls{ class_of(aObject) };
+                ref const init{ cls && cls.get() != aObject ? getattr(cls.get(), "__init__") : nullptr };
+                if (init && kind_of(init.get()) == NEOS_PY_FUNCTION && as<function_object>(init.get())->self == nullptr)
+                    return make_function("__init__", as<function_object>(init.get())->function, as<function_object>(init.get())->data, aObject);
+                clear_error();
             }
             return error("AttributeError", std::string{ "'" } + type_name(aObject) + "' object has no attribute '" + aName + "'");
         }
@@ -6341,17 +6390,28 @@ namespace neos::python_runtime
                 }
                 else
                 {
-                    object* found = nullptr;
-                    if (aKwargs != nullptr)
-                        for (auto const& item : as<dict_object>(aKwargs)->items)
-                            if (kind_of(item.first) == NEOS_PY_STR && as<str_object>(item.first)->value == head)
-                                found = item.second;
-                    if (found == nullptr)
+                    // (str.format_map's mapping (not a dict): its item, as CPython's (e.g. a dict subclass's __missing__))
+                    if (aKwargs != nullptr && kind_of(aKwargs) != NEOS_PY_DICT)
                     {
-                        error("KeyError", "'" + head + "'");
-                        return false;
+                        ref const key{ make_str(head) };
+                        value = ref{ getitem(aKwargs, key.get()) };
+                        if (!value)
+                            return false;
                     }
-                    value = ref::borrowed(found);
+                    else
+                    {
+                        object* found = nullptr;
+                        if (aKwargs != nullptr)
+                            for (auto const& item : as<dict_object>(aKwargs)->items)
+                                if (kind_of(item.first) == NEOS_PY_STR && as<str_object>(item.first)->value == head)
+                                    found = item.second;
+                        if (found == nullptr)
+                        {
+                            error("KeyError", "'" + head + "'");
+                            return false;
+                        }
+                        value = ref::borrowed(found);
+                    }
                 }
                 // (.attribute and [key])
                 for (std::size_t p = first; p != std::string::npos && p < name.size();)
@@ -6763,12 +6823,14 @@ namespace neos::python_runtime
             object* annotationMaker = nullptr;  ///< (a function that makes its annotations (when __annotations__ is first read): if it raises, they are their sources)
             std::vector<object*> cells;     ///< (a closure's: the values of its function's leading parameters)
             std::vector<std::pair<std::string, object*>> attributes;
+            object* dict = nullptr;         ///< (its __dict__, once read: then its attributes other than __doc__, __annotations__ and __type_params__ are its)
             char flavour = 0;               ///< (G: a generator function, C: a coroutine function (async def), A: an async generator function)
             mutable std::int32_t directParameters = -2; ///< (the program calls it itself (see direct_code) with this many arguments (-1: never; -2: not yet known))
             ~script_function_object() 
             { 
                 release(globals);
                 release(annotationMaker);
+                release(dict);
                 for (auto& p : parameters) 
                     release(p.defaultValue); 
                 for (auto c : cells)
@@ -6803,6 +6865,27 @@ namespace neos::python_runtime
         }
 
         std::map<std::string, object*>& imported();
+
+        // (a module by its name: imported()'s, else sys.modules's (e.g. a module that importlib imported at run time): borrowed (null: none))
+        object* module_named(std::string const& aName)
+        {
+            if (auto const m = imported().find(aName); m != imported().end() && m->second != nullptr)
+                return m->second;
+            ref const modules{ imported_modules() };
+            if (!modules || kind_of(modules.get()) != NEOS_PY_DICT)
+            {
+                clear_error();
+                return nullptr;
+            }
+            ref const key{ make_str(aName) };
+            auto const at = dict_find(modules.get(), key.get());
+            if (at < 0)
+            {
+                clear_error();
+                return nullptr;
+            }
+            return as<dict_object>(modules.get())->items[static_cast<std::size_t>(at)].second;
+        }
 
         // --- a function's code object (__code__): what is known of its code
 
@@ -6864,21 +6947,37 @@ namespace neos::python_runtime
 
         object* function_code(object* aFunction);
 
+        // (the attributes that are a function's own (not in its __dict__, as CPython's slots))
+        bool function_slot(std::string_view aName)
+        {
+            return aName == "__doc__" || aName == "__annotations__" || aName == "__type_params__" || aName == "__name__" || aName == "__qualname__" || 
+                aName == "__dict__";
+        }
+
         object* script_function_getattr(neos_py_context*, object* aSelf, char const* aName)
         {
             auto const& f = *as<script_function_object>(aSelf);
+            // (its __dict__ (once read): its attributes)
+            if (f.dict != nullptr && !function_slot(aName))
+            {
+                ref const key{ make_str(aName) };
+                if (auto const at = dict_find(f.dict, key.get()); at >= 0)
+                    return new_reference(as<dict_object>(f.dict)->items[static_cast<std::size_t>(at)].second);
+                clear_error();
+            }
             for (auto const& a : f.attributes)
                 if (a.first == aName)
                 {
                     retain(a.second);
                     return a.second;
                 }
+            // (its names and its module's name: one str for each name (as CPython's: a function's, and the module's __name__))
             if (std::strcmp(aName, "__name__") == 0)
-                return make_str(f.name);
+                return interned_name(f.name);
             if (std::strcmp(aName, "__qualname__") == 0)
-                return make_str(f.qualname.empty() ? f.name : f.qualname);
+                return interned_name(f.qualname.empty() ? f.name : f.qualname);
             if (std::strcmp(aName, "__module__") == 0)
-                return make_str(f.module);
+                return interned_name(f.module);
             if (std::strcmp(aName, "__doc__") == 0)
                 return none();
             if (std::strcmp(aName, "__annotations__") == 0)
@@ -6911,8 +7010,8 @@ namespace neos::python_runtime
                     ref ns;
                     if (self.module == "__main__")
                         ns = ref{ fn_module_namespace("__main__", nullptr) };
-                    else if (auto const m = imported().find(self.module); m != imported().end() && m->second != nullptr)
-                        ns = ref{ getattr(m->second, "__dict__") };
+                    else if (auto const m = module_named(self.module))
+                        ns = ref{ getattr(m, "__dict__") };
                     if (!ns)
                     {
                         clear_error();
@@ -6972,24 +7071,36 @@ namespace neos::python_runtime
                 release(kw);
                 return values.empty() ? none() : make_tuple(std::move(values));
             }
+            // (its __dict__: made once (its attributes then are its), as CPython's (a live dict: e.g. update_wrapper updates it))
             if (std::strcmp(aName, "__dict__") == 0)
             {
-                auto const d = make_dict();
-                for (auto const& a : f.attributes)
+                auto& self = *as<script_function_object>(aSelf);
+                if (self.dict == nullptr)
                 {
-                    if (a.first == "__doc__" || a.first == "__annotations__" || a.first == "__type_params__")
-                        continue;
-                    ref const key{ make_str(a.first) };
-                    dict_set(d, key.get(), a.second);
+                    self.dict = make_dict();
+                    for (auto a = self.attributes.begin(); a != self.attributes.end();)
+                        if (!function_slot(a->first))
+                        {
+                            ref const key{ make_str(a->first) };
+                            dict_set(self.dict, key.get(), a->second);
+                            release(a->second);
+                            a = self.attributes.erase(a);
+                        }
+                        else
+                            ++a;
                 }
-                return d;
+                return new_reference(self.dict);
             }
             if (std::strcmp(aName, "__code__") == 0)
                 return function_code(aSelf);
             if (std::strcmp(aName, "__globals__") == 0)
                 return function_globals(aSelf);
+            // (none: the empty tuple, one object (as CPython's))
             if (std::strcmp(aName, "__type_params__") == 0)
-                return make_tuple();
+            {
+                static object* const sNone = make_tuple();
+                return new_reference(sNone);
+            }
             if (std::strcmp(aName, "__builtins__") == 0)
                 return getattr(ref{ fn_import("builtins") }.get(), "__dict__");
             // (__get__(instance, owner=None): a method of the instance (the function itself if the instance is None), as a class's attribute
@@ -7027,6 +7138,42 @@ namespace neos::python_runtime
                 }
                 (aName[2] == 'n' ? f.name : f.qualname) = as<str_object>(aValue)->value;
                 return 0;
+            }
+            // (__dict__ = a dict: its attributes)
+            if (std::strcmp(aName, "__dict__") == 0)
+            {
+                if (aValue == nullptr || kind_of(aValue) != NEOS_PY_DICT)
+                {
+                    error("TypeError", aValue == nullptr ? "cannot delete __dict__" : std::string{ "__dict__ must be set to a dictionary, not a '" } + type_name(aValue) + "'");
+                    return -1;
+                }
+                for (auto a = f.attributes.begin(); a != f.attributes.end();)
+                    if (!function_slot(a->first))
+                    {
+                        release(a->second);
+                        a = f.attributes.erase(a);
+                    }
+                    else
+                        ++a;
+                retain(aValue);
+                release(f.dict);
+                f.dict = aValue;
+                return 0;
+            }
+            // (its __dict__ (once read): its attributes)
+            if (f.dict != nullptr && !function_slot(aName))
+            {
+                ref const key{ make_str(aName) };
+                if (aValue != nullptr)
+                    return dict_set(f.dict, key.get(), aValue);
+                if (dict_find(f.dict, key.get()) < 0)
+                {
+                    clear_error();
+                    error("AttributeError", "'function' object has no attribute '" + std::string{ aName } + "'");
+                    return -1;
+                }
+                ref const r{ call_method_named(f.dict, "__delitem__", { new_reference(key.get()) }) };
+                return r ? 0 : -1;
             }
             for (auto a = f.attributes.begin(); a != f.attributes.end(); ++a)
                 if (a->first == aName)
@@ -7133,7 +7280,10 @@ namespace neos::python_runtime
             if (aKwargs != nullptr)
                 for (auto const& item : as<dict_object>(aKwargs)->items)
                 {
-                    auto const& key = as<str_object>(item.first)->value;
+                    // (a keyword that is not a str (e.g. a partial's keywords with 1234 added): TypeError, as CPython's)
+                    if (kind_of(builtin_value(item.first)) != NEOS_PY_STR)
+                        return error("TypeError", "keywords must be strings");
+                    auto const& key = as<str_object>(builtin_value(item.first))->value;
                     std::optional<std::size_t> slot;
                     for (std::size_t p = 0u; p < parameters.size(); ++p)
                         if ((parameters[p].kind == script_parameter::Positional || parameters[p].kind == script_parameter::KeywordOnly) && parameters[p].name == key &&
@@ -7499,6 +7649,10 @@ namespace neos::python_runtime
             // (its function's attributes (e.g. its docstring))
             for (auto const& a : function.attributes)
                 f->attributes.emplace_back(a.first, (retain(a.second), a.second));
+            if (function.dict != nullptr)
+                for (auto const& item : as<dict_object>(function.dict)->items)
+                    if (kind_of(item.first) == NEOS_PY_STR)
+                        f->attributes.emplace_back(as<str_object>(item.first)->value, (retain(item.second), item.second));
             return &f->h.base;
         }
 
@@ -7507,11 +7661,13 @@ namespace neos::python_runtime
         object* function_globals(object* aFunction)
         {
             auto const& f = *as<script_function_object>(aFunction);
+            // (a function of a source file's module: the module's namespace (also when a program that exec runs imports the module at run time, 
+            // e.g. importlib's: its globals are then that program's)); exec's code's: exec's globals)
+            if (f.module != "__main__")
+                if (auto const m = module_named(f.module))
+                    return getattr(m, "__dict__");
             if (f.globals != nullptr)
                 return new_reference(f.globals);
-            if (f.module != "__main__")
-                if (auto const m = imported().find(f.module); m != imported().end() && m->second != nullptr)
-                    return getattr(m->second, "__dict__");
             return fn_module_namespace("__main__", nullptr);
         }
 
@@ -7928,7 +8084,25 @@ namespace neos::python_runtime
         object* fn_from_bool(bool aValue) { return make_bool(aValue); }
         object* fn_from_int(std::int64_t aValue) { return make_int(aValue); }
         object* fn_from_float(double aValue) { return make_float(aValue); }
-        object* fn_from_str(char const* aText) { return make_str(std::string{ argument_text(aText) }); }
+        // (the str of a text that the program holds (e.g. a variable bound to a literal, a = b = 'x'): one object while the program's string
+        // is the same (its address; its text checked, as a string's memory can be reused), so that the str is the same object at each use
+        // (as CPython's: a is b); a text the program makes (e.g. a slice) is another string, so another str)
+        object* fn_from_str(char const* aText)
+        {
+            auto const text = argument_text(aText);
+            struct entry { char const* text = nullptr; object* str = nullptr; };
+            thread_local entry tCache[1024];
+            if (aText == nullptr)
+                return make_str(std::string{ text });
+            auto& e = tCache[(reinterpret_cast<std::uintptr_t>(aText) >> 3) % std::size(tCache)];
+            if (e.text == aText && e.str != nullptr && std::string_view{ as<str_object>(e.str)->value } == text)
+                return new_reference(e.str);
+            auto const result = make_str(std::string{ text });
+            release(e.str);
+            e.str = new_reference(result);
+            e.text = aText;
+            return result;
+        }
         object* fn_from_complex(double aReal, double aImag) { return make_complex(aReal, aImag); }
         bool fn_truth(object* aObject) { return truth(aObject) == 1; }
         char const* fn_str(object* aObject)
@@ -8893,6 +9067,21 @@ namespace neos::python_runtime
         object* structseq_new(std::string_view aQualifiedName, object* aArgs, object* aKwargs, bool& aFound);  // (structseq.cpp)
         object* structseq_type_attribute(std::string_view aQualifiedName, char const* aName);                // (structseq.cpp)
 
+        // (type.mro(cls): its MRO, a list (the MRO that its __mro__ is))
+        object* fn_type_mro(neos_py_context*, void*, object* aArgs, object*)
+        {
+            auto const& args = tuple_items(aArgs);
+            if (args.size() != 1u)
+                return error("TypeError", "mro() takes no arguments (" + std::to_string(args.empty() ? 0u : args.size() - 1u) + " given)");
+            ref const mro{ getattr(args[0], "__mro__") };
+            if (!mro)
+                return nullptr;
+            std::vector<object*> items;
+            for (auto c : tuple_items(mro.get()))
+                items.push_back(new_reference(c));
+            return make_list(std::move(items));
+        }
+
         object* make_type_object(std::string aName, std::string aQualifiedName)
         {
             return &(new type_object{ { { &sTypeType.base } }, std::move(aName), std::move(aQualifiedName) })->h.base;
@@ -8971,7 +9160,7 @@ namespace neos::python_runtime
         bool unhashable_builtin_type(std::string_view aQualifiedName)
         {
             static std::set<std::string, std::less<>> const sUnhashable = { "list", "dict", "set", "bytearray", "collections.deque", "collections.OrderedDict",
-                "collections.defaultdict", "collections.Counter", "dict_keys", "dict_items" };
+                "collections.defaultdict", "collections.Counter", "dict_keys", "dict_items", "functools.KeyWrapper" };
             return sUnhashable.contains(aQualifiedName);
         }
 
@@ -9001,14 +9190,23 @@ namespace neos::python_runtime
                     for (auto o : as<list_object>(objectNames.get())->items)
                         if (kind_of(o) == NEOS_PY_STR && as<str_object>(o)->value == name)
                             inherited = true;
-                if (inherited && !(name == "__hash__" && (unhashable_builtin_type(q) || q == "int" || q == "str" || q == "float" || q == "tuple" || 
-                    q == "bytes" || q == "frozenset" || q == "complex" || q == "range")))
-                    continue;
+                bool const ownHash = name == "__hash__" && (unhashable_builtin_type(q) || q == "int" || q == "str" || q == "float" || q == "tuple" ||
+                    q == "bytes" || q == "frozenset" || q == "complex" || q == "range");
                 ref const value{ getattr(aType, name.c_str()) };
                 if (!value)
                 {
                     clear_error();
                     continue;
+                }
+                // (a name that object has too: the type's own if its attribute is not object's (e.g. int.__lt__, int.__repr__: CPython's 
+                // slots that the type defines), as the attribute that lookup finds (int.__lt__ is int.__dict__['__lt__']))
+                if (inherited && !ownHash)
+                {
+                    ref const objects{ getattr(objectType.get(), name.c_str()) };
+                    if (!objects)
+                        clear_error();
+                    if (!objects || objects.get() == value.get())
+                        continue;
                 }
                 if (dict_set(result.get(), n, value.get()) < 0)
                     return nullptr;
@@ -9143,6 +9341,9 @@ namespace neos::python_runtime
                 if (as<type_object>(aSelf)->qualifiedName != "object")
                     if (auto const function = class_function("object", aName))
                         return function;
+                // (mro(): type's method, of it (type.mro: unbound))
+                if (std::strcmp(aName, "mro") == 0)
+                    return make_function("mro", fn_type_mro, nullptr, as<type_object>(aSelf)->qualifiedName == "type" ? nullptr : aSelf);
                 return error("AttributeError", "type object '" + as<type_object>(aSelf)->name + "' has no attribute '" + aName + "'");
             };
             type.getitem = [](neos_py_context*, neos_py_object* aSelf, neos_py_object* aKey) -> neos_py_object*
@@ -12480,7 +12681,7 @@ namespace neos::python_runtime
             else
                 ::operator delete(aObject);
         }
-        struct wrapper_object { header h; int kind; object* function; object* setter; object* deleter = nullptr; object* doc = nullptr; ~wrapper_object() { release(function); release(setter); release(deleter); release(doc); } };   // (staticmethod, classmethod or property (doc: its __doc__, if given or set))
+        struct wrapper_object { header h; int kind; object* function; object* setter; object* deleter = nullptr; object* doc = nullptr; object* dict = nullptr; ~wrapper_object() { release(function); release(setter); release(deleter); release(doc); release(dict); } };   // (staticmethod, classmethod or property (doc: its __doc__, if given or set; dict: a staticmethod's or classmethod's __dict__))
         struct super_object { header h; object* cls; object* self; ~super_object() { release(cls); release(self); } };
 
         enum : int { StaticMethod, ClassMethod, Property, CachedProperty };
@@ -12805,6 +13006,8 @@ namespace neos::python_runtime
             return sTypes;
         }
 
+        std::map<std::string, object* (*)(char const*), std::less<>>& type_attribute_providers();
+
         // (an attribute found in a class, as accessed through an instance (or the class itself: aSelf null))
         object* bind_attribute(object* aAttribute, object* aSelf, object* aClass)
         {
@@ -12856,6 +13059,17 @@ namespace neos::python_runtime
                 as<function_object>(aAttribute)->binds) ||
                 method_types().contains(aAttribute->type)))
                 return make_bound_method(aAttribute, aSelf);
+            // (an object of a type of a module (or an instance of a subclass of one) whose type has a __get__ (its type attribute provider's, e.g. 
+            // functools.partial's): its __get__(instance (or None), class))
+            if (auto const value = is_instance(aAttribute) ? as<instance_object>(aAttribute)->value : aAttribute; value != nullptr && kind_of(value) == NEOS_PY_OTHER &&
+                value->type != &sScriptFunctionType.base)
+                if (auto const type = python_type(value); type != nullptr)
+                    if (auto const provider = type_attribute_providers().find(std::string_view{ type->base.name }); provider != type_attribute_providers().end())
+                        if (ref const get{ provider->second("__get__") })
+                        {
+                            object* const args[] = { aAttribute, aSelf != nullptr ? aSelf : none(), aClass };
+                            return arguments_call(get.get(), args, nullptr, nullptr);
+                        }
             retain(aAttribute);
             return aAttribute;
         }
@@ -13287,7 +13501,8 @@ namespace neos::python_runtime
                         return nullptr;
                 }
             // (a type of a module's own pickling method (e.g. array.array.__reduce_ex__): bound to the instance (as CPython's method descriptor))
-            if (auto const value = builtin_value(aSelf); value != aSelf && (name == "__reduce_ex__" || name == "__reduce__" || name == "__getstate__"))
+            if (auto const value = builtin_value(aSelf); value != aSelf && (name == "__reduce_ex__" || name == "__reduce__" || name == "__getstate__" ||
+                name == "__setstate__"))
                 if (auto const type = python_type(value); type != nullptr)
                     if (auto const provider = type_attribute_providers().find(std::string_view{ type->base.name }); provider != type_attribute_providers().end())
                         if (ref const method{ provider->second(aName) })
@@ -13512,13 +13727,26 @@ namespace neos::python_runtime
                 // (a subclass of a type of a module (e.g. datetime.datetime, collections.deque): its type's name is the class's (as CPython's 
                 // reprs of them name the object's type))
                 auto const& cls = *as<class_object>(user_class_of(aSelf));
+                // (functools.partial's: the class's module and qualified name (as CPython's partial_repr))
                 if (cls.nativeBase != nullptr && is_type_object(cls.nativeBase))
                     for (auto const& prefix : { as<type_object>(cls.nativeBase)->qualifiedName, as<type_object>(cls.nativeBase)->name })
                         if (text.starts_with(prefix + "("))
                         {
-                            text = cls.name + text.substr(prefix.size());
+                            auto const name = as<type_object>(cls.nativeBase)->qualifiedName == "functools.partial" ?
+                                cls.module + "." + (cls.qualname.empty() ? cls.name : cls.qualname) : cls.name;
+                            text = name + text.substr(prefix.size());
                             break;
                         }
+                // (a subclass of set or frozenset: its class's name (CPython's set_repr: "S({1})", "S()"))
+                if (cls.builtinBase == "set" || cls.builtinBase == "frozenset")
+                {
+                    if (text == "set()" || text == "frozenset()")
+                        text = cls.name + "()";
+                    else if (text.starts_with("frozenset("))
+                        text = cls.name + text.substr(9u);
+                    else if (text.starts_with("{"))
+                        text = cls.name + "(" + text + ")";
+                }
                 return make_str(text);
             }
             return make_str(default_repr_of(aSelf));
@@ -14217,6 +14445,11 @@ namespace neos::python_runtime
 
         int instance_setattr(neos_py_context*, object* aSelf, char const* aName, object* aValue)
         {
+            // (an attribute that the type of a module that the class derives from has (and the class's own classes do not): the type's)
+            if (auto const& instance = *as<instance_object>(aSelf); instance.value != nullptr)
+                if (auto const hooks = native_hooks(instance.cls); hooks != nullptr && hooks->setattr != nullptr && class_lookup(instance.cls, aName) == nullptr)
+                    if (auto const r = hooks->setattr(aSelf, aName, aValue); r != 1)
+                        return r;
             return user_setattr(aSelf, as<instance_object>(aSelf)->attributes, aName, aValue);
         }
 
@@ -14859,6 +15092,52 @@ namespace neos::python_runtime
         }
 
         // (list.__init__(self, ...), dict.__init__(self, ...) etc.: an instance's value (a subclass of a mutable builtin type))
+        // (a value of a mutable builtin type (aBase) made again of __init__'s arguments, in place (as CPython's dict_init, list___init__, 
+        // set_init and bytearray___init__: a dict is updated (not cleared); a list, set or bytearray has the new contents))
+        bool init_mutable_builtin(object* aTarget, std::string const& aBase, object* aArgs, object* aKwargs)
+        {
+            ref const value{ builtin_construct(aBase, aArgs, aKwargs) };
+            if (!value)
+                return false;
+            if (aBase == "dict")
+            {
+                auto const items = as<dict_object>(value.get())->items;
+                for (auto const& item : items)
+                    if (dict_set(aTarget, item.first, item.second) != 0)
+                        return false;
+                return true;
+            }
+            if (aBase == "set")
+            {
+                ref const cleared{ call_method_named(aTarget, "clear", {}) };
+                ref const updated{ cleared ? call_method_named(aTarget, "update", { new_reference(value.get()) }) : nullptr };
+                return static_cast<bool>(updated);
+            }
+            ref const all{ make_slice(nullptr, nullptr, nullptr) };
+            return setitem(aTarget, all.get(), value.get()) == 0;
+        }
+
+        object* builtin_init(neos_py_context*, void*, neos_py_object* aArgs, neos_py_object* aKwargs);
+
+        // (list.__init__, dict.__init__ and bytearray.__init__ (aData: the type's name): of a value of the type, its contents made again; of an
+        // instance of a class (a subclass's): builtin_init's)
+        object* mutable_type_init(neos_py_context*, void* aData, neos_py_object* aArgs, neos_py_object* aKwargs)
+        {
+            std::string const type{ static_cast<char const*>(aData) };
+            auto const& args = tuple_items(aArgs);
+            if (args.empty())
+                return error("TypeError", "descriptor '__init__' of '" + type + "' object needs an argument");
+            if (is_instance(args[0]))
+                return builtin_init(nullptr, nullptr, aArgs, aKwargs);
+            auto const k = kind_of(args[0]);
+            if (!(type == "list" ? k == NEOS_PY_LIST : type == "dict" ? k == NEOS_PY_DICT : k == NEOS_PY_OTHER && type_name(args[0]) == type))
+                return error("TypeError", "descriptor '__init__' requires a '" + type + "' object but received a '" + type_name(args[0]) + "'");
+            ref const rest{ make_tuple(std::vector<object*>{ args.begin() + 1, args.end() }) };
+            for (auto a : tuple_items(rest.get()))
+                retain(a);
+            return init_mutable_builtin(args[0], type, rest.get(), aKwargs) ? new_reference(none()) : nullptr;
+        }
+
         object* builtin_init(neos_py_context*, void*, neos_py_object* aArgs, neos_py_object* aKwargs)
         {
             auto const& args = tuple_items(aArgs);
@@ -14896,11 +15175,8 @@ namespace neos::python_runtime
                     ref const rest{ make_tuple(std::vector<object*>{ args.begin() + 1, args.end() }) };
                     for (auto a : tuple_items(rest.get()))
                         retain(a);
-                    ref value{ builtin_construct(base, rest.get(), aKwargs) };
-                    if (!value)
+                    if (!init_mutable_builtin(instance.value, base, rest.get(), aKwargs))
                         return nullptr;
-                    release(instance.value);
-                    instance.value = value.release_ownership();
                 }
             }
             return none();
@@ -15252,6 +15528,9 @@ namespace neos::python_runtime
             if (name == "__weakref__")
                 if (auto const descriptor = weakref_descriptor(aSelf))
                     return descriptor;
+            // (mro(): its metaclass's (type's), of it)
+            if (name == "mro")
+                return make_function("mro", fn_type_mro, nullptr, aSelf);
             return error("AttributeError", "type object '" + cls.name + "' has no attribute '" + aName + "'");
         }
 
@@ -15585,6 +15864,13 @@ namespace neos::python_runtime
             // (a subclass of a generic builtin (e.g. class L(list)): a types.GenericAlias)
             if (cls.builtinBase == "list" || cls.builtinBase == "dict" || cls.builtinBase == "tuple" || cls.builtinBase == "set" || cls.builtinBase == "frozenset")
                 return make_generic_alias(aSelf, aKey);
+            // (a subclass of a generic type of a module (e.g. class P(functools.partial), class D(collections.deque)): a types.GenericAlias of it)
+            if (cls.nativeBase != nullptr && is_type_object(cls.nativeBase))
+            {
+                if (ref const alias{ getitem(cls.nativeBase, aKey) })
+                    return make_generic_alias(aSelf, aKey);
+                clear_error();
+            }
             return error("TypeError", "type '" + cls.name + "' is not subscriptable");
         }
 
@@ -16413,6 +16699,8 @@ namespace neos::python_runtime
             return type;
         }
 
+        object* class_function_of(std::string const& aClass, char const* aName);
+
         neos_py_type make_wrapper_type()
         {
             auto type = make_type("python.wrapper", "property", retain_object, release_object<wrapper_object>);
@@ -16424,6 +16712,33 @@ namespace neos::python_runtime
             type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
             {
                 auto& w = *as<wrapper_object>(aSelf);
+                bool const methodWrapper = w.kind == StaticMethod || w.kind == ClassMethod;
+                // (a staticmethod's or classmethod's __dict__ (its function's __module__, __name__, __qualname__, __doc__ and __annotations__, copied: 
+                // CPython's functools_wraps), and its attributes)
+                if (methodWrapper)
+                {
+                    if (std::strcmp(aName, "__dict__") == 0)
+                    {
+                        if (w.dict == nullptr)
+                            w.dict = make_dict();
+                        return new_reference(w.dict);
+                    }
+                    if (w.dict != nullptr)
+                    {
+                        ref const key{ make_str(aName) };
+                        if (auto const at = dict_find(w.dict, key.get()); at >= 0)
+                            return new_reference(as<dict_object>(w.dict)->items[static_cast<std::size_t>(at)].second);
+                        clear_error();
+                    }
+                }
+                // (its descriptor methods (e.g. classmethod(f).__get__(obj, type), property.__set__(obj, value)): its type's, bound to it)
+                if ((std::strcmp(aName, "__get__") == 0 && methodWrapper) || (w.kind == Property && (std::strcmp(aName, "__set__") == 0 || std::strcmp(aName, "__delete__") == 0)))
+                {
+                    ref const unbound{ class_function_of(w.kind == StaticMethod ? "staticmethod" : w.kind == ClassMethod ? "classmethod" : "property", aName) };
+                    if (!unbound || kind_of(unbound.get()) != NEOS_PY_FUNCTION)
+                        return nullptr;
+                    return make_function(aName, as<function_object>(unbound.get())->function, as<function_object>(unbound.get())->data, aSelf);
+                }
                 if (w.kind == Property && (std::strcmp(aName, "setter") == 0 || std::strcmp(aName, "deleter") == 0 || std::strcmp(aName, "getter") == 0))
                 {
                     // (property.setter(f), property.deleter(f), property.getter(f): a copy of the property with that function)
@@ -16479,8 +16794,8 @@ namespace neos::python_runtime
                 if (std::strcmp(aName, "__doc__") == 0 && w.kind == Property && w.doc != nullptr)
                     return (retain(w.doc), w.doc);
                 // (its doc and name: its function's)
-                if (std::strcmp(aName, "__doc__") == 0 || (std::strcmp(aName, "__name__") == 0 && w.kind != StaticMethod && w.kind != ClassMethod) ||
-                    (std::strcmp(aName, "__wrapped__") == 0 && (w.kind == StaticMethod || w.kind == ClassMethod)))
+                if (std::strcmp(aName, "__doc__") == 0 || (std::strcmp(aName, "__name__") == 0 && !methodWrapper) ||
+                    (std::strcmp(aName, "__wrapped__") == 0 && methodWrapper))
                 {
                     if (std::strcmp(aName, "__wrapped__") == 0)
                         return (retain(w.function), w.function);
@@ -16504,6 +16819,28 @@ namespace neos::python_runtime
                     w.doc = aValue;
                     return 0;
                 }
+                // (a staticmethod's or classmethod's attributes: its __dict__'s)
+                if (w.kind == StaticMethod || w.kind == ClassMethod)
+                {
+                    if (std::strcmp(aName, "__func__") == 0 || std::strcmp(aName, "__wrapped__") == 0)
+                    {
+                        error("AttributeError", "readonly attribute");
+                        return -1;
+                    }
+                    if (w.dict == nullptr)
+                        w.dict = make_dict();
+                    ref const key{ make_str(aName) };
+                    if (aValue != nullptr)
+                        return dict_set(w.dict, key.get(), aValue);
+                    if (dict_find(w.dict, key.get()) < 0)
+                    {
+                        clear_error();
+                        error("AttributeError", std::string{ "'" } + (w.kind == StaticMethod ? "staticmethod" : "classmethod") + "' object has no attribute '" + aName + "'");
+                        return -1;
+                    }
+                    ref const r{ call_method_named(w.dict, "__delitem__", { new_reference(key.get()) }) };
+                    return r ? 0 : -1;
+                }
                 error("AttributeError", "'property' object attribute '" + std::string{ aName } + "' is read-only");
                 return -1;
             };
@@ -16526,12 +16863,57 @@ namespace neos::python_runtime
             // (property(fget, fset, fdel, doc): its doc)
             if (aKind == Property)
                 w->doc = function(3u);
-            return &w->h.base;
+            ref result{ &w->h.base };
+            // (staticmethod and classmethod: the function's __module__, __name__, __qualname__, __doc__ and __annotations__, those it has, in its 
+            // __dict__ (CPython's functools_wraps))
+            if (aKind == StaticMethod || aKind == ClassMethod)
+            {
+                w->dict = make_dict();
+                for (auto name : { "__module__", "__name__", "__qualname__", "__doc__", "__annotations__" })
+                {
+                    ref const value{ getattr(w->function, name) };
+                    if (!value)
+                    {
+                        ref const exception{ take_exception() };
+                        if (exception && exception_is(exception.get(), "AttributeError"))
+                            continue;
+                        if (exception)
+                            reraise_exception(exception.get());
+                        return nullptr;
+                    }
+                    ref const key{ make_str(name) };
+                    if (dict_set(w->dict, key.get(), value.get()) != 0)
+                        return nullptr;
+                }
+            }
+            return result.release_ownership();
         }
 
-        object* b_staticmethod(std::vector<object*> const& aArgs, object*) { return make_wrapper(StaticMethod, aArgs, "staticmethod"); }
-        object* b_classmethod(std::vector<object*> const& aArgs, object*) { return make_wrapper(ClassMethod, aArgs, "classmethod"); }
-        object* b_property(std::vector<object*> const& aArgs, object*) { return make_wrapper(Property, aArgs, "property"); }
+        // (staticmethod(function) and classmethod(function): no keyword arguments; property(fget=None, fset=None, fdel=None, doc=None))
+        object* b_staticmethod(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            if (aKwargs != nullptr && kind_of(aKwargs) == NEOS_PY_DICT && !as<dict_object>(aKwargs)->items.empty())
+                return error("TypeError", "staticmethod() takes no keyword arguments");
+            return make_wrapper(StaticMethod, aArgs, "staticmethod");
+        }
+        object* b_classmethod(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            if (aKwargs != nullptr && kind_of(aKwargs) == NEOS_PY_DICT && !as<dict_object>(aKwargs)->items.empty())
+                return error("TypeError", "classmethod() takes no keyword arguments");
+            return make_wrapper(ClassMethod, aArgs, "classmethod");
+        }
+        object* b_property(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            if (aKwargs == nullptr || kind_of(aKwargs) != NEOS_PY_DICT || as<dict_object>(aKwargs)->items.empty())
+                return make_wrapper(Property, aArgs, "property");
+            std::vector<object*> a;
+            if (!parse_arguments("property", aArgs, aKwargs, { "fget", "fset", "fdel", "doc" }, 0u, 0u, a))
+                return nullptr;
+            for (auto& v : a)
+                if (v == nullptr)
+                    v = none();
+            return make_wrapper(Property, a, "property");
+        }
         object* b_cached_property(std::vector<object*> const& aArgs, object*) { return make_wrapper(CachedProperty, aArgs, "cached_property"); }
 
         object* slot_function(std::string const& aClass, char const* aName);
@@ -17320,8 +17702,15 @@ namespace neos::python_runtime
                 return nullptr;
             auto const k = kind_of(aArgs[0]);
             auto const type = python_type(aArgs[0]);
+            // (an instance: its class's __call__, or its value's call (a subclass of a callable type of a module, e.g. functools.partial))
             if (is_instance(aArgs[0]))
-                return make_bool(has_special_method(aArgs[0], "__call__"));
+            {
+                if (has_special_method(aArgs[0], "__call__"))
+                    return make_bool(true);
+                auto const value = builtin_value(aArgs[0]);
+                auto const valueType = value != aArgs[0] && kind_of(value) == NEOS_PY_OTHER ? python_type(value) : nullptr;
+                return make_bool(valueType != nullptr && valueType->call != nullptr);
+            }
             return make_bool(k == NEOS_PY_FUNCTION || (k == NEOS_PY_OTHER && type != nullptr && type->call != nullptr));
         }
 
@@ -17923,6 +18312,15 @@ namespace neos::python_runtime
                     return make_function(aName, call_builtin, const_cast<builtin_entry*>(&entry));
             if (std::strcmp(aName, "__new__") == 0 && (is_builtin_base(aClass) || aClass == "object"))
                 return shared_function("__new__", builtin_new);
+            if (std::strcmp(aName, "__init__") == 0 && (aClass == "list" || aClass == "dict" || aClass == "bytearray"))
+            {
+                // (one function of each type (list.__init__ is list.__init__))
+                static std::map<std::string, object*, std::less<>> sInits;
+                auto const init = sInits.try_emplace(aClass, nullptr).first;
+                if (init->second == nullptr)
+                    init->second = make_function("__init__", mutable_type_init, const_cast<char*>(init->first.c_str()));
+                return new_reference(init->second);
+            }
             if (std::strcmp(aName, "__init__") == 0 && (is_builtin_base(aClass) || aClass == "object"))
                 return shared_function("__init__", builtin_init);
             if ((aClass == "int" || aClass == "bool") && std::strcmp(aName, "from_bytes") == 0)
@@ -18270,6 +18668,19 @@ namespace neos::python_runtime
                 return unhashable(aObject);
             case NEOS_PY_OTHER:
                 break;
+            case NEOS_PY_FUNCTION:
+                if (auto const& f = *as<function_object>(aObject); f.self != nullptr)
+                {
+                    // (a bound method: as its equality (CPython's meth_hash: of its object and method))
+                    auto const h = (static_cast<std::uint64_t>(pointer_hash(f.self)) * 1000003u) ^ static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(f.function)) ^
+                        (static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(f.data)) >> 4) ^ static_cast<std::uint64_t>(std::hash<std::string>{}(f.name));
+                    aResult = static_cast<long long>(h);
+                    if (aResult == -1)
+                        aResult = -2;
+                    return true;
+                }
+                aResult = pointer_hash(aObject);
+                return true;
             default:
                 aResult = pointer_hash(aObject);
                 return true;
@@ -20942,6 +21353,208 @@ namespace neos::python_runtime
             return error("ModuleNotFoundError", std::string{ "No module named '" } + aName + "'");
         }
 
+        // (the builtin functions' docstrings (CPython 3.13's Python/bltinmodule.c and its Argument Clinic docstrings, with their text 
+        // signatures: "name(...)\n--\n\n" then the docstring))
+        char const* builtin_doc(std::string_view aName)
+        {
+            static std::unordered_map<std::string_view, char const*> const sDocs = {
+                { "abs", "abs($module, x, /)\n--\n\nReturn the absolute value of the argument." },
+                { "all", "all($module, iterable, /)\n--\n\nReturn True if bool(x) is True for all values x in the iterable.\n\n"
+                    "If the iterable is empty, return True." },
+                { "any", "any($module, iterable, /)\n--\n\nReturn True if bool(x) is True for any x in the iterable.\n\n"
+                    "If the iterable is empty, return False." },
+                { "bin", "bin($module, number, /)\n--\n\nReturn the binary representation of an integer.\n\n   >>> bin(2796202)\n"
+                    "   '0b1010101010101010101010'" },
+                { "callable", "callable($module, obj, /)\n--\n\nReturn whether the object is callable (i.e., some kind of function).\n\n"
+                    "Note that classes are callable, as are instances of classes with a\n__call__() method." },
+                { "chr", "chr($module, i, /)\n--\n\nReturn a Unicode string of one character with ordinal i; 0 <= i <= 0x10ffff." },
+                { "divmod", "divmod($module, x, y, /)\n--\n\nReturn the tuple (x//y, x%y).  Invariant: div*y + mod == x." },
+                { "format", "format($module, value, format_spec='', /)\n--\n\nReturn type(value).__format__(value, format_spec)\n\n"
+                    "Many built-in types implement format_spec according to the\nFormat Specification Mini-language. See help('FORMATTING').\n\n"
+                    "If type(value) does not supply a method named __format__\nand format_spec is empty, then str(value) is returned.\n"
+                    "See also help('SPECIALMETHODS')." },
+                { "getattr", "getattr(object, name[, default]) -> value\n\nGet a named attribute from an object.\n\ngetattr(x, 'y') is equivalent to x.y.\n"
+                    "When a default argument is given, it is returned when the attribute\n"
+                    "doesn't exist; without it, an exception is raised in that case." },
+                { "hasattr", "hasattr($module, obj, name, /)\n--\n\nReturn whether the object has an attribute with the given name.\n\n"
+                    "This is done by calling getattr(obj, name) and catching AttributeError." },
+                { "hex", "hex($module, number, /)\n--\n\nReturn the hexadecimal representation of an integer.\n\n   >>> hex(12648430)\n   '0xc0ffee'" },
+                { "input", "input($module, prompt='', /)\n--\n\nRead a string from standard input.  The trailing newline is stripped.\n\n"
+                    "The prompt string, if given, is printed to standard output without a\ntrailing newline before reading input.\n\n"
+                    "If the user hits EOF (*nix: Ctrl-D, Windows: Ctrl-Z+Return), raise\nEOFError.\nOn *nix systems, readline is used if available." },
+                { "isinstance", "isinstance($module, obj, class_or_tuple, /)\n--\n\nReturn whether an object is an instance of a class or of a subclass thereof.\n"
+                    "\nA tuple, as in ``isinstance(x, (A, B, ...))``, may be given as the\n"
+                    "target to check against.  This is equivalent to ``isinstance(x, A) or\nisinstance(x, B) or ...`` etc." },
+                { "iter", "iter(iterable) -> iterator\niter(callable, sentinel) -> iterator\n\n"
+                    "Get an iterator from an object.  In the first form, the argument must\nsupply its own iterator, or be a sequence.\n"
+                    "In the second form, the callable is called until it returns the\nsentinel." },
+                { "len", "len($module, obj, /)\n--\n\nReturn the number of items in a container." },
+                { "max", "max(iterable, *[, default=obj, key=func]) -> value\nmax(arg1, arg2, *args, *[, key=func]) -> value\n\n"
+                    "With a single iterable argument, return its biggest item. The\ndefault keyword-only argument specifies an object to return if\n"
+                    "the provided iterable is empty.\nWith two or more positional arguments, return the largest argument." },
+                { "min", "min(iterable, *[, default=obj, key=func]) -> value\nmin(arg1, arg2, *args, *[, key=func]) -> value\n\n"
+                    "With a single iterable argument, return its smallest item. The\ndefault keyword-only argument specifies an object to return if\n"
+                    "the provided iterable is empty.\nWith two or more positional arguments, return the smallest argument." },
+                { "next", "next(iterator[, default])\n\nReturn the next item from the iterator.  If default is given and the\n"
+                    "iterator is exhausted, it is returned instead of raising StopIteration." },
+                { "aiter", "aiter($module, async_iterable, /)\n--\n\nReturn an AsyncIterator for an AsyncIterable object." },
+                { "anext", "anext($module, aiterator, default=<unrepresentable>, /)\n--\n\nReturn the next item from the async iterator.\n\n"
+                    "If default is given and the async iterator is exhausted,\nit is returned instead of raising StopAsyncIteration." },
+                { "oct", "oct($module, number, /)\n--\n\nReturn the octal representation of an integer.\n\n   >>> oct(342391)\n   '0o1234567'" },
+                { "ord", "ord($module, character, /)\n--\n\nReturn the ordinal value of a character.\n\n"
+                    "If the argument is a one-character string, return the Unicode code\npoint of that character.\n\n"
+                    "If the argument is a bytes or bytearray object of length 1, return its\nsingle byte value." },
+                { "pow", "pow($module, /, base, exp, mod=None)\n--\n\nEquivalent to base**exp with 2 arguments or base**exp % mod with 3 arguments\n\n"
+                    "Some types, such as ints, are able to use a more efficient algorithm\nwhen invoked using the three argument form." },
+                { "print", "print($module, /, *args, sep=' ', end='\\n', file=None, flush=False)\n--\n\n"
+                    "Prints the values to a stream, or to sys.stdout by default.\n\n  sep\n    string inserted between values, default a space.\n"
+                    "  end\n    string appended after the last value, default a newline.\n  file\n"
+                    "    a file-like object (stream); defaults to the current sys.stdout.\n  flush\n    whether to forcibly flush the stream." },
+                { "repr", "repr($module, obj, /)\n--\n\nReturn the canonical string representation of the object.\n\n"
+                    "For many object types, including most builtins, eval(repr(obj)) == obj." },
+                { "round", "round($module, /, number, ndigits=None)\n--\n\nRound a number to a given precision in decimal digits.\n\n"
+                    "The return value is an integer if ndigits is omitted or None.\n"
+                    "Otherwise the return value has the same type as the number.  ndigits\nmay be negative." },
+                { "setattr", "setattr($module, obj, name, value, /)\n--\n\nSets the named attribute on the given object to the specified value.\n\n"
+                    "setattr(x, 'y', v) is equivalent to ``x.y = v``" },
+                { "delattr", "delattr($module, obj, name, /)\n--\n\nDeletes the named attribute from the given object.\n\n"
+                    "delattr(x, 'y') is equivalent to ``del x.y``" },
+                { "vars", "vars([object]) -> dictionary\n\nWithout arguments, equivalent to locals().\nWith an argument, equivalent to object.__dict__." },
+                { "dir", "dir([object]) -> list of strings\n\nIf called without an argument, return the names in the current scope.\n"
+                    "Else, return an alphabetized list of names comprising (some of) the\n"
+                    "attributes of the given object, and of attributes reachable from it.\n"
+                    "If the object supplies a method named __dir__, it will be used;\notherwise the default dir() logic is used and returns:\n"
+                    "  for a module object: the module's attributes.\n  for a class object:  its attributes, and recursively the attributes\n"
+                    "    of its bases.\n  for any other object: its attributes, its class's attributes, and\n"
+                    "    recursively the attributes of its class's base classes." },
+                { "ascii", "ascii($module, obj, /)\n--\n\nReturn an ASCII-only representation of an object.\n\n"
+                    "As repr(), return a string containing a printable representation of an\n"
+                    "object, but escape the non-ASCII characters in the string returned by\n"
+                    "repr() using \\\\x, \\\\u or \\\\U escapes. This generates a string similar\nto that returned by repr() in Python 2." },
+                { "sorted", "sorted($module, iterable, /, *, key=None, reverse=False)\n--\n\n"
+                    "Return a new list containing all items from the iterable in ascending order.\n\n"
+                    "A custom key function can be supplied to customize the sort order, and the\n"
+                    "reverse flag can be set to request the result in descending order." },
+                { "sum", "sum($module, iterable, /, start=0)\n--\n\nReturn the sum of a 'start' value (default: 0) plus an iterable of numbers\n\n"
+                    "When the iterable is empty, return the start value.\nThis function is intended specifically for use with numeric values and\n"
+                    "may reject non-numeric types." },
+                { "issubclass", "issubclass($module, cls, class_or_tuple, /)\n--\n\nReturn whether 'cls' is derived from another class or is the same class.\n\n"
+                    "A tuple, as in ``issubclass(x, (A, B, ...))``, may be given as the\n"
+                    "target to check against.  This is equivalent to ``issubclass(x, A) or\nissubclass(x, B) or ...``." },
+                { "hash", "hash($module, obj, /)\n--\n\nReturn the hash value for the given object.\n\n"
+                    "Two objects that compare equal must also have the same hash value, but the\nreverse is not necessarily true." },
+                { "id", "id($module, obj, /)\n--\n\nReturn the identity of an object.\n\n"
+                    "This is guaranteed to be unique among simultaneously existing objects.\n(CPython uses the object's memory address.)" },
+                { "open", "open($module, /, file, mode='r', buffering=-1, encoding=None,\n     errors=None, newline=None, closefd=True, opener=None)\n--\n\n"
+                    "Open file and return a stream.  Raise OSError upon failure.\n\n"
+                    "file is either a text or byte string giving the name (and the path\n"
+                    "if the file isn't in the current working directory) of the file to\nbe opened or an integer file descriptor of the file to be\n"
+                    "wrapped.  (If a file descriptor is given, it is closed when the\nreturned I/O object is closed, unless closefd is set to False.)\n"
+                    "\nmode is an optional string that specifies the mode in which the file\n"
+                    "is opened.  It defaults to 'r' which means open for reading in text\n"
+                    "mode.  Other common values are 'w' for writing (truncating the file if\n"
+                    "it already exists), 'x' for creating and writing to a new file, and\n"
+                    "'a' for appending (which on some Unix systems, means that all writes\n"
+                    "append to the end of the file regardless of the current seek position).\n"
+                    "In text mode, if encoding is not specified the encoding used is platform\n"
+                    "dependent: locale.getencoding() is called to get the current locale\n"
+                    "encoding.  (For reading and writing raw bytes use binary mode and leave\nencoding unspecified.)  The available modes are:\n\n"
+                    "========= ==========================================================\nCharacter Meaning\n"
+                    "--------- ----------------------------------------------------------\n'r'       open for reading (default)\n"
+                    "'w'       open for writing, truncating the file first\n'x'       create a new file and open it for writing\n"
+                    "'a'       open for writing, appending to the end of the file if it\n          exists\n'b'       binary mode\n"
+                    "'t'       text mode (default)\n'+'       open a disk file for updating (reading and writing)\n"
+                    "========= ==========================================================\n\n"
+                    "The default mode is 'rt' (open for reading text).  For binary random\n"
+                    "access, the mode 'w+b' opens and truncates the file to 0 bytes, while\n"
+                    "'r+b' opens the file without truncation.  The 'x' mode implies 'w' and\nraises an `FileExistsError` if the file already exists.\n"
+                    "\nPython distinguishes between files opened in binary and text modes,\n"
+                    "even when the underlying operating system doesn't.  Files opened in\n"
+                    "binary mode (appending 'b' to the mode argument) return contents as\n"
+                    "bytes objects without any decoding.  In text mode (the default, or when\n"
+                    "'t' is appended to the mode argument), the contents of the file are\n"
+                    "returned as strings, the bytes having been first decoded using a\n"
+                    "platform-dependent encoding or using the specified encoding if given.\n\n"
+                    "buffering is an optional integer used to set the buffering policy.\n"
+                    "Pass 0 to switch buffering off (only allowed in binary mode), 1 to\n"
+                    "select line buffering (only usable in text mode), and an integer > 1 to\n"
+                    "indicate the size of a fixed-size chunk buffer.   When no buffering\n"
+                    "argument is given, the default buffering policy works as follows:\n\n"
+                    "* Binary files are buffered in fixed-size chunks; the size of the buffer\n"
+                    "  is chosen using a heuristic trying to determine the underlying\n"
+                    "  device's \"block size\" and falling back on `io.DEFAULT_BUFFER_SIZE`.\n"
+                    "  On many systems, the buffer will typically be 4096 or 8192 bytes\n  long.\n\n"
+                    "* \"Interactive\" text files (files for which isatty() returns True)\n"
+                    "  use line buffering.  Other text files use the policy described above\n  for binary files.\n\n"
+                    "encoding is the name of the encoding used to decode or encode the\n"
+                    "file.  This should only be used in text mode.  The default encoding is\n"
+                    "platform dependent, but any encoding supported by Python can be\n"
+                    "passed.  See the codecs module for the list of supported encodings.\n\n"
+                    "errors is an optional string that specifies how encoding errors are to\n"
+                    "be handled---this argument should not be used in binary mode.  Pass\n"
+                    "'strict' to raise a ValueError exception if there is an encoding error\n"
+                    "(the default of None has the same effect), or pass 'ignore' to ignore\n"
+                    "errors.  (Note that ignoring encoding errors can lead to data loss.)\n"
+                    "See the documentation for codecs.register or run 'help(codecs.Codec)'\nfor a list of the permitted encoding error strings.\n\n"
+                    "newline controls how universal newlines works (it only applies to text\nmode).  It can be None, '', '\\n', '\\r', and '\\r\\n"
+                    "'.  It works as\nfollows:\n\n* On input, if newline is None, universal newlines mode is enabled.\n"
+                    "  Lines in the input can end in '\\n', '\\r', or '\\r\\n', and these are\n  translated into '\\n"
+                    "' before being returned to the caller.  If it is\n  '', universal newline mode is enabled, but line endings are returned\n"
+                    "  to the caller untranslated.  If it has any of the other legal values,\n"
+                    "  input lines are only terminated by the given string, and the line\n  ending is returned to the caller untranslated.\n\n"
+                    "* On output, if newline is None, any '\\n' characters written are\n"
+                    "  translated to the system default line separator, os.linesep.  If\n  newline is '' or '\\n"
+                    "', no translation takes place.  If newline is any\n  of the other legal values, any '\\n' characters written are translated\n"
+                    "  to the given string.\n\nIf closefd is False, the underlying file descriptor will be kept open\n"
+                    "when the file is closed.  This does not work when a file name is given\nand must be True in that case.\n\n"
+                    "A custom opener can be used by passing a callable as *opener*.  The\n"
+                    "underlying file descriptor for the file object is then obtained by\n"
+                    "calling *opener* with (*file*, *flags*).  *opener* must return an open\n"
+                    "file descriptor (passing os.open as *opener* results in functionality\nsimilar to passing None).\n\n"
+                    "open() returns a file object whose type depends on the mode, and\n"
+                    "through which the standard file operations such as reading and writing\n"
+                    "are performed.  When open() is used to open a file in a text mode ('w',\n"
+                    "'r', 'wt', 'rt', etc.), it returns a TextIOWrapper.  When used to open\n"
+                    "a file in a binary mode, the returned class varies: in read binary\n"
+                    "mode, it returns a BufferedReader; in write binary and append binary\n"
+                    "modes, it returns a BufferedWriter, and in read/write mode, it returns\na BufferedRandom.\n\n"
+                    "It is also possible to use a string or bytearray as a file for both\n"
+                    "reading and writing.  For strings StringIO can be used like a file\n"
+                    "opened in a text mode, and for bytes a BytesIO can be used like a file\nopened in a binary mode." },
+                { "exec", "exec($module, source, /, globals=None, locals=None, *, closure=None)\n--\n\n"
+                    "Execute the given source in the context of globals and locals.\n\n"
+                    "The source may be a string representing one or more Python statements\nor a code object as returned by compile().\n"
+                    "The globals must be a dictionary and locals can be any mapping,\ndefaulting to the current globals and locals.\n"
+                    "If only globals is given, locals defaults to it.\nThe closure must be a tuple of cellvars, and can only be used\n"
+                    "when source is a code object requiring exactly that many cellvars." },
+                { "eval", "eval($module, source, /, globals=None, locals=None)\n--\n\nEvaluate the given source in the context of globals and locals.\n\n"
+                    "The source may be a string representing a Python expression\nor a code object as returned by compile().\n"
+                    "The globals must be a dictionary and locals can be any mapping,\ndefaulting to the current globals and locals.\n"
+                    "If only globals is given, locals defaults to it." },
+                { "__import__", "__import__($module, /, name, globals=None, locals=None, fromlist=(),\n           level=0)\n--\n\nImport a module.\n\n"
+                    "Because this function is meant for use by the Python\ninterpreter and not for general use, it is better to use\n"
+                    "importlib.import_module() to programmatically import a module.\n\nThe globals argument is only used to determine the context;\n"
+                    "they are not modified.  The locals argument is unused.  The fromlist\n"
+                    "should be a list of names to emulate ``from name import ...``, or an\nempty list to emulate ``import name``.\n"
+                    "When importing a module from a package, note that __import__('A.B', ...)\n"
+                    "returns package A when fromlist is empty, but its submodule B when\n"
+                    "fromlist is not empty.  The level argument is used to determine whether\n"
+                    "to perform absolute or relative imports: 0 is absolute, while a positive\n"
+                    "number is the number of parent directories to search relative to the\ncurrent module." },
+                { "compile", "compile($module, /, source, filename, mode, flags=0,\n        dont_inherit=False, optimize=-1, *, _feature_version=-1)\n--\n\n"
+                    "Compile source into a code object that can be executed by exec() or eval().\n\n"
+                    "The source code may represent a Python module, statement or\nexpression.\nThe filename will be used for run-time error messages.\n"
+                    "The mode must be 'exec' to compile a module, 'single' to compile a\n"
+                    "single (interactive) statement, or 'eval' to compile an expression.\n"
+                    "The flags argument, if present, controls which future statements\ninfluence the compilation of the code.\n"
+                    "The dont_inherit argument, if true, stops the compilation inheriting\n"
+                    "the effects of any future statements in effect in the code calling\n"
+                    "compile; if absent or false these statements do influence the\ncompilation, in addition to any features explicitly specified." },
+            };
+            auto const doc = sDocs.find(aName);
+            return doc != sDocs.end() ? doc->second : nullptr;
+        }
+
         object* fn_builtin(char const* aName)
         {
             std::string_view const name{ aName };
@@ -20964,6 +21577,12 @@ namespace neos::python_runtime
                     {
                         f = make_function(entry.name, call_builtin, const_cast<builtin_entry*>(&entry));
                         as<function_object>(f)->binds = false;  // (a builtin is not a method (e.g. class A: f = len))
+                        // (CPython's docstring (its __text_signature__ too), and its module (its __self__: the builtins module; open's: _io))
+                        if (auto const doc = builtin_doc(entry.name))
+                        {
+                            as<function_object>(f)->doc = doc;
+                            as<function_object>(f)->module = std::strcmp(entry.name, "open") == 0 ? "_io" : "builtins";
+                        }
                     }
                     return new_reference(f);
                 }

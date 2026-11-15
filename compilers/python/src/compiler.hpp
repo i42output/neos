@@ -392,6 +392,8 @@ namespace neos::compilers::python
         std::map<std::string, char> iPyFlavours;             ///< (function -> G: a generator function, C: a coroutine function, A: an async generator function)
         std::map<std::string, std::vector<std::pair<std::string, std::string>>> iPyAnnotations; ///< (a function of a module -> the sources of its annotations)
         std::set<std::string> iPyPreparsed;                 ///< (the sources that preparse has made: not rewritten again (a later pass))
+        std::set<std::string> iPyDecoded;                   ///< (the sources that preparse decoded (PEP 263): not decoded again (a later pass))
+        std::map<std::string, std::string> iPyEncodingErrors;  ///< (a source -> its encoding declaration's error (PEP 263))
         struct py_fragment_syntax
         {
             std::string original;                           ///< (its source, as written)
