@@ -7,6 +7,7 @@
 neos is still a work in progress so don't expect a release anytime soon.
 
 <img width="1348" height="676" alt="image" src="https://github.com/user-attachments/assets/f403f2cf-665b-4d3b-842d-0251ac0e4fc5" />
+![](https://github.com/i42output/neos/blob/master/ada_nodes.png)
 
 # Dependencies
 * Boost
