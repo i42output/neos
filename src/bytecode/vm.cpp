@@ -338,6 +338,7 @@ namespace neos
                     std::vector<std::uint8_t> locals;
                     std::size_t codeBegin = 0u; ///< (token index)
                     std::size_t codeEnd = 0u;   ///< (token index)
+                    bool loop = false;          ///< (its code has a loop (see machine::warm))
                 };
 
                 struct label
@@ -362,6 +363,9 @@ namespace neos
                 thread_local std::uint64_t tFrameSerial = 0u;
 
                 class machine;
+
+                // (a loaded program that is interpreted until it is warm (see machine::warm): its native code, made now)
+                jit::compiled_module* tier_loaded(machine& aProgram);
 
                 // (linking (see bytecode::LinkedSection): a translation unit after the first run (the running program's 
                 // neos::link_run); the linked value of a global of another translation unit (see neos_rt_host::link))
@@ -679,6 +683,9 @@ namespace neos
                             aArguments.resize(type.results.size());
                             return aArguments;
                         }
+                        if (iTiering) [[unlikely]]
+                            if (auto* const native = warm(aFunction))
+                                return invoke(*native, aFunction, aArguments);
                         block_tables();
                         std::vector<value> stack;
                         std::vector<frame> frames;
@@ -869,6 +876,14 @@ namespace neos
                                             std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(parameterCount), stack.end() };
                                             stack.resize(stack.size() - parameterCount);
                                             current.pc = code.position();
+                                            if (iTiering) [[unlikely]]
+                                                if (auto* const native = warm(callee))
+                                                {
+                                                    // (the program is native code now: the callee runs as that)
+                                                    auto const results = invoke(*native, callee, arguments);
+                                                    stack.insert(stack.end(), results.begin(), results.end());
+                                                    break;
+                                                }
                                             enter(callee, std::move(arguments)); // note: invalidates 'current'
                                         }
                                     }
@@ -889,6 +904,13 @@ namespace neos
                                         std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(parameterCount), stack.end() };
                                         stack.resize(stack.size() - parameterCount);
                                         current.pc = code.position();
+                                        if (iTiering) [[unlikely]]
+                                            if (auto* const native = warm(callee))
+                                            {
+                                                auto const results = invoke(*native, callee, arguments);
+                                                stack.insert(stack.end(), results.begin(), results.end());
+                                                break;
+                                            }
                                         enter(callee, std::move(arguments)); // note: invalidates 'current'
                                     }
                                     break;
@@ -1538,6 +1560,8 @@ namespace neos
                             switch (op)
                             {
                             case 0x02: case 0x03: case 0x04:
+                                if (op == 0x03)
+                                    f.loop = true;
                                 token(r.byte());
                                 open.push_back(iBlocks.size());
                                 iBlocks.push_back(block_tokens{ position, 0u, 0u });
@@ -1939,6 +1963,9 @@ namespace neos
                                 value error;
                                 ~pending_restore() { if (global && error != 0u) globals[*global] = error; }
                             } const restore{ iGlobals, errorGlobal, pendingError };
+                            // (a program that is interpreted until it is warm (see warm): its native code, if it has become that)
+                            if (aNative == nullptr && iTiering)
+                                aNative = warm(aFunction);
                             // (native code's results: on the stack)
                             value fewResults[4] = {};
                             std::vector<value> manyResults;
@@ -2343,6 +2370,33 @@ namespace neos
                         return true;
                     }
                     jit::compiled_module* linker_native() const { return iLinker != nullptr ? iLinker->iNative : nullptr; }
+                    // (a program that a program running as native code loads (see neos_rt_host::load) is interpreted at first: most such
+                    // code runs once (e.g. an eval's), and making native code of it costs more than interpreting it does. It becomes 
+                    // native code (see tier_loaded) when a function of it that has a loop is called (the interpreter would run all of the
+                    // loop), or after TierCalls calls of its functions; calls made after that run the native code (those from its 
+                    // interpreted code that is still running too))
+                    static constexpr std::uint32_t TierCalls = 128u;
+                    void set_tiering() { iTiering = true; }
+                    bool tiering() const { return iTiering; }
+                    jit::compiled_module* warm(std::uint32_t aFunction)
+                    {
+                        if (iTierNative == nullptr && iTiering && (iFunctions[aFunction].loop || ++iTierCalls >= TierCalls))
+                        {
+                            iTierNative = tier_loaded(*this);
+                            // (none can be made (e.g. an instruction that the code generator does not have): it stays interpreted)
+                            if (iTierNative == nullptr)
+                                iTiering = false;
+                        }
+                        return iTierNative;
+                    }
+                    void set_native(jit::compiled_module* aNative)
+                    {
+                        iNative = aNative;
+                        if (iLinker != nullptr)
+                            for (auto& l : iLinker->iLinks)
+                                if (l.program == this)
+                                    l.native = aNative;
+                    }
                     void set_linker(machine* aLinker, jit::compiled_module* aNative)
                     {
                         iLinker = aLinker;
@@ -2578,6 +2632,9 @@ namespace neos
                     std::vector<link_export> iLinks;
                     machine* iLinker = nullptr;
                     jit::compiled_module* iNative = nullptr;   ///< (its native code, if it runs as native code (see set_linker))
+                    bool iTiering = false;                      ///< (interpreted until it is warm (see warm))
+                    std::uint32_t iTierCalls = 0u;              ///< (the calls of its functions interpreted so far)
+                    jit::compiled_module* iTierNative = nullptr;    ///< (its native code, once it is warm)
                     machine* iUnit = nullptr;
                     std::vector<linked_unit> iUnits;
                     std::vector<bool> iStartedUnits;
@@ -3083,6 +3140,11 @@ namespace neos
                     auto& all = the_thread_contexts();
                     std::lock_guard<std::mutex> lock{ all.mutex };
                     tLastContextGeneration = all.generation.load(std::memory_order_relaxed);
+                    // (a program that was interpreted until it was warm (see tier_loaded): its context is the one that it had)
+                    if (tRunning.native != nullptr)
+                        if (auto const interpreted = all.contexts.find(std::make_pair(tRunning.program, static_cast<jit::compiled_module*>(nullptr)));
+                            interpreted != all.contexts.end() && interpreted->second.native == tRunning.native)
+                            return tLastContext = &interpreted->second;
                     return tLastContext = &all.contexts.try_emplace(std::make_pair(tRunning.program, tRunning.native), tRunning).first->second;
                 }
 
@@ -3137,6 +3199,34 @@ namespace neos
                     return sPrograms;
                 }
 
+                jit::compiled_module* tier_loaded(machine& aProgram)
+                {
+                    jit::compiled_module* native = nullptr;
+                    {
+                        std::lock_guard<std::mutex> lock{ loaded_mutex() };
+                        auto& programs = loaded_programs();
+                        auto const p = std::find_if(programs.rbegin(), programs.rend(), [&](loaded_program const& l) { return l.program.get() == &aProgram; });
+                        if (p == programs.rend())
+                            return nullptr;
+                        if (!p->native)
+                            p->native = aProgram.compile();
+                        native = p->native.get();
+                    }
+                    if (native == nullptr)
+                        return nullptr;
+                    aProgram.set_native(native);
+                    // (its context (the one that the code that loaded it has: see host_thread_context) is native code's from now on)
+                    {
+                        auto& all = the_thread_contexts();
+                        std::lock_guard<std::mutex> lock{ all.mutex };
+                        if (auto const c = all.contexts.find(std::make_pair(&aProgram, static_cast<jit::compiled_module*>(nullptr))); c != all.contexts.end())
+                            c->second.native = native;
+                    }
+                    if (tRunning.program == &aProgram)
+                        tRunning.native = native;
+                    return native;
+                }
+
                 void* host_load_n(char const* aLanguage, char const* aSource, size_t aSourceLength, char const* aSourceName, char const* aOptions,
                     char const** aError)
                 {
@@ -3181,8 +3271,9 @@ namespace neos
                         p.program = std::make_unique<machine>(*compiled, tRunning.program->output(), tRunning.program->input(), tRunning.program->error_output(),
                             p.instructions, tRunning.program->restricted(), tRunning.program->source_compiler(), tRunning.program->arguments());
                         p.entry = p.program->export_function("main");
-                        if (tRunning.native != nullptr)
-                            p.native = p.program->compile();
+                        // (a program that runs as native code: the one that it loads is interpreted until it is warm (see machine::warm))
+                        if (tRunning.native != nullptr || tRunning.program->tiering())
+                            p.program->set_tiering();
                         p.program->set_linker(tRunning.program->linker(), p.native.get());
                         p.program->set_unit(tRunning.program->unit());
                         running const context{ p.program.get(), p.native.get() };
