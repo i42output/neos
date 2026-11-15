@@ -1131,6 +1131,46 @@ namespace neos
                     aKind == outline_kind::Alternative;
             };
 
+            // (a value (e.g. an expression function's): what is returned, unless it is an if expression (a language.expression.if): a 
+            // branch, whose values (its own, and those of its alternatives) are too; such a part's value is what follows the last of its 
+            // keywords (and what a case is for))
+            std::function<void(std::vector<node_t const*> const&, std::uint32_t)> add_value;
+            std::function<void(node_t const&, outline_kind, std::uint32_t)> add_valued = [&](node_t const& aNode, outline_kind aKind, std::uint32_t aParent)
+            {
+                auto const index = static_cast<std::uint32_t>(result.size());
+                result.push_back(outline_node{ aParent, aKind, first_of(aNode), last_of(aNode), last_of(aNode) });
+                std::vector<node_t const*> parts;
+                concept_children(aNode, parts);
+                auto const alternatives = std::find_if(parts.begin(), parts.end(), 
+                    [&](node_t const* aPart) { return kind_of(name_of(*aPart)) == outline_kind::Alternative; });
+                auto valueStart = alternatives;
+                while (valueStart != parts.begin() && !is_a(name_of(**(valueStart - 1)), "language.keyword"))
+                    --valueStart;
+                std::vector<node_t const*> value;
+                for (auto part = valueStart; part != alternatives; ++part)
+                    if (!ignored(name_of(**part)))
+                        value.push_back(*part);
+                if (!value.empty() && is_a(name_of(aNode), "language.statement.case"))
+                    value.erase(value.begin());
+                if (!value.empty())
+                    result[index].headerLast = first_of(*value.front());
+                else if (alternatives != parts.end())
+                    result[index].headerLast = first_of(**alternatives);
+                add_value(value, index);
+                for (auto alternative = alternatives; alternative != parts.end(); ++alternative)
+                    if (kind_of(name_of(**alternative)) == outline_kind::Alternative)
+                        add_valued(**alternative, outline_kind::Alternative, index);
+            };
+            add_value = [&](std::vector<node_t const*> const& aValue, std::uint32_t aParent)
+            {
+                if (aValue.empty())
+                    return;
+                if (aValue.size() == 1u && is_a(name_of(*aValue.front()), "language.expression.if"))
+                    add_valued(*aValue.front(), outline_kind::Branch, aParent);
+                else
+                    result.push_back(outline_node{ aParent, outline_kind::Return, first_of(*aValue.front()), last_of(*aValue.back()), last_of(*aValue.back()) });
+            };
+
             std::function<void(std::vector<node_t const*> const&, std::uint32_t)> add_statements;
             auto const add_statement = [&](node_t const& aStatement, std::uint32_t aParent) -> std::uint32_t
             {
@@ -1250,6 +1290,21 @@ namespace neos
                         add_statements(statements, index);
                     }
                 }
+                // (a function whose body is an expression (e.g. one of Ada's expression functions): its value (from the bracket that it is 
+                // in, if it is in one))
+                if (kind == outline_kind::Function && !bodyStart)
+                    for (auto const child : children)
+                        if (is_any(name_of(*child), { "language.expression", "language.expression.if" }))
+                        {
+                            auto start = first_of(*child);
+                            while (start > result[index].first && std::isspace(static_cast<unsigned char>(aSource[start - 1u])))
+                                --start;
+                            if (start > result[index].first && aSource[start - 1u] == '(')
+                                --start;
+                            bodyStart = start;
+                            add_value({ child }, index);
+                            break;
+                        }
                 if (bodyStart)
                     result[index].headerLast = *bodyStart;
                 return index;

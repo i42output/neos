@@ -1007,6 +1007,7 @@ namespace neos::concepts::core
         struct throw_ { static constexpr auto Name = "language.statement.throw"; };
         struct declaration_ { static constexpr auto Name = "language.declaration"; };
         struct import_ { static constexpr auto Name = "language.import"; };
+        struct if_expression_ { static constexpr auto Name = "language.expression.if"; };
     }
 
     template <typename Structure>
@@ -1508,6 +1509,8 @@ namespace neos::concepts::core
             neolib::make_ref<language_structure<structure::declaration_>>();
         concepts()[neolib::string{ language_structure<structure::import_>::Name }] =
             neolib::make_ref<language_structure<structure::import_>>();
+        concepts()[neolib::string{ language_structure<structure::if_expression_>::Name }] =
+            neolib::make_ref<language_structure<structure::if_expression_>>();
         concepts()[neolib::string{ language_object_boolean<true>::Name }] =
             neolib::make_ref<language_object_boolean<true>>();
         concepts()[neolib::string{ language_object_boolean<false>::Name }] =

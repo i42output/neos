@@ -82,8 +82,7 @@ namespace neos::concepts::ada
             case construct::If:
             case construct::Case:
                 return neolib::string_view{ "language.statement.if" };
-            // (an if's elsif and else parts, and a case's alternatives (and those of if and case expressions, which outlines do not 
-            // look into))
+            // (an if's elsif and else parts, and a case's alternatives (and those of if and case expressions))
             case construct::Elsif:
                 return neolib::string_view{ "language.statement.elseif" };
             case construct::Else:
@@ -92,6 +91,20 @@ namespace neos::concepts::ada
                 return neolib::string_view{ "language.statement.case" };
             case construct::Loop:
                 return neolib::string_view{ "language.statement.loop" };
+            // (an if or case expression, and what else an expression function's value can be (parenthesized, or an aggregate): an 
+            // outline has an expression function's as what it returns (an if or case expression's as a branch of it))
+            case construct::IfExpression:
+            case construct::CaseExpression:
+                return neolib::string_view{ "language.expression.if" };
+            case construct::Parenthesized:
+            case construct::Quantified:
+            case construct::DeclareExpression:
+            case construct::Aggregate:
+            case construct::AggregateBracket:
+            case construct::AggregateDelta:
+            case construct::AggregateExtension:
+            case construct::AggregateNullRecord:
+                return neolib::string_view{ "language.expression" };
             case construct::Return:
             case construct::ReturnExtended:
                 return neolib::string_view{ "language.function.return" };
