@@ -285,7 +285,9 @@ namespace neos::python_runtime
             static void operator delete(void* aObject, std::size_t aSize) noexcept;
         };
         struct slice_object { header h; object* start; object* stop; object* step; ~slice_object() { release(start); release(stop); release(step); } };
-        struct range_object { header h; long long start; long long stop; long long step; };
+        // (a range (as CPython's: its start, stop and step are ints of any size): of 64-bit values, or big ((start, stop, step): a tuple of 
+        // ints, one of them beyond 64 bits; its 64-bit fields are then not its values))
+        struct range_object { header h; long long start; long long stop; long long step; object* big = nullptr; ~range_object() { release(big); } };
         struct iterator_object 
         { 
             header h; 
@@ -496,6 +498,9 @@ namespace neos::python_runtime
         void slice_adjust(long long aLength, std::optional<long long> const& aStartIndex, std::optional<long long> const& aStopIndex, long long aStep,
             long long& aStart, long long& aStop);
         std::size_t slice_count(long long aStart, long long aStop, long long aStep);                    // (the number of positions of slice_indices' result)
+        // (ranges of ints of any size (objects.cpp))
+        object* make_range_of(object* aStart, object* aStop, object* aStep);   // (of ints: a 64-bit range if they are of 64 bits)
+        bool range_native(object* aRange);      // (its start, stop, step and length are of 64 bits (its values are too))
         std::vector<std::size_t> slice_positions(long long aStart, long long aStop, long long aStep);  // (the positions of slice_indices' result)
         long long bytes_hash(std::string_view aBytes);
         // (the arguments of a native function as CPython's argument clinic checks them: aNames are its parameters, of which the first 
@@ -600,6 +605,12 @@ namespace neos::python_runtime
             object* (*construct)(object* aArgs, object* aKwargs, object* aOwner) = nullptr;
             void (*disown)(object* aValue) = nullptr;
             bool objectInit = false;    ///< (the type has no __init__ of its own (its value is made by __new__): its __init__ is object's)
+            // (an attribute of an instance (aOwner) that is the type's own of the instance rather than of its value (e.g. datetime.date.replace:
+            // its result of the instance's class, as CPython's); null (no exception): none)
+            object* (*attribute)(object* aOwner, char const* aName) = nullptr;
+            // (an operator of aLhs and aRhs (one of them aOwner, an instance) that is the type's of the instances rather than of their values
+            // (e.g. date + timedelta: of the date's class, as CPython's))
+            object* (*binary)(object* aOwner, int aOperation, object* aLhs, object* aRhs, int aInplace) = nullptr;
         };
         std::map<std::string, native_base_hooks, std::less<>>& native_bases();
         void write_unraisable(object* aObject);         // (the pending exception: "Exception ignored in: <aObject>" and its report)

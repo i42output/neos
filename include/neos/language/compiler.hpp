@@ -321,9 +321,11 @@ namespace neos::language
             std::map<std::string, std::vector<type>> parameters;    ///< function -> types of its arguments
             std::map<std::string, type> results;                    ///< function -> type of the values it returns
             std::vector<std::pair<std::string, type>> globals;     ///< global variables (in order of declaration)
+            std::map<std::string, std::uint32_t, std::less<>> globalIndices;    ///< (globals' indices by name (a program can have many: e.g. one for each constant))
             std::map<std::string, type> returned;                   ///< (this pass)
             std::set<std::string> functionGlobals;                  ///< (this pass) global variables used by functions
             std::set<std::string> entryGlobals;                     ///< global variables only used by top-level code (locals of the entry point)
+            mutable std::set<std::string> entryGlobalsAsked;        ///< (this pass) global variables that were asked about (entry_global, declare_globals)
             std::set<std::string> threadGlobals;                    ///< global variables that each thread has its own of
             std::uint32_t pass = 0u;
             bool changed = false;

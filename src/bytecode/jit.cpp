@@ -9163,6 +9163,20 @@ namespace neos
                             a.test_rr(aW, RCX, RCX);
                             a.jcc(E, iTrapLabels[TrapDivideByZero]);
                             auto const done = a.new_label();
+                            if (aW)
+                            {
+                                // (64-bit operands that are both below 2^32 (so neither is negative): a 32-bit unsigned division, whose
+                                // quotient and remainder are the same (and are zero extended); a 64-bit division takes far longer on
+                                // many processors)
+                                auto const wide = a.new_label();
+                                a.mov_rr(true, RDX, RAX);
+                                a.alu_rr(1, true, RDX, RCX);
+                                a.shift_ri(5, true, RDX, 32u);
+                                a.jcc(NE, wide);
+                                a.f7(6, false, RCX);    // (edx is 0)
+                                a.jmp(done);
+                                a.bind(wide);
+                            }
                             if (aSigned)
                             {
                                 // (the minimum / -1: an overflow (its remainder: 0))

@@ -695,7 +695,14 @@ namespace neos::compilers::javascript
                 call("javascript::global_mirror", { I64, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
-            for (auto const& [function, global] : iClosures)
+            // (in the order of their globals: iClosures' own order is that of its functions' addresses, which is not the same from one
+            // compilation to the next)
+            std::vector<std::uint32_t> closureGlobals;
+            closureGlobals.reserve(iClosures.size());
+            for (auto const& closure : iClosures)
+                closureGlobals.push_back(closure.second);
+            std::sort(closureGlobals.begin(), closureGlobals.end());
+            for (auto const global : closureGlobals)
             {
                 // (Empty until the script defines the function; kept (see call_value))
                 put_op(code, opcode::I64Const);
@@ -1260,8 +1267,35 @@ namespace neos::compilers::javascript
         // (a site of its own (its number): a call of the program's get stub)
         auto const site = iCompiler.iPropertySites++;
         i32(static_cast<std::int32_t>(site));
-        call_stub(aComputed ? stub::GetComputed : stub::GetNamed);
+        // (a named get of a dynamic program's (an eval's or a dynamic function's code): see get_named_first_stub)
+        call_stub(aComputed ? stub::GetComputed : iCompiler.eval_code() ? stub::GetNamedFirst : stub::GetNamed);
         return site;
+    }
+
+    void function_generator::get_named_first_stub()
+    {
+        // (a dynamic program's named get (its parameters: object, key, site): a site that has no entry yet (its first entry's kind: a 
+        // cached load, so code that is optimized knows which it is) goes to the runtime's get, as the get stub's own slow path does (it 
+        // makes the entry); else to the get stub. Most dynamic code runs once, so most of its sites are got from once: the get stub's 
+        // code, which is large, is then not compiled for each such program (a program compiles the stubs that its code calls))
+        std::uint32_t const object = 0u, keyValue = 1u, site = 2u;
+        property_site(site);
+        site_load(opcode::I32LoadMem8U, layout::SiteKind);
+        i32(layout::SiteNone);
+        op(opcode::I32Eq);
+        op(opcode::If);
+        iCode.push_back(0x7Eu);
+        iControls.push_back(control{ control_kind::Block });
+        get(object);
+        get(keyValue);
+        get(site);
+        runtime("get_named_cached", { I64, I64, I32 }, I64);
+        op(opcode::Else);
+        get(object);
+        get(keyValue);
+        get(site);
+        call_stub(stub::GetNamed);
+        end_control();
     }
 
     void function_generator::assume_not_exception()
@@ -2888,7 +2922,8 @@ namespace neos::compilers::javascript
             { "%js.array_literal", { I32, I32 }, I64 },
             { "%js.object_literal", { I32, I32 }, I64 },
             { "%js.array_push", { I64, I64, I64 }, I64 },
-            { "%js.array_pop", { I64, I64 }, I64 }
+            { "%js.array_pop", { I64, I64 }, I64 },
+            { "%js.get_named_first", { I64, I64, I32 }, I64 }
         };
         static_assert(std::size(sStubs) == static_cast<std::size_t>(function_generator::stub::Count));
         auto const& s = sStubs[static_cast<std::size_t>(aStub)];
@@ -2917,6 +2952,10 @@ namespace neos::compilers::javascript
         case stub::GetComputed:
             iParameterCount = 3u;
             cached_get_stub(aStub == stub::GetComputed);
+            break;
+        case stub::GetNamedFirst:
+            iParameterCount = 3u;
+            get_named_first_stub();
             break;
         case stub::SetNamed:
             iParameterCount = 5u;

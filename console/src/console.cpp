@@ -39,6 +39,7 @@
 #include <iostream>
 #include <filesystem>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <typeinfo>
@@ -279,6 +280,17 @@ namespace
         neos::cache::store("bytecode", aKey, writer.data());
     }
 
+    // (a program that was run has ended (its runtime plugins have too: see bytecode::vm::thread::execute): the process ends with its 
+    // status, its output flushed, without the program's VM and compiler being destroyed first (the compiler's trees, the program's 
+    // modules and memory): that frees only what the process's end frees, and for a large program takes a noticeable time)
+    [[noreturn]] void end_process(int aStatus)
+    {
+        std::cout << std::flush;
+        std::cerr << std::flush;
+        std::fflush(nullptr);
+        std::_Exit(aStatus);
+    }
+
     // (a program's text from the cache: run as context::run runs a program's; source that it compiles while it runs is compiled
     // by a context made for it when it is first needed)
     int run_cached_program(cached_program const& aProgram, boost::program_options::variables_map& aOptions, std::vector<std::string> const& aArguments)
@@ -311,6 +323,7 @@ namespace
             thread.join();
             // (a runtime error has been output by the VM)
             status = thread.error() ? EXIT_FAILURE : thread.exit_status().value_or(EXIT_SUCCESS);
+            end_process(status);
         }
         std::cout << std::flush;
         return status;
@@ -360,7 +373,7 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
             context.run();
             std::cout << std::flush;
             // (a runtime error has been output by the VM)
-            return context.exit_status();
+            end_process(context.exit_status());
         }
     }
     catch (const neos::language::compiler_error& e)

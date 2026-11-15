@@ -54,6 +54,10 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        object* datetime_subclass_attribute(object* aClass, std::string const& aBase, char const* aName);
+        void set_structseq_reduce_as_tuple(structseq_descriptor const& aDescriptor);    // (structseq.cpp)
+        bool attribute_error_caught();  // (objects.cpp: the pending exception is an AttributeError (cleared); else it remains)
+
         namespace
         {
             using B = big_integer;
@@ -252,17 +256,20 @@ namespace neos::python_runtime
 
             object* sTzinfoClass = nullptr;
 
-            bool is_timedelta(object* aObject) { return aObject != nullptr && aObject->type == &sTimedeltaType.base; }
-            bool is_date(object* aObject) { return aObject != nullptr && aObject->type == &sDateType.base; }
-            bool is_time(object* aObject) { return aObject != nullptr && aObject->type == &sTimeType.base; }
-            bool is_datetime(object* aObject) { return aObject != nullptr && aObject->type == &sDatetimeType.base; }
+            // (an instance of a subclass of timedelta, date, time or datetime (e.g. of class D(date)) is one of the type (as CPython's PyDate_Check 
+            // etc.): its value (an instance of the class has a value of the type))
+            object* value_of(object* aObject) { return aObject != nullptr ? builtin_value(aObject) : nullptr; }
+            bool is_timedelta(object* aObject) { aObject = value_of(aObject); return aObject != nullptr && aObject->type == &sTimedeltaType.base; }
+            bool is_date(object* aObject) { aObject = value_of(aObject); return aObject != nullptr && aObject->type == &sDateType.base; }
+            bool is_time(object* aObject) { aObject = value_of(aObject); return aObject != nullptr && aObject->type == &sTimeType.base; }
+            bool is_datetime(object* aObject) { aObject = value_of(aObject); return aObject != nullptr && aObject->type == &sDatetimeType.base; }
             bool is_date_like(object* aObject) { return is_date(aObject) || is_datetime(aObject); }
-            bool is_timezone(object* aObject) { return aObject != nullptr && aObject->type == &sTimezoneType.base; }
+            bool is_timezone(object* aObject) { return aObject != nullptr && aObject->type == &sTimezoneType.base; }   // (timezone: not subclassable)
             bool is_ours(object* aObject) { return is_timedelta(aObject) || is_date(aObject) || is_time(aObject) || is_datetime(aObject) || is_timezone(aObject); }
 
-            td const& delta(object* aObject) { return as<timedelta_object>(aObject)->value; }
-            fields const& fields_of(object* aObject) { return as<temporal_object>(aObject)->f; }
-            object* tz_of(object* aObject) { return as<temporal_object>(aObject)->tz; }
+            td const& delta(object* aObject) { return as<timedelta_object>(value_of(aObject))->value; }
+            fields const& fields_of(object* aObject) { return as<temporal_object>(value_of(aObject))->f; }
+            object* tz_of(object* aObject) { return as<temporal_object>(value_of(aObject))->tz; }
             timezone_object const& zone(object* aObject) { return *as<timezone_object>(aObject); }
 
             object* make_timedelta(td aValue) { return &(new timedelta_object{ { { &sTimedeltaType.base } }, aValue })->h.base; }
@@ -277,6 +284,42 @@ namespace neos::python_runtime
             object* make_time(fields const& aFields, object* aTz) { return make_temporal(sTimeType, aFields, aTz); }
             object* make_datetime(fields const& aFields, object* aTz) { return make_temporal(sDatetimeType, aFields, aTz); }
 
+            // (an instance of a subclass (aClass) of date, time or datetime of the fields of aValue (one of them), as CPython's new_date_subclass_ex,
+            // new_time_subclass_fold_ex and new_datetime_subclass_fold_ex make it: cls(year, month, day), cls(hour, minute, second, microsecond,
+            // tzinfo) or cls(year, month, day, hour, minute, second, microsecond, tzinfo), and fold=1 if it is (call_subclass_fold))
+            object* of_class(object* aClass, object* aValue)
+            {
+                auto const& f = fields_of(aValue);
+                std::vector<object*> args;
+                if (!is_time(aValue))
+                    args = { make_int(f.year), make_int(f.month), make_int(f.day) };
+                if (!is_date(aValue))
+                    for (auto a : { make_int(f.hour), make_int(f.minute), make_int(f.second), make_int(f.us), borrowed(tz_of(aValue) != nullptr ? tz_of(aValue) : none()) })
+                        args.push_back(a);
+                ref const callArgs{ make_tuple(std::move(args)) };
+                ref keywords;
+                if (!is_date(aValue) && f.fold != 0)
+                {
+                    keywords = ref{ make_dict() };
+                    ref const key{ make_str("fold") };
+                    ref const fold{ make_int(f.fold) };
+                    if (dict_set(keywords.get(), key.get(), fold.get()) != 0)
+                        return nullptr;
+                }
+                return call(aClass, callArgs.get(), keywords.get());
+            }
+
+            // (a result (aResult: a new reference, or null) of a method or operator of aSelf that CPython's makes of aSelf's type (Py_TYPE(self)):
+            // of aSelf's class if it is an instance of a subclass)
+            object* of_type_of(object* aSelf, object* aResult)
+            {
+                if (aResult == nullptr || value_of(aSelf) == aSelf)
+                    return aResult;
+                ref const result{ aResult };
+                ref const cls{ class_of(aSelf) };
+                return of_class(cls.get(), result.get());
+            }
+
             object* utc()
             {
                 static object* sUtc = &(new timezone_object{ { { &sTimezoneType.base } }, td{}, std::nullopt })->h.base;
@@ -289,13 +332,14 @@ namespace neos::python_runtime
                 return &(new timezone_object{ { { &sTimezoneType.base } }, aOffset, std::move(aName) })->h.base;
             }
 
+            // (the type's name (a subclass's instance: its class's, as CPython's tp_name))
             char const* qualified_name(object* aObject)
             {
-                if (is_timedelta(aObject)) return "datetime.timedelta";
-                if (is_date(aObject)) return "datetime.date";
-                if (is_time(aObject)) return "datetime.time";
-                if (is_datetime(aObject)) return "datetime.datetime";
-                if (is_timezone(aObject)) return "datetime.timezone";
+                if (aObject->type == &sTimedeltaType.base) return "datetime.timedelta";
+                if (aObject->type == &sDateType.base) return "datetime.date";
+                if (aObject->type == &sTimeType.base) return "datetime.time";
+                if (aObject->type == &sDatetimeType.base) return "datetime.datetime";
+                if (aObject->type == &sTimezoneType.base) return "datetime.timezone";
                 return type_name(aObject);
             }
 
@@ -330,9 +374,14 @@ namespace neos::python_runtime
 
             bool raises_for(object* aOther) { return kind_of(aOther) != NEOS_PY_OTHER || is_ours(aOther); }
 
+            // (the operands of an operator method's call (e.g. x.__add__(y)): for them, NotImplemented rather than an exception (as CPython's slot
+            // wrappers))
+            thread_local std::pair<object*, object*> tOperatorMethod{};
+            bool operator_method_of(object* aLhs, object* aRhs) { return tOperatorMethod.first == aLhs && tOperatorMethod.second == aRhs; }
+
             object* unsupported(int aOperation, object* aLhs, object* aRhs, int aInplace)
             {
-                if (!raises_for(aLhs) || !raises_for(aRhs))
+                if (!raises_for(aLhs) || !raises_for(aRhs) || operator_method_of(aLhs, aRhs))
                     return borrowed(not_implemented());
                 return error("TypeError", std::string{ "unsupported operand type(s) for " } + symbol_of(aOperation) + (aInplace != 0 ? "=" : "") + ": '" +
                     qualified_name(aLhs) + "' and '" + qualified_name(aRhs) + "'");
@@ -353,7 +402,7 @@ namespace neos::python_runtime
 
             object* not_comparable(int aOperation, object* aLhs, object* aRhs)
             {
-                if (aOperation == NEOS_PY_EQ || aOperation == NEOS_PY_NE || !raises_for(aLhs) || !raises_for(aRhs))
+                if (aOperation == NEOS_PY_EQ || aOperation == NEOS_PY_NE || !raises_for(aLhs) || !raises_for(aRhs) || operator_method_of(aLhs, aRhs))
                     return borrowed(not_implemented());
                 static char const* const sSymbols[] = { "<", "<=", "==", "!=", ">", ">=" };
                 return error("TypeError", std::string{ "'" } + sSymbols[aOperation - NEOS_PY_LT] + "' not supported between instances of '" + qualified_name(aLhs) +
@@ -1449,6 +1498,69 @@ namespace neos::python_runtime
                 return nullptr;
             }
 
+            // (the operator methods (e.g. timedelta.__add__, date.__rsub__, date.__eq__): the type's operator of self and the argument
+            // (reflected: of the argument and self), NotImplemented if it has none for them (as CPython's slot wrappers); and timedelta's unary
+            // operators)
+            enum operator_kind { BinaryOperator, UnaryOperator, ComparisonOperator };
+            struct operator_entry { char const* name; int operation; bool reflected; operator_kind kind; };
+
+            operator_entry const sTimedeltaOperators[] =
+            {
+                { "__add__", NEOS_PY_ADD, false, BinaryOperator }, { "__radd__", NEOS_PY_ADD, true, BinaryOperator },
+                { "__sub__", NEOS_PY_SUBTRACT, false, BinaryOperator }, { "__rsub__", NEOS_PY_SUBTRACT, true, BinaryOperator },
+                { "__mul__", NEOS_PY_MULTIPLY, false, BinaryOperator }, { "__rmul__", NEOS_PY_MULTIPLY, true, BinaryOperator },
+                { "__truediv__", NEOS_PY_TRUE_DIVIDE, false, BinaryOperator }, { "__rtruediv__", NEOS_PY_TRUE_DIVIDE, true, BinaryOperator },
+                { "__floordiv__", NEOS_PY_FLOOR_DIVIDE, false, BinaryOperator }, { "__rfloordiv__", NEOS_PY_FLOOR_DIVIDE, true, BinaryOperator },
+                { "__mod__", NEOS_PY_REMAINDER, false, BinaryOperator }, { "__rmod__", NEOS_PY_REMAINDER, true, BinaryOperator },
+                { "__neg__", NEOS_PY_NEGATIVE, false, UnaryOperator }, { "__pos__", NEOS_PY_POSITIVE, false, UnaryOperator },
+                { "__abs__", NEOS_PY_ABSOLUTE, false, UnaryOperator }
+            };
+
+            operator_entry const sDateOperators[] =     // (date's and datetime's)
+            {
+                { "__add__", NEOS_PY_ADD, false, BinaryOperator }, { "__radd__", NEOS_PY_ADD, true, BinaryOperator },
+                { "__sub__", NEOS_PY_SUBTRACT, false, BinaryOperator }, { "__rsub__", NEOS_PY_SUBTRACT, true, BinaryOperator }
+            };
+
+            operator_entry const sComparisonOperators[] =   // (every type's)
+            {
+                { "__eq__", NEOS_PY_EQ, false, ComparisonOperator }, { "__ne__", NEOS_PY_NE, false, ComparisonOperator },
+                { "__lt__", NEOS_PY_LT, false, ComparisonOperator }, { "__le__", NEOS_PY_LE, false, ComparisonOperator },
+                { "__gt__", NEOS_PY_GT, false, ComparisonOperator }, { "__ge__", NEOS_PY_GE, false, ComparisonOperator }
+            };
+
+            object* call_operator(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
+            {
+                auto const& o = *static_cast<operator_entry const*>(aData);
+                auto const& args = tuple_items(aArgs);
+                if (!no_keywords(aKwargs, o.name))
+                    return nullptr;
+                std::size_t const expected = o.kind == UnaryOperator ? 0u : 1u;
+                if (args.size() != expected + 1u)
+                    return error("TypeError", "expected " + std::to_string(expected) + " argument" + (expected == 1u ? "" : "s") + ", got " +
+                        std::to_string(args.empty() ? 0u : args.size() - 1u));
+                auto const self = args[0];
+                auto const& type = *python_type(value_of(self));
+                if (o.kind == UnaryOperator)
+                    return type.unary(context(), o.operation, value_of(self));
+                auto const lhs = o.reflected ? args[1] : self;
+                auto const rhs = o.reflected ? self : args[1];
+                auto const outer = tOperatorMethod;
+                tOperatorMethod = { lhs, rhs };
+                auto const result = o.kind == ComparisonOperator ? type.compare(context(), o.operation, lhs, rhs) : type.binary(context(), o.operation, lhs, rhs, 0);
+                tOperatorMethod = outer;
+                return result;
+            }
+
+            template <std::size_t N>
+            object* find_operator(operator_entry const (&aOperators)[N], object* aSelf, char const* aName)
+            {
+                for (auto const& o : aOperators)
+                    if (std::strcmp(o.name, aName) == 0)
+                        return make_function(o.name, call_operator, const_cast<operator_entry*>(&o), aSelf);
+                return nullptr;
+            }
+
             bool no_arguments(char const* aName, std::vector<object*> const& aArgs, object* aKwargs)
             {
                 if (!no_keywords(aKwargs, aName))
@@ -1474,6 +1586,8 @@ namespace neos::python_runtime
                 long long y = 0, w = 0, d = 0;
                 iso_calendar(f.year, f.month, f.day, y, w, d);
                 auto const& type = structseq_type("datetime.IsoCalendarDate", { "year", "week", "weekday" }, 3u);
+                static bool const sTupleReduce = (set_structseq_reduce_as_tuple(type), true);   // (it pickles as a tuple, as CPython's)
+                (void)sTupleReduce;
                 return make_structseq(type, { make_int(y), make_int(w), make_int(d) });
             }
 
@@ -1515,12 +1629,13 @@ namespace neos::python_runtime
                     return error("TypeError", "__format__() takes exactly one argument (" + std::to_string(aArgs.size()) + " given)");
                 if (kind_of(aArgs[0]) != NEOS_PY_STR)
                     return error("TypeError", std::string{ "__format__() argument 1 must be str, not " } + type_name(aArgs[0]));
+                // (as CPython's date_format: str(self) of an empty format, else self.strftime(format) (a subclass's own, if it has one))
                 if (as<str_object>(aArgs[0])->value.empty())
                 {
                     std::string text;
                     return str_of(aSelf, text) ? make_str(std::move(text)) : nullptr;
                 }
-                return strftime_method(aSelf, aArgs, nullptr, "strftime");
+                return call_method_named(aSelf, "strftime", { borrowed(aArgs[0]) });
             }
 
             object* tz_method(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs, char const* aName)
@@ -1628,10 +1743,27 @@ namespace neos::python_runtime
 
             bool float_ratio(object* aFloat, B& aNumerator, B& aDenominator)
             {
+                // (as CPython's get_float_as_integer_ratio: a float subclass's own as_integer_ratio, which must return a 2-tuple)
                 ref const ratio{ call_method_named(aFloat, "as_integer_ratio", {}) };
                 if (!ratio)
                     return false;
+                if (kind_of(ratio.get()) != NEOS_PY_TUPLE)
+                {
+                    error("TypeError", std::string{ "unexpected return type from as_integer_ratio(): expected tuple, got '" } + type_name(ratio.get()) + "'");
+                    return false;
+                }
                 auto const& items = as<tuple_object>(ratio.get())->items;
+                if (items.size() != 2u)
+                {
+                    error("ValueError", "as_integer_ratio() must return a 2-tuple");
+                    return false;
+                }
+                for (auto i : items)
+                    if (kind_of(i) != NEOS_PY_INT && kind_of(i) != NEOS_PY_BOOL)
+                    {
+                        error("TypeError", std::string{ "unsupported operand type(s) for *: 'int' and '" } + type_name(i) + "'");
+                        return false;
+                    }
                 aNumerator = big_value(items[0]);
                 aDenominator = big_value(items[1]);
                 return true;
@@ -1648,7 +1780,9 @@ namespace neos::python_runtime
             {
                 bool const l = is_timedelta(aLhs);
                 bool const r = is_timedelta(aRhs);
-                auto const isInt = [](object* o) { return kind_of(o) == NEOS_PY_INT || kind_of(o) == NEOS_PY_BOOL; };
+                // (an int or a float, or an instance of a subclass of one (its value; a float subclass's own as_integer_ratio, as CPython's))
+                auto const isInt = [](object* o) { auto const k = kind_of(builtin_value(o)); return k == NEOS_PY_INT || k == NEOS_PY_BOOL; };
+                auto const isFloat = [](object* o) { return kind_of(builtin_value(o)) == NEOS_PY_FLOAT; };
                 auto const zeroDivision = []() { return error("ZeroDivisionError", "integer division or modulo by zero"); };
                 switch (aOperation)
                 {
@@ -1664,8 +1798,8 @@ namespace neos::python_runtime
                         auto const other = l ? aRhs : aLhs;
                         auto const self = l ? aLhs : aRhs;
                         if (isInt(other))
-                            return timedelta_from_us(us_of(delta(self)) * big_value(other));
-                        if (kind_of(other) == NEOS_PY_FLOAT)
+                            return timedelta_from_us(us_of(delta(self)) * big_value(builtin_value(other)));
+                        if (isFloat(other))
                         {
                             B n, d;
                             if (!float_ratio(other, n, d))
@@ -1685,12 +1819,12 @@ namespace neos::python_runtime
                     }
                     if (isInt(aRhs))
                     {
-                        auto const divisor = big_value(aRhs);
+                        auto const divisor = big_value(builtin_value(aRhs));
                         if (big_zero(divisor))
                             return zeroDivision();
                         return timedelta_from_us(divide_nearest(us_of(delta(aLhs)), divisor));
                     }
-                    if (kind_of(aRhs) == NEOS_PY_FLOAT)
+                    if (isFloat(aRhs))
                     {
                         B n, d;
                         if (!float_ratio(aRhs, n, d))
@@ -1714,7 +1848,7 @@ namespace neos::python_runtime
                     }
                     if (isInt(aRhs) && aOperation == NEOS_PY_FLOOR_DIVIDE)
                     {
-                        auto const divisor = big_value(aRhs);
+                        auto const divisor = big_value(builtin_value(aRhs));
                         if (big_zero(divisor))
                             return zeroDivision();
                         B q, rem;
@@ -1726,7 +1860,7 @@ namespace neos::python_runtime
                     break;
                 }
                 // (str * timedelta: a sequence's repetition)
-                if (aOperation == NEOS_PY_MULTIPLY && (kind_of(l ? aRhs : aLhs) == NEOS_PY_STR || kind_of(l ? aRhs : aLhs) == NEOS_PY_LIST ||
+                if (aOperation == NEOS_PY_MULTIPLY && !operator_method_of(aLhs, aRhs) && (kind_of(l ? aRhs : aLhs) == NEOS_PY_STR || kind_of(l ? aRhs : aLhs) == NEOS_PY_LIST ||
                     kind_of(l ? aRhs : aLhs) == NEOS_PY_TUPLE))
                     return error("TypeError", "can't multiply sequence by non-int of type 'datetime.timedelta'");
                 return unsupported(aOperation, aLhs, aRhs, aInplace);
@@ -1790,7 +1924,8 @@ namespace neos::python_runtime
                 { "__reduce__", [](object* aSelf, std::vector<object*> const&, object*) -> object*
                     {
                         auto const& d = delta(aSelf);
-                        return make_tuple({ type_object_for("timedelta", "datetime.timedelta"), make_tuple({ make_int(d.days), make_int(d.seconds), make_int(d.us) }) });
+                        ref const cls{ class_of(aSelf) };    // (Py_TYPE(self): a subclass's)
+                        return make_tuple({ borrowed(cls.get()), make_tuple({ make_int(d.days), make_int(d.seconds), make_int(d.us) }) });
                     } },
                 { "__reduce_ex__", reduce_ex_of_reduce },
                 { "__copy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } },
@@ -1798,6 +1933,20 @@ namespace neos::python_runtime
             };
 
             object* class_attribute(std::string const& aClass, char const* aName);
+
+            // (an instance's attribute (null (no exception): none of its own))
+            object* timedelta_attribute(object* aSelf, char const* aName)
+            {
+                auto const& d = delta(aSelf);
+                if (std::strcmp(aName, "days") == 0) return make_int(d.days);
+                if (std::strcmp(aName, "seconds") == 0) return make_int(d.seconds);
+                if (std::strcmp(aName, "microseconds") == 0) return make_int(d.us);
+                if (auto const m = find_method(sTimedeltaMethods, aSelf, aName))
+                    return m;
+                if (auto const o = find_operator(sTimedeltaOperators, aSelf, aName))
+                    return o;
+                return find_operator(sComparisonOperators, aSelf, aName);
+            }
 
             neos_py_type make_timedelta_type()
             {
@@ -1830,12 +1979,8 @@ namespace neos::python_runtime
                 type.truth = [](neos_py_context*, object* aSelf) -> int { return delta(aSelf).zero() ? 0 : 1; };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
-                    auto const& d = delta(aSelf);
-                    if (std::strcmp(aName, "days") == 0) return make_int(d.days);
-                    if (std::strcmp(aName, "seconds") == 0) return make_int(d.seconds);
-                    if (std::strcmp(aName, "microseconds") == 0) return make_int(d.us);
-                    if (auto const m = find_method(sTimedeltaMethods, aSelf, aName))
-                        return m;
+                    if (auto const a = timedelta_attribute(aSelf, aName))
+                        return a;
                     if (auto const a = class_attribute("datetime.timedelta", aName))
                         return a;
                     return error("AttributeError", std::string{ "'datetime.timedelta' object has no attribute '" } + aName + "'");
@@ -1853,7 +1998,7 @@ namespace neos::python_runtime
                     return error("OverflowError", "date value out of range");
                 int y = 0, m = 0, d = 0;
                 ord_to_ymd(days, y, m, d);
-                return make_date(y, m, d);
+                return of_type_of(aDate, make_date(y, m, d));
             }
 
             int compare_ymd(fields const& a, fields const& b)
@@ -1880,7 +2025,7 @@ namespace neos::python_runtime
                 object* tz = nullptr;
                 if (!replace_fields("replace", aArgs, aKwargs, { "year", "month", "day" }, 0u, f, tz) || !check_date(f.year, f.month, f.day))
                     return nullptr;
-                return make_date(f.year, f.month, f.day);
+                return of_type_of(aSelf, make_date(f.year, f.month, f.day));
             }
 
             method_entry const sDateMethods[] =
@@ -1927,7 +2072,11 @@ namespace neos::python_runtime
                 if (std::strcmp(aName, "year") == 0) return make_int(f.year);
                 if (std::strcmp(aName, "month") == 0) return make_int(f.month);
                 if (std::strcmp(aName, "day") == 0) return make_int(f.day);
-                return find_method(sDateMethods, aSelf, aName);
+                if (auto const m = find_method(sDateMethods, aSelf, aName))
+                    return m;
+                if (auto const o = find_operator(sDateOperators, aSelf, aName))
+                    return o;
+                return find_operator(sComparisonOperators, aSelf, aName);
             }
 
             neos_py_type make_date_type()
@@ -2044,7 +2193,7 @@ namespace neos::python_runtime
                 if (!replace_fields("replace", aArgs, aKwargs, { "hour", "minute", "second", "microsecond", "tzinfo", "fold" }, 3u, f, tz) ||
                     !check_time(f.hour, f.minute, f.second, f.us, f.fold))
                     return nullptr;
-                return make_time(f, tz);
+                return of_type_of(aSelf, make_time(f, tz));
             }
 
             method_entry const sTimeMethods[] =
@@ -2062,6 +2211,22 @@ namespace neos::python_runtime
                 { "__copy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } },
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
+
+            // (an instance's attribute (null (no exception): none of its own))
+            object* time_attribute(object* aSelf, char const* aName)
+            {
+                auto const& f = fields_of(aSelf);
+                std::string_view const name{ aName };
+                if (name == "hour") return make_int(f.hour);
+                if (name == "minute") return make_int(f.minute);
+                if (name == "second") return make_int(f.second);
+                if (name == "microsecond") return make_int(f.us);
+                if (name == "fold") return make_int(f.fold);
+                if (name == "tzinfo") return borrowed(tz_of(aSelf) != nullptr ? tz_of(aSelf) : none());
+                if (auto const m = find_method(sTimeMethods, aSelf, aName))
+                    return m;
+                return find_operator(sComparisonOperators, aSelf, aName);
+            }
 
             neos_py_type make_time_type()
             {
@@ -2123,16 +2288,8 @@ namespace neos::python_runtime
                 type.truth = [](neos_py_context*, object*) -> int { return 1; };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
-                    auto const& f = fields_of(aSelf);
-                    std::string_view const name{ aName };
-                    if (name == "hour") return make_int(f.hour);
-                    if (name == "minute") return make_int(f.minute);
-                    if (name == "second") return make_int(f.second);
-                    if (name == "microsecond") return make_int(f.us);
-                    if (name == "fold") return make_int(f.fold);
-                    if (name == "tzinfo") return borrowed(tz_of(aSelf) != nullptr ? tz_of(aSelf) : none());
-                    if (auto const m = find_method(sTimeMethods, aSelf, aName))
-                        return m;
+                    if (auto const a = time_attribute(aSelf, aName))
+                        return a;
                     if (auto const a = class_attribute("datetime.time", aName))
                         return a;
                     return error("AttributeError", std::string{ "'datetime.time' object has no attribute '" } + aName + "'");
@@ -2147,7 +2304,7 @@ namespace neos::python_runtime
                 fields result;
                 if (!add_delta(fields_of(aSelf), aDelta, aSign, result))
                     return nullptr;
-                return make_datetime(result, tz_of(aSelf));
+                return of_type_of(aSelf, make_datetime(result, tz_of(aSelf)));
             }
 
             // (dt - other as microseconds (with their offsets); false: an exception)
@@ -2211,7 +2368,7 @@ namespace neos::python_runtime
                 if (!replace_fields("replace", aArgs, aKwargs, { "year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo", "fold" }, 0u, f, tz) ||
                     !check_date(f.year, f.month, f.day) || !check_time(f.hour, f.minute, f.second, f.us, f.fold))
                     return nullptr;
-                return make_datetime(f, tz);
+                return of_type_of(aSelf, make_datetime(f, tz));
             }
 
             // (timezone.fromutc and tzinfo.fromutc's results: dt (UTC, with tzinfo tz) as local time)
@@ -2275,7 +2432,10 @@ namespace neos::python_runtime
                     if (!tz)
                         return nullptr;
                 }
-                ref const utcDatetime{ make_datetime(utcFields, tz.get()) };
+                // (self - offset: of self's type (add_datetime_timedelta's))
+                ref const utcDatetime{ of_type_of(aSelf, make_datetime(utcFields, tz.get())) };
+                if (!utcDatetime)
+                    return nullptr;
                 return from_utc(tz.get(), utcDatetime.get());
             }
 
@@ -2343,6 +2503,46 @@ namespace neos::python_runtime
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
 
+            // (an instance's attribute (null (no exception): none of its own))
+            object* datetime_attribute(object* aSelf, char const* aName)
+            {
+                auto const& f = fields_of(aSelf);
+                std::string_view const name{ aName };
+                if (name == "year") return make_int(f.year);
+                if (name == "month") return make_int(f.month);
+                if (name == "day") return make_int(f.day);
+                if (name == "hour") return make_int(f.hour);
+                if (name == "minute") return make_int(f.minute);
+                if (name == "second") return make_int(f.second);
+                if (name == "microsecond") return make_int(f.us);
+                if (name == "fold") return make_int(f.fold);
+                if (name == "tzinfo") return borrowed(tz_of(aSelf) != nullptr ? tz_of(aSelf) : none());
+                if (auto const m = find_method(sDatetimeMethods, aSelf, aName))
+                    return m;
+                if (auto const o = find_operator(sDateOperators, aSelf, aName))
+                    return o;
+                return find_operator(sComparisonOperators, aSelf, aName);
+            }
+
+            // (pep495_eq_exception: whether an aware datetime's offset depends on its fold: its utcoffset with its fold flipped (get_flip_fold_offset) 
+            // is not its offset (aResult, aOffset: tz_offset's of it); -1: an exception)
+            int fold_dependent(object* aSelf, int aResult, td const& aOffset)
+            {
+                auto f = fields_of(aSelf);
+                f.fold = f.fold != 0 ? 0 : 1;
+                ref const flipped{ make_datetime(f, tz_of(aSelf)) };
+                td offset;
+                auto const r = tz_offset(tz_of(aSelf), "utcoffset", flipped.get(), offset);
+                if (r < 0)
+                    return -1;
+                return r != aResult || (r == 1 && compare_delta(offset, aOffset) != 0) ? 1 : 0;
+            }
+            int pep495_eq_exception(object* aLhs, object* aRhs, int r1, td const& o1, int r2, td const& o2)
+            {
+                auto const e = fold_dependent(aLhs, r1, o1);
+                return e != 0 ? e : fold_dependent(aRhs, r2, o2);
+            }
+
             neos_py_type make_datetime_type()
             {
                 auto type = make_type("datetime.datetime", "datetime", retain_object, release_object<temporal_object>);
@@ -2394,12 +2594,25 @@ namespace neos::python_runtime
                     auto const r2 = tz_offset(tz_of(aRhs), "utcoffset", aRhs, o2);
                     if (r2 < 0)
                         return nullptr;
+                    // (equal datetimes are not if either's offset depends on its fold (in a gap or a fold): CPython's pep495_eq_exception)
+                    auto const result = [&](int aDifference) -> object*
+                    {
+                        if ((aOperation == NEOS_PY_EQ || aOperation == NEOS_PY_NE) && aDifference == 0)
+                        {
+                            auto const exception = pep495_eq_exception(aLhs, aRhs, r1, o1, r2, o2);
+                            if (exception < 0)
+                                return nullptr;
+                            if (exception != 0)
+                                aDifference = 1;
+                        }
+                        return compare_result(aOperation, aDifference);
+                    };
                     if (r1 == r2 && (r1 == 0 || compare_delta(o1, o2) == 0))
-                        return compare_result(aOperation, fieldsDifference());
+                        return result(fieldsDifference());
                     if (r1 == 1 && r2 == 1)
                     {
                         auto const difference = total_us(a) - small_us(o1) - (total_us(b) - small_us(o2));
-                        return compare_result(aOperation, difference < 0 ? -1 : difference > 0 ? 1 : 0);
+                        return result(difference < 0 ? -1 : difference > 0 ? 1 : 0);
                     }
                     if (aOperation == NEOS_PY_EQ)
                         return make_bool(false);
@@ -2411,8 +2624,10 @@ namespace neos::python_runtime
                 {
                     auto f = fields_of(aSelf);
                     f.fold = 0;
+                    // (the offset of self with fold 0 (as CPython's datetime_hash: so that the fold does not change its hash))
+                    ref const self0{ fields_of(aSelf).fold != 0 ? make_datetime(f, tz_of(aSelf)) : borrowed(aSelf) };
                     td offset;
-                    auto const r = tz_offset(tz_of(aSelf), "utcoffset", aSelf, offset);
+                    auto const r = tz_offset(tz_of(aSelf), "utcoffset", self0.get(), offset);
                     if (r < 0)
                         return -1;
                     auto us = total_us(f);
@@ -2424,19 +2639,8 @@ namespace neos::python_runtime
                 type.truth = [](neos_py_context*, object*) -> int { return 1; };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
-                    auto const& f = fields_of(aSelf);
-                    std::string_view const name{ aName };
-                    if (name == "year") return make_int(f.year);
-                    if (name == "month") return make_int(f.month);
-                    if (name == "day") return make_int(f.day);
-                    if (name == "hour") return make_int(f.hour);
-                    if (name == "minute") return make_int(f.minute);
-                    if (name == "second") return make_int(f.second);
-                    if (name == "microsecond") return make_int(f.us);
-                    if (name == "fold") return make_int(f.fold);
-                    if (name == "tzinfo") return borrowed(tz_of(aSelf) != nullptr ? tz_of(aSelf) : none());
-                    if (auto const m = find_method(sDatetimeMethods, aSelf, aName))
-                        return m;
+                    if (auto const a = datetime_attribute(aSelf, aName))
+                        return a;
                     if (auto const a = class_attribute("datetime.datetime", aName))
                         return a;
                     return error("AttributeError", std::string{ "'datetime.datetime' object has no attribute '" } + aName + "'");
@@ -2537,7 +2741,10 @@ namespace neos::python_runtime
                 type.str = [](neos_py_context*, object* aSelf) -> object* { return make_str(timezone_name(zone(aSelf))); };
                 type.compare = [](neos_py_context*, int aOperation, object* aLhs, object* aRhs) -> object*
                 {
-                    if (!is_timezone(aLhs) || !is_timezone(aRhs) || (aOperation != NEOS_PY_EQ && aOperation != NEOS_PY_NE))
+                    // (timezone_richcompare: only == and != (an ordering: TypeError, as of objects that have none))
+                    if (aOperation != NEOS_PY_EQ && aOperation != NEOS_PY_NE)
+                        return not_comparable(aOperation, aLhs, aRhs);
+                    if (!is_timezone(aLhs) || !is_timezone(aRhs))
                         return borrowed(not_implemented());
                     return compare_result(aOperation, compare_delta(zone(aLhs).offset, zone(aRhs).offset));
                 };
@@ -2551,6 +2758,8 @@ namespace neos::python_runtime
                 {
                     if (auto const m = find_method(sTimezoneMethods, aSelf, aName))
                         return m;
+                    if (auto const o = find_operator(sComparisonOperators, aSelf, aName))
+                        return o;
                     if (auto const a = class_attribute("datetime.timezone", aName))
                         return a;
                     return error("AttributeError", std::string{ "'datetime.timezone' object has no attribute '" } + aName + "'");
@@ -2600,6 +2809,32 @@ namespace neos::python_runtime
                                 return error("ValueError", "fromutc: tz.dst() gave inconsistent results; cannot convert");
                         }
                         return datetime_add(result.get(), dst, 1);
+                    } },
+                // (tzinfo_reduce: (type(self), self.__getinitargs__() (or ()), self.__getstate__()))
+                { "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 1u)
+                            return error("TypeError", "__reduce__() takes no arguments (" + std::to_string(aArgs.empty() ? 0u : aArgs.size() - 1u) + " given)");
+                        auto const self = aArgs[0];
+                        ref initArgs;
+                        if (ref const getinitargs{ getattr(self, "__getinitargs__") })
+                        {
+                            initArgs = ref{ invoke(getinitargs.get(), {}) };
+                            if (!initArgs)
+                                return nullptr;
+                        }
+                        else if (!attribute_error_caught())
+                            return nullptr;
+                        else
+                            initArgs = ref{ make_tuple() };
+                        ref const getstate{ getattr(self, "__getstate__") };
+                        if (!getstate)
+                            return nullptr;
+                        ref state{ invoke(getstate.get(), {}) };
+                        if (!state)
+                            return nullptr;
+                        ref const cls{ class_of(self) };
+                        return make_tuple({ borrowed(cls.get()), initArgs.release_ownership(), state.release_ownership() });
                     } }
             };
 
@@ -3214,7 +3449,8 @@ namespace neos::python_runtime
                         strptime_result result;
                         if (!strptime_of(as<str_object>(a[0])->value, as<str_object>(a[1])->value, result))
                             return nullptr;
-                        if (!check_time(result.f.hour, result.f.minute, result.f.second, result.f.us, 0))
+                        // (the datetime's checks (_strptime_datetime's cls(*args): e.g. February 29 of the default year 1900))
+                        if (!check_date(result.f.year, result.f.month, result.f.day) || !check_time(result.f.hour, result.f.minute, result.f.second, result.f.us, 0))
                             return nullptr;
                         ref tz;
                         if (result.gmtoff)
@@ -3231,9 +3467,35 @@ namespace neos::python_runtime
             object* constant_date(int y, int m, int d) { return make_date(y, m, d); }
 
             // (the classes' attributes (min, max, resolution, utc) and class methods; null: none (no exception))
+            // (a method of the type's (aClass's) instances)
+            bool instance_method(std::string const& aClass, char const* aName)
+            {
+                auto const in = [aName](auto const& aEntries)
+                {
+                    for (auto const& e : aEntries)
+                        if (std::strcmp(e.name, aName) == 0)
+                            return true;
+                    return false;
+                };
+                if (aClass == "datetime.timedelta")
+                    return in(sTimedeltaMethods) || in(sTimedeltaOperators) || in(sComparisonOperators);
+                if (aClass == "datetime.date")
+                    return in(sDateMethods) || in(sDateOperators) || in(sComparisonOperators);
+                if (aClass == "datetime.time")
+                    return in(sTimeMethods) || in(sComparisonOperators);
+                if (aClass == "datetime.datetime")
+                    return in(sDatetimeMethods) || in(sDateOperators) || in(sComparisonOperators);
+                if (aClass == "datetime.timezone")
+                    return in(sTimezoneMethods) || in(sComparisonOperators);
+                return false;
+            }
+
             object* class_attribute(std::string const& aClass, char const* aName)
             {
                 std::string_view const name{ aName };
+                // (the methods of the type's instances (e.g. date.replace, timedelta.__add__), unbound (as CPython's method descriptors))
+                if (instance_method(aClass, aName))
+                    return unbound_method(aClass, aName);
                 if (aClass == "datetime.timedelta")
                 {
                     if (name == "min") return make_timedelta(td{ -sMaxDeltaDays, 0, 0 });
@@ -3283,15 +3545,50 @@ namespace neos::python_runtime
                 return nullptr;
             }
 
+            // --- subclasses (e.g. class D(date)): their instances' methods and operators are the type's of the instances (their results of the 
+            // instances' class, as CPython's)
+
+            object* subclass_attribute(object* aOwner, char const* aName)
+            {
+                auto const value = value_of(aOwner);
+                auto const attribute = is_timedelta(value) ? timedelta_attribute(aOwner, aName) : is_date(value) ? date_getattr(aOwner, aName) :
+                    is_time(value) ? time_attribute(aOwner, aName) : is_datetime(value) ? datetime_attribute(aOwner, aName) : nullptr;
+                if (attribute != nullptr || failed())
+                    return attribute;
+                // (the class's attributes (class methods: of the class))
+                ref const cls{ class_of(aOwner) };
+                return datetime_subclass_attribute(cls.get(), qualified_name(value), aName);
+            }
+
+            object* subclass_binary(object* aOwner, int aOperation, object* aLhs, object* aRhs, int aInplace)
+            {
+                return python_type(value_of(aOwner))->binary(context(), aOperation, aLhs, aRhs, aInplace);
+            }
+
             // --- the module
 
             bool datetime_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
+                static bool const sRegistered = []()
+                {
+                    for (auto const name : { "datetime.timedelta", "datetime.date", "datetime.time", "datetime.datetime" })
+                    {
+                        native_base_hooks hooks;
+                        hooks.objectInit = true;    // (their __init__ is object's (their values are __new__'s))
+                        hooks.attribute = subclass_attribute;
+                        hooks.binary = subclass_binary;
+                        native_bases()[name] = hooks;
+                    }
+                    register_final_type("datetime.timezone");
+                    return true;
+                }();
+                (void)sRegistered;
                 if (sTzinfoClass == nullptr)
                 {
                     std::vector<std::pair<std::string, object*>> ns;
                     for (auto const& m : sTzinfoMethods)
                         ns.emplace_back(m.name, make_builtin(m));
+                    ns.emplace_back("__slots__", make_tuple());     // (its instances have no attributes (its subclasses' do))
                     sTzinfoClass = make_class("datetime", "tzinfo", {}, ns);
                     for (auto& n : ns)
                         release(n.second);
@@ -3308,6 +3605,8 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("MINYEAR", make_int(sMinYear));
                 aAttributes.emplace_back("MAXYEAR", make_int(sMaxYear));
                 aAttributes.emplace_back("UTC", utc());
+                aAttributes.emplace_back("__all__", make_tuple({ make_str("date"), make_str("datetime"), make_str("time"), make_str("timedelta"), make_str("timezone"),
+                    make_str("tzinfo"), make_str("MINYEAR"), make_str("MAXYEAR"), make_str("UTC") }));
                 return true;
             }
 
@@ -3390,7 +3689,7 @@ namespace neos::python_runtime
 
         // (a subclass's (aClass's) attribute of its base aBase (e.g. "datetime.datetime"): a class method (an alternate constructor, e.g. 
         // fromisoformat) of the subclass: its result an instance of the subclass (cls(fields...), as CPython's); other attributes (min, max, 
-        // resolution): the base's; null (no exception): none)
+        // resolution, and the instances' methods, unbound): the base's; null (no exception): none)
         object* datetime_subclass_attribute(object* aClass, std::string const& aBase, char const* aName)
         {
             builtin_entry const* entry = nullptr;
@@ -3407,7 +3706,7 @@ namespace neos::python_runtime
             else if (aBase == "datetime.datetime")
                 find(sDatetimeClassMethods);
             if (entry == nullptr)
-                return class_attribute(aBase, aName);
+                return class_function(aBase, aName);
             return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
             {
                 auto const& args = tuple_items(aArgs);
@@ -3415,35 +3714,7 @@ namespace neos::python_runtime
                 ref const result{ static_cast<builtin_entry const*>(aData)->function(std::vector<object*>{ args.begin() + 1, args.end() }, aKwargs) };
                 if (!result || !(is_date(result.get()) || is_time(result.get()) || is_datetime(result.get())))
                     return result.get() != nullptr ? new_reference(result.get()) : nullptr;
-                std::vector<char const*> names;
-                if (is_datetime(result.get()))
-                    names = { "year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo" };
-                else if (is_date(result.get()))
-                    names = { "year", "month", "day" };
-                else
-                    names = { "hour", "minute", "second", "microsecond", "tzinfo" };
-                std::vector<object*> fields;
-                for (auto n : names)
-                {
-                    auto const value = getattr(result.get(), n);
-                    if (value == nullptr)
-                    {
-                        for (auto f : fields)
-                            release(f);
-                        return nullptr;
-                    }
-                    fields.push_back(value);
-                }
-                ref const fieldArgs{ make_tuple(std::move(fields)) };
-                ref const keywords{ make_dict() };
-                if (!is_date(result.get()))
-                {
-                    ref const fold{ getattr(result.get(), "fold") };
-                    ref const key{ make_str("fold") };
-                    if (!fold || dict_set(keywords.get(), key.get(), fold.get()) != 0)
-                        return nullptr;
-                }
-                return call(cls, fieldArgs.get(), keywords.get());
+                return of_class(cls, result.get());
             }, const_cast<builtin_entry*>(entry), aClass);
         }
     }

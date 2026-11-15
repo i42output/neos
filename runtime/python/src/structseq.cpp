@@ -80,6 +80,7 @@ namespace neos::python_runtime
 
             bool is_structseq(object* aObject);
             bool has_constructor(structseq_descriptor const& aDescriptor);
+            bool reduces_as_tuple(structseq_descriptor const& aDescriptor);
 
             // (__reduce__: (its type, (its items, {its other fields}) (CPython's structseq_reduce)), or (its type, its items) if its type's 
             // constructor takes its items (e.g. os.sched_param's))
@@ -90,6 +91,12 @@ namespace neos::python_runtime
                 ref const items{ items_of(aSelf) };
                 if (!type || !items)
                     return nullptr;
+                // (a type that pickles as a tuple (e.g. datetime.IsoCalendarDate's: (tuple, (tuple(self),)), as CPython's iso_calendar_date_reduce))
+                if (reduces_as_tuple(*s.descriptor))
+                {
+                    ref const tupleType{ class_of(items.get()) };
+                    return make_tuple({ new_reference(tupleType.get()), make_tuple({ new_reference(items.get()) }) });
+                }
                 if (has_constructor(*s.descriptor))
                     return make_tuple({ new_reference(type.get()), new_reference(items.get()) });
                 ref const others{ make_dict() };
@@ -302,6 +309,16 @@ namespace neos::python_runtime
             std::lock_guard<std::mutex> lock{ structseq_mutex() };
             not_instantiable_types().insert(aDescriptor.qualifiedName);
         }
+        // (a struct sequence type that pickles as a tuple of its items (e.g. datetime.IsoCalendarDate))
+        namespace
+        {
+            std::set<std::string, std::less<>>& tuple_reduce_types() { static std::set<std::string, std::less<>> sTypes; return sTypes; }
+        }
+        void set_structseq_reduce_as_tuple(structseq_descriptor const& aDescriptor)
+        {
+            std::lock_guard<std::mutex> lock{ structseq_mutex() };
+            tuple_reduce_types().insert(aDescriptor.qualifiedName);
+        }
 
         namespace
         {
@@ -309,6 +326,11 @@ namespace neos::python_runtime
             {
                 std::lock_guard<std::mutex> lock{ structseq_mutex() };
                 return item_argument_types().contains(aDescriptor.qualifiedName);
+            }
+            bool reduces_as_tuple(structseq_descriptor const& aDescriptor)
+            {
+                std::lock_guard<std::mutex> lock{ structseq_mutex() };
+                return tuple_reduce_types().contains(aDescriptor.qualifiedName);
             }
         }
 

@@ -86,6 +86,7 @@ namespace neos::language
         void parsed(i_source_fragment&) override {}
         void diagnose(i_source_fragment const&, std::uint32_t&, std::uint32_t&, std::uint32_t&, std::uint32_t&, neolib::i_string&, neolib::i_string&, 
             neolib::i_string&) override {}
+        bool needs_declarations() const override { return true; }
         void begin_compilation() override {}
         void begin_pass() override {}
         void end_pass() override {}

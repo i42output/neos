@@ -2036,6 +2036,15 @@ namespace neos::python_runtime
             return true;
         }
 
+        // (ranges (see range_native))
+        void range_parts(object* aRange, ref& aStart, ref& aStop, ref& aStep);
+        ref range_length_int(object* aRange);
+        ref range_item_int(object* aRange, object* aIndex);
+        ref range_index_item(object* aRange, object* aIndex);
+        object* range_slice(object* aRange, object* aSlice);
+        int range_contains_int(object* aRange, object* aItem);
+        int range_equal(object* aLhs, object* aRhs);
+
         bool repr_of(object* aObject, std::string& aResult)
         {
             switch (kind_of(aObject))
@@ -2143,7 +2152,17 @@ namespace neos::python_runtime
             case NEOS_PY_RANGE:
                 {
                     auto const& r = *as<range_object>(aObject);
-                    aResult = "range(" + std::to_string(r.start) + ", " + std::to_string(r.stop) + (r.step != 1 ? ", " + std::to_string(r.step) : std::string{}) + ")";
+                    if (r.big == nullptr)
+                    {
+                        aResult = "range(" + std::to_string(r.start) + ", " + std::to_string(r.stop) + (r.step != 1 ? ", " + std::to_string(r.step) : std::string{}) + ")";
+                        return true;
+                    }
+                    ref start, stop, step;
+                    range_parts(aObject, start, stop, step);
+                    std::string a, b, c;
+                    if (!repr_of(start.get(), a) || !repr_of(stop.get(), b) || !repr_of(step.get(), c))
+                        return false;
+                    aResult = "range(" + a + ", " + b + (c != "1" ? ", " + c : std::string{}) + ")";
                 }
                 return true;
             case NEOS_PY_ITERATOR:
@@ -3162,9 +3181,13 @@ namespace neos::python_runtime
             }
             if (lk == NEOS_PY_RANGE && rk == NEOS_PY_RANGE)
             {
-                auto const& a = *as<range_object>(aLhs);
-                auto const& b = *as<range_object>(aRhs);
-                return a.start == b.start && a.stop == b.stop && a.step == b.step ? 0 : 4;
+                // (range_richcompare: == and != only (as sequences); no ordering)
+                if (!aEquality)
+                    return 4;
+                auto const equal = range_equal(aLhs, aRhs);
+                if (equal < 0)
+                    aError = 1;
+                return equal == 1 ? 0 : 4;
             }
             return aLhs == aRhs ? 0 : 3;
         }
@@ -3261,8 +3284,21 @@ namespace neos::python_runtime
             case NEOS_PY_DICT: return static_cast<long long>(as<dict_object>(aObject)->items.size());
             case NEOS_PY_RANGE:
                 {
-                    auto const& r = *as<range_object>(aObject);
-                    return static_cast<long long>(slice_count(r.start, r.stop, r.step));
+                    // (range_length: OverflowError beyond sys.maxsize)
+                    if (range_native(aObject))
+                    {
+                        auto const& r = *as<range_object>(aObject);
+                        return static_cast<long long>(slice_count(r.start, r.stop, r.step));
+                    }
+                    ref const n{ range_length_int(aObject) };
+                    if (!n)
+                        return -1;
+                    if (is_big(n.get()))
+                    {
+                        error("OverflowError", "Python int too large to convert to C ssize_t");
+                        return -1;
+                    }
+                    return int_value(n.get());
                 }
             case NEOS_PY_OTHER:
                 if (auto const type = python_type(aObject); type != nullptr && type->length != nullptr)
@@ -3285,8 +3321,17 @@ namespace neos::python_runtime
             case NEOS_PY_FLOAT: return as<float_object>(aObject)->value != 0.0 ? 1 : 0;
             case NEOS_PY_COMPLEX: return as<complex_object>(aObject)->real != 0.0 || as<complex_object>(aObject)->imag != 0.0 ? 1 : 0;
             case NEOS_PY_STR: return as<str_object>(aObject)->value.empty() ? 0 : 1;
-            case NEOS_PY_LIST: case NEOS_PY_TUPLE: case NEOS_PY_DICT: case NEOS_PY_RANGE:
+            case NEOS_PY_LIST: case NEOS_PY_TUPLE: case NEOS_PY_DICT:
                 return length(aObject) != 0 ? 1 : 0;
+            case NEOS_PY_RANGE:
+                {
+                    // (range_bool: its length's truth (of any size))
+                    auto const& r = *as<range_object>(aObject);
+                    if (r.big == nullptr)
+                        return slice_count(r.start, r.stop, r.step) != 0u ? 1 : 0;
+                    ref const n{ range_length_int(aObject) };
+                    return n ? truth(n.get()) : -1;
+                }
             case NEOS_PY_OTHER:
                 if (auto const type = python_type(aObject))
                 {
@@ -3354,9 +3399,15 @@ namespace neos::python_runtime
 
         object* call_special(object* aObject, char const* aName, std::vector<object*> aArgs, bool& aFound);
 
-        // (a slice's index as an int (evaluate_slice_index): an int, or the result of an object's __index__)
-        ref slice_index_value(object* aPart)
+        // (a slice's index as an int (evaluate_slice_index): an int, or the result of an object's __index__ (aMessage: the TypeError's if 
+        // it is neither; null: PyNumber_Index's))
+        ref slice_index_value(object* aPart, char const* aMessage = "slice indices must be integers or None or have an __index__ method")
         {
+            auto const neither = [&]()
+            {
+                error("TypeError", aMessage != nullptr ? std::string{ aMessage } : "'" + std::string{ type_name(aPart) } + "' object cannot be interpreted as an integer");
+                return ref{};
+            };
             if (is_int_like(aPart))
                 return ref{ new_reference(aPart) };
             if (is_instance(aPart))
@@ -3366,10 +3417,7 @@ namespace neos::python_runtime
                 if (!found && builtin_value(aPart) != aPart && is_int_like(builtin_value(aPart)))
                     return ref{ new_reference(builtin_value(aPart)) };
                 if (!found)
-                {
-                    error("TypeError", "slice indices must be integers or None or have an __index__ method");
-                    return {};
-                }
+                    return neither();
                 if (value && !is_int_like(value.get()))
                 {
                     error("TypeError", std::string{ "__index__ returned non-int (type " } + type_name(value.get()) + ")");
@@ -3382,8 +3430,7 @@ namespace neos::python_runtime
                 long long result = 0;
                 return type->index(context(), aPart, &result) == 0 ? ref{ make_int(result) } : ref{};
             }
-            error("TypeError", "slice indices must be integers or None or have an __index__ method");
-            return {};
+            return neither();
         }
 
         // (a slice's index (_PyEval_SliceIndex): clamped to [-sys.maxsize - 1, sys.maxsize] (PyNumber_AsSsize_t(v, NULL)))
@@ -3457,6 +3504,229 @@ namespace neos::python_runtime
                 return true;
             };
             return bound(s.start, stepNegative ? upper.get() : lower.get(), aStart) && bound(s.stop, stepNegative ? lower.get() : upper.get(), aStop);
+        }
+
+        // --- ranges (as CPython's rangeobject.c: their start, stop, step and length are ints of any size; a range whose start, stop, step 
+        // and length are of 64 bits (native) is computed natively)
+
+        bool range_native(object* aRange)
+        {
+            auto const& r = *as<range_object>(aRange);
+            return r.big == nullptr && slice_count(r.start, r.stop, r.step) <= static_cast<std::size_t>(std::numeric_limits<long long>::max());
+        }
+
+        // (a range's start, stop and step as ints (new references))
+        void range_parts(object* aRange, ref& aStart, ref& aStop, ref& aStep)
+        {
+            auto const& r = *as<range_object>(aRange);
+            if (r.big != nullptr)
+            {
+                auto const& parts = as<tuple_object>(r.big)->items;
+                aStart = ref{ new_reference(parts[0]) };
+                aStop = ref{ new_reference(parts[1]) };
+                aStep = ref{ new_reference(parts[2]) };
+                return;
+            }
+            aStart = ref{ make_int(r.start) };
+            aStop = ref{ make_int(r.stop) };
+            aStep = ref{ make_int(r.step) };
+        }
+
+        object* make_range_of(object* aStart, object* aStop, object* aStep)
+        {
+            long long values[3] = {};
+            object* const parts[3] = { aStart, aStop, aStep };
+            bool native = true;
+            for (std::size_t i = 0u; i < 3u; ++i)
+                if (is_big(parts[i]))
+                    native = false;
+                else
+                    values[i] = int_value(parts[i]);
+            auto const result = make_range(native ? values[0] : 0, native ? values[1] : 0, native ? values[2] : 1);
+            if (!native)
+                as<range_object>(result)->big = make_tuple({ new_reference(aStart), new_reference(aStop), new_reference(aStep) });
+            return result;
+        }
+
+        // (compute_range_length: a range's length as an int (null: an exception))
+        ref range_length_int(object* aRange)
+        {
+            auto const& r = *as<range_object>(aRange);
+            if (r.big == nullptr)
+            {
+                auto const n = slice_count(r.start, r.stop, r.step);
+                if (n <= static_cast<std::size_t>(std::numeric_limits<long long>::max()))
+                    return ref{ make_int(static_cast<long long>(n)) };
+                // (beyond sys.maxsize (at most 2**64 - 1): of its halves)
+                ref const half{ make_int(static_cast<long long>(n / 2u)) };
+                ref const twice{ binary(NEOS_PY_ADD, half.get(), half.get(), false) };
+                if (!twice)
+                    return {};
+                ref const odd{ make_int(static_cast<long long>(n % 2u)) };
+                return ref{ binary(NEOS_PY_ADD, twice.get(), odd.get(), false) };
+            }
+            ref start, stop, step;
+            range_parts(aRange, start, stop, step);
+            // (lo, hi and step: stop, start and -step if step is negative)
+            bool const negative = int_negative(step.get());
+            ref const lo{ new_reference(negative ? stop.get() : start.get()) };
+            ref const hi{ new_reference(negative ? start.get() : stop.get()) };
+            ref const positiveStep{ negative ? unary(NEOS_PY_NEGATIVE, step.get()) : new_reference(step.get()) };
+            if (!positiveStep)
+                return {};
+            ref const empty{ compare(NEOS_PY_GE, lo.get(), hi.get()) };
+            if (!empty)
+                return {};
+            if (truth(empty.get()) == 1)
+                return ref{ make_int(0) };
+            // ((hi - lo - 1) // step + 1)
+            ref const one{ make_int(1) };
+            ref const difference{ binary(NEOS_PY_SUBTRACT, hi.get(), lo.get(), false) };
+            if (!difference)
+                return {};
+            ref const less{ binary(NEOS_PY_SUBTRACT, difference.get(), one.get(), false) };
+            if (!less)
+                return {};
+            ref const quotient{ binary(NEOS_PY_FLOOR_DIVIDE, less.get(), positiveStep.get(), false) };
+            if (!quotient)
+                return {};
+            return ref{ binary(NEOS_PY_ADD, quotient.get(), one.get(), false) };
+        }
+
+        // (compute_item: start + i * step (aIndex: an int))
+        ref range_item_int(object* aRange, object* aIndex)
+        {
+            ref start, stop, step;
+            range_parts(aRange, start, stop, step);
+            ref const product{ binary(NEOS_PY_MULTIPLY, aIndex, step.get(), false) };
+            if (!product)
+                return {};
+            return ref{ binary(NEOS_PY_ADD, start.get(), product.get(), false) };
+        }
+
+        // (compute_range_item: the item at an index (an int; negative: from the end); IndexError beyond it)
+        ref range_index_item(object* aRange, object* aIndex)
+        {
+            ref const length{ range_length_int(aRange) };
+            if (!length)
+                return {};
+            ref index{ new_reference(aIndex) };
+            if (int_negative(index.get()))
+            {
+                index = ref{ binary(NEOS_PY_ADD, index.get(), length.get(), false) };
+                if (!index)
+                    return {};
+            }
+            ref const beyond{ compare(NEOS_PY_GE, index.get(), length.get()) };
+            if (!beyond)
+                return {};
+            if (int_negative(index.get()) || truth(beyond.get()) == 1)
+            {
+                error("IndexError", "range object index out of range");
+                return {};
+            }
+            return range_item_int(aRange, index.get());
+        }
+
+        // (compute_slice: the range of the slice's positions: (compute_item(start), compute_item(stop), step * the slice's step))
+        object* range_slice(object* aRange, object* aSlice)
+        {
+            ref const length{ range_length_int(aRange) };
+            if (!length)
+                return nullptr;
+            ref substart, substop, substep;
+            if (!slice_long_indices(aSlice, length.get(), substart, substop, substep))
+                return nullptr;
+            ref start, stop, step;
+            range_parts(aRange, start, stop, step);
+            ref const newStep{ binary(NEOS_PY_MULTIPLY, step.get(), substep.get(), false) };
+            if (!newStep)
+                return nullptr;
+            ref const newStart{ range_item_int(aRange, substart.get()) };
+            if (!newStart)
+                return nullptr;
+            ref const newStop{ range_item_int(aRange, substop.get()) };
+            if (!newStop)
+                return nullptr;
+            return make_range_of(newStart.get(), newStop.get(), newStep.get());
+        }
+
+        // (range_contains_long: an int (or a bool) is in a range if it is within its bounds and a multiple of its step from its start)
+        int range_contains_int(object* aRange, object* aItem)
+        {
+            auto const& r = *as<range_object>(aRange);
+            if (r.big == nullptr && !is_big(aItem))
+            {
+                auto const v = int_value(aItem);
+                if (r.step > 0 ? (v < r.start || v >= r.stop) : (v > r.start || v <= r.stop))
+                    return 0;
+                return (static_cast<__int128>(v) - r.start) % r.step == 0 ? 1 : 0;
+            }
+            ref start, stop, step;
+            range_parts(aRange, start, stop, step);
+            // (positive steps: start <= ob < stop; negative steps: stop < ob <= start)
+            bool const negative = int_negative(step.get());
+            ref const first{ negative ? compare(NEOS_PY_LE, aItem, start.get()) : compare(NEOS_PY_LE, start.get(), aItem) };
+            if (!first)
+                return -1;
+            ref const second{ negative ? compare(NEOS_PY_LT, stop.get(), aItem) : compare(NEOS_PY_LT, aItem, stop.get()) };
+            if (!second)
+                return -1;
+            if (truth(first.get()) != 1 || truth(second.get()) != 1)
+                return 0;
+            ref const offset{ binary(NEOS_PY_SUBTRACT, aItem, start.get(), false) };
+            if (!offset)
+                return -1;
+            ref const remainder{ binary(NEOS_PY_REMAINDER, offset.get(), step.get(), false) };
+            if (!remainder)
+                return -1;
+            return truth(remainder.get()) == 0 ? 1 : 0;
+        }
+
+        // (range_equals: two ranges are equal if they are the same sequence: their lengths, their starts (if not empty) and their steps (if 
+        // longer than one) are; -1: an exception)
+        int range_equal(object* aLhs, object* aRhs)
+        {
+            if (aLhs == aRhs)
+                return 1;
+            auto const& a = *as<range_object>(aLhs);
+            auto const& b = *as<range_object>(aRhs);
+            if (a.big == nullptr && b.big == nullptr)
+            {
+                auto const n = slice_count(a.start, a.stop, a.step);
+                if (n != slice_count(b.start, b.stop, b.step))
+                    return 0;
+                if (n == 0u)
+                    return 1;
+                if (a.start != b.start)
+                    return 0;
+                return n == 1u || a.step == b.step ? 1 : 0;
+            }
+            ref const lengthA{ range_length_int(aLhs) };
+            ref const lengthB{ range_length_int(aRhs) };
+            if (!lengthA || !lengthB)
+                return -1;
+            auto const same = [](object* x, object* y) -> int
+            {
+                ref const e{ compare(NEOS_PY_EQ, x, y) };
+                return e ? truth(e.get()) : -1;
+            };
+            auto r = same(lengthA.get(), lengthB.get());
+            if (r != 1)
+                return r;
+            if (truth(lengthA.get()) == 0)
+                return 1;
+            ref startA, stopA, stepA, startB, stopB, stepB;
+            range_parts(aLhs, startA, stopA, stepA);
+            range_parts(aRhs, startB, stopB, stepB);
+            r = same(startA.get(), startB.get());
+            if (r != 1)
+                return r;
+            ref const one{ make_int(1) };
+            r = same(lengthA.get(), one.get());
+            if (r != 0)
+                return r;
+            return same(stepA.get(), stepB.get());
         }
 
         // Python's slice.indices()
@@ -3644,38 +3914,24 @@ namespace neos::python_runtime
             }
             if (k == NEOS_PY_RANGE)
             {
-                auto const& r = *as<range_object>(aObject);
-                // (a slice: a range of the positions' values (as CPython's compute_slice: start + i * step, step * step); a step that 
-                // would overflow has at most one item, so its sign is enough)
+                // (a slice: a range of the positions' values (compute_slice))
                 if (kind_of(aKey) == NEOS_PY_SLICE)
+                    return range_slice(aObject, aKey);
+                // (an index (of 64 bits, of a native range: natively), from the end if negative (compute_range_item))
+                if (range_native(aObject) && (!is_int_like(aKey) || !is_big(aKey)))
                 {
-                    long long start = 0, stop = 0, step = 0;
-                    if (!slice_indices(aKey, length(aObject), start, stop, step))
+                    auto const& r = *as<range_object>(aObject);
+                    std::size_t i = 0u;
+                    if (!normalize_index(aKey, slice_count(r.start, r.stop, r.step), i, "range object"))
                         return nullptr;
-                    long long product = 0;
-                    if (std::abs(step) > std::numeric_limits<long long>::max() / std::abs(r.step))
-                        product = (step < 0) != (r.step < 0) ? -std::numeric_limits<long long>::max() : std::numeric_limits<long long>::max();
-                    else
-                        product = step * r.step;
-                    // (its start and stop modulo 2**64: exact if they fit (the product alone can overflow); else (a stop beyond the 
-                    // values' range) its last item's next)
-                    auto const at = [](long long aStart, long long aIndex, long long aStep)
-                    {
-                        return static_cast<long long>(static_cast<unsigned long long>(aStart) + static_cast<unsigned long long>(aIndex) * static_cast<unsigned long long>(aStep));
-                    };
-                    auto const count = slice_count(start, stop, step);
-                    auto const first = at(r.start, start, r.step);
-                    auto last = at(r.start, stop, r.step);
-                    if (count == 0u)
-                        last = first;
-                    else if (slice_count(first, last, product) != count)
-                        last = at(first, static_cast<long long>(count - 1u), product) + (product > 0 ? 1 : -1);
-                    return make_range(first, last, product);
+                    return make_int(static_cast<long long>(static_cast<unsigned long long>(r.start) + static_cast<unsigned long long>(i) * static_cast<unsigned long long>(r.step)));
                 }
-                std::size_t i = 0u;
-                if (!normalize_index(aKey, static_cast<std::size_t>(length(aObject)), i, "range object"))
+                std::string const message = std::string{ "range indices must be integers or slices, not " } + type_name(aKey);
+                ref const index{ slice_index_value(aKey, message.c_str()) };
+                if (!index)
                     return nullptr;
-                return make_int(r.start + static_cast<long long>(i) * r.step);
+                ref item{ range_index_item(aObject, index.get()) };
+                return item.release_ownership();
             }
             if (k == NEOS_PY_DICT)
             {
@@ -4009,12 +4265,29 @@ namespace neos::python_runtime
                     }
                 case NEOS_PY_RANGE:
                     {
+                        // (its length (beyond sys.maxsize: sys.maxsize, as no iteration reaches it); its items: native if they are of 64 
+                        // bits (they are if the range's start, stop and step are))
+                        auto const& r = *as<range_object>(sequence);
                         if (it.count < 0)
-                            it.count = length(sequence);
+                        {
+                            if (r.big == nullptr)
+                                it.count = static_cast<long long>(std::min(slice_count(r.start, r.stop, r.step), static_cast<std::size_t>(std::numeric_limits<long long>::max())));
+                            else
+                            {
+                                ref const n{ range_length_int(sequence) };
+                                if (!n)
+                                    return nullptr;
+                                it.count = is_big(n.get()) ? std::numeric_limits<long long>::max() : int_value(n.get());
+                            }
+                        }
                         if (static_cast<long long>(it.index) >= it.count)
                             return nullptr;
-                        auto const& r = *as<range_object>(sequence);
-                        return make_int(r.start + static_cast<long long>(it.index++) * r.step);
+                        auto const index = it.index++;
+                        if (r.big == nullptr)
+                            return make_int(static_cast<long long>(static_cast<unsigned long long>(r.start) + static_cast<unsigned long long>(index) * static_cast<unsigned long long>(r.step)));
+                        ref const position{ make_int(static_cast<long long>(index)) };
+                        ref item{ range_item_int(sequence, position.get()) };
+                        return item.release_ownership();
                     }
                 default:
                     {
@@ -4057,6 +4330,9 @@ namespace neos::python_runtime
 
         int contains(object* aContainer, object* aItem)
         {
+            // (an int or a bool in a range: by arithmetic (range_contains); other objects: by iteration)
+            if (kind_of(aContainer) == NEOS_PY_RANGE && is_int_like(aItem))
+                return range_contains_int(aContainer, aItem);
             switch (kind_of(aContainer))
             {
             case NEOS_PY_STR:
@@ -4762,9 +5038,28 @@ namespace neos::python_runtime
                         }
                     case NEOS_PY_RANGE:
                         {
-                            auto const& r = *as<range_object>(sequence);
-                            auto const start = r.start + static_cast<long long>(it.index) * r.step;
-                            return make_tuple({ new_reference(iterFunction.get()), make_tuple({ make_range(start, r.stop, r.step) }), new_reference(none()) });
+                            // (rangeiter_reduce: (iter, (range(its next item, that + its remaining length * step, step),), None))
+                            ref start, stop, step;
+                            range_parts(sequence, start, stop, step);
+                            ref const length{ range_length_int(sequence) };
+                            if (!length)
+                                return nullptr;
+                            ref const index{ make_int(static_cast<long long>(it.index)) };
+                            ref remaining{ binary(NEOS_PY_SUBTRACT, length.get(), index.get(), false) };
+                            if (!remaining)
+                                return nullptr;
+                            if (int_negative(remaining.get()))
+                                remaining = ref{ make_int(0) };
+                            ref const current{ range_item_int(sequence, index.get()) };
+                            if (!current)
+                                return nullptr;
+                            ref const span{ binary(NEOS_PY_MULTIPLY, remaining.get(), step.get(), false) };
+                            if (!span)
+                                return nullptr;
+                            ref const end{ binary(NEOS_PY_ADD, current.get(), span.get(), false) };
+                            if (!end)
+                                return nullptr;
+                            return make_tuple({ new_reference(iterFunction.get()), make_tuple({ make_range_of(current.get(), end.get(), step.get()) }), new_reference(none()) });
                         }
                     case NEOS_PY_DICT:
                         {
@@ -4825,12 +5120,66 @@ namespace neos::python_runtime
                     }
                     return new_reference(none());
                 } };
+            // (a range's iterator: rangeiter_setstate and longrangeiter_setstate: advanced by the state (clipped to [0, its remaining 
+            // length]) from where it is; a native range's: a state of 64 bits)
+            static builtin_entry const sRangeSetstate{ "__setstate__", [](std::vector<object*> const& aArgs, object*) -> object*
+                {
+                    if (aArgs.size() != 2u)
+                        return error("TypeError", "__setstate__() takes exactly one argument (" + std::to_string(aArgs.size() - 1u) + " given)");
+                    auto& it = *as<iterator_object>(aArgs[0]);
+                    auto const sequence = it.sequence;
+                    if (range_native(sequence))
+                    {
+                        if (is_big(aArgs[1]))
+                            return error("OverflowError", "Python int too large to convert to C long");
+                        long long state = 0;
+                        if (!to_index(aArgs[1], state))
+                            return nullptr;
+                        auto const& r = *as<range_object>(sequence);
+                        auto const remaining = static_cast<long long>(slice_count(r.start, r.stop, r.step)) - static_cast<long long>(it.index);
+                        it.index += static_cast<std::size_t>(std::clamp(state, 0ll, std::max(remaining, 0ll)));
+                        return new_reference(none());
+                    }
+                    ref state{ slice_index_value(aArgs[1], nullptr) };
+                    if (!state)
+                        return nullptr;
+                    ref const length{ range_length_int(sequence) };
+                    if (!length)
+                        return nullptr;
+                    ref const index{ make_int(static_cast<long long>(it.index)) };
+                    ref const remaining{ binary(NEOS_PY_SUBTRACT, length.get(), index.get(), false) };
+                    if (!remaining)
+                        return nullptr;
+                    if (int_negative(state.get()))
+                        state = ref{ make_int(0) };
+                    ref const beyond{ compare(NEOS_PY_GT, state.get(), remaining.get()) };
+                    if (!beyond)
+                        return nullptr;
+                    if (truth(beyond.get()) == 1)
+                        state = ref{ new_reference(remaining.get()) };
+                    // (its own range from its new position)
+                    ref const position{ binary(NEOS_PY_ADD, index.get(), state.get(), false) };
+                    if (!position)
+                        return nullptr;
+                    ref const current{ range_item_int(sequence, position.get()) };
+                    if (!current)
+                        return nullptr;
+                    ref start, stop, step;
+                    range_parts(sequence, start, stop, step);
+                    auto const rest = make_range_of(current.get(), stop.get(), step.get());
+                    release(it.sequence);
+                    it.sequence = rest;
+                    it.index = 0u;
+                    it.count = -1;
+                    return new_reference(none());
+                } };
             auto const kind = kind_of(as<iterator_object>(aObject)->sequence);
             if (kind != NEOS_PY_LIST && kind != NEOS_PY_TUPLE && kind != NEOS_PY_STR && kind != NEOS_PY_RANGE && kind != NEOS_PY_DICT && 
                 user_class_of(as<iterator_object>(aObject)->sequence) == nullptr)
                 return nullptr;
             builtin_entry const* entry = std::strcmp(aName, "__reduce__") == 0 ? &sReduce : std::strcmp(aName, "__reduce_ex__") == 0 ? &sReduceEx :
-                std::strcmp(aName, "__setstate__") == 0 && kind != NEOS_PY_RANGE && kind != NEOS_PY_DICT ? &sSetstate : nullptr;
+                std::strcmp(aName, "__setstate__") == 0 && kind == NEOS_PY_RANGE ? &sRangeSetstate :
+                std::strcmp(aName, "__setstate__") == 0 && kind != NEOS_PY_DICT ? &sSetstate : nullptr;
             return entry != nullptr ? make_function(entry->name, call_builtin, const_cast<builtin_entry*>(entry), aObject) : nullptr;
         }
 
@@ -5005,6 +5354,79 @@ namespace neos::python_runtime
                                     std::to_string(items.size() - 1u) + " given)");
                             return make_tuple({ new_reference(items[0]) });
                         }, nullptr, aObject);
+                if (k == NEOS_PY_RANGE)
+                {
+                    // (start, stop and step: ints of any size)
+                    if (std::strcmp(aName, "start") == 0 || std::strcmp(aName, "stop") == 0 || std::strcmp(aName, "step") == 0)
+                    {
+                        ref start, stop, step;
+                        range_parts(aObject, start, stop, step);
+                        return (aName[2] == 'a' ? start : aName[2] == 'o' ? stop : step).release_ownership();
+                    }
+                    // (count(value) and index(value): by arithmetic for an int or a bool (range_count, range_index); otherwise by iteration 
+                    // (_PySequence_Count, _PySequence_IterSearch))
+                    if (std::strcmp(aName, "count") == 0 || std::strcmp(aName, "index") == 0)
+                    {
+                        static int sIndex = 1;
+                        return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
+                            {
+                                bool const index = aData != nullptr;
+                                auto const& args = tuple_items(aArgs);
+                                if (args.size() != 2u)
+                                    return error("TypeError", std::string{ index ? "range.index" : "range.count" } + "() takes exactly one argument (" + 
+                                        std::to_string(args.empty() ? 0u : args.size() - 1u) + " given)");
+                                auto const self = args[0];
+                                auto const value = args[1];
+                                if (is_int_like(value))
+                                {
+                                    auto const found = range_contains_int(self, value);
+                                    if (found < 0)
+                                        return nullptr;
+                                    if (!index)
+                                        return make_int(found);
+                                    if (found == 0)
+                                    {
+                                        std::string text;
+                                        if (!repr_of(value, text))
+                                            return nullptr;
+                                        return error("ValueError", text + " is not in range");
+                                    }
+                                    ref start, stop, step;
+                                    range_parts(self, start, stop, step);
+                                    ref const offset{ binary(NEOS_PY_SUBTRACT, value, start.get(), false) };
+                                    if (!offset)
+                                        return nullptr;
+                                    return binary(NEOS_PY_FLOOR_DIVIDE, offset.get(), step.get(), false);
+                                }
+                                ref const it{ iter(self) };
+                                if (!it)
+                                    return nullptr;
+                                long long n = 0;
+                                for (long long position = 0;; ++position)
+                                {
+                                    ref const item{ next(it.get()) };
+                                    if (!item)
+                                    {
+                                        if (failed())
+                                            return nullptr;
+                                        return index ? error("ValueError", "sequence.index(x): x not in sequence") : make_int(n);
+                                    }
+                                    ref const equal{ compare(NEOS_PY_EQ, item.get(), value) };
+                                    if (!equal)
+                                        return nullptr;
+                                    auto const t = truth(equal.get());
+                                    if (t < 0)
+                                        return nullptr;
+                                    if (t == 1)
+                                    {
+                                        if (index)
+                                            return make_int(position);
+                                        ++n;
+                                    }
+                                }
+                            }, std::strcmp(aName, "index") == 0 ? &sIndex : nullptr, aObject);
+                    }
+                }
                 if (k == NEOS_PY_SLICE)
                 {
                     auto const& s = *as<slice_object>(aObject);
@@ -5141,8 +5563,9 @@ namespace neos::python_runtime
                         ref const cls{ class_of(self) };
                         if (kind_of(self) == NEOS_PY_RANGE)
                         {
-                            auto const& r = *as<range_object>(self);
-                            return make_tuple({ new_reference(cls.get()), make_tuple({ make_int(r.start), make_int(r.stop), make_int(r.step) }) });
+                            ref start, stop, step;
+                            range_parts(self, start, stop, step);
+                            return make_tuple({ new_reference(cls.get()), make_tuple({ start.release_ownership(), stop.release_ownership(), step.release_ownership() }) });
                         }
                         auto const& sl = *as<slice_object>(self);
                         return make_tuple({ new_reference(cls.get()), make_tuple({ new_reference(sl.start), new_reference(sl.stop), new_reference(sl.step) }) });
@@ -8306,7 +8729,7 @@ namespace neos::python_runtime
             constexpr long long SmallLow = -(1LL << 62);
             constexpr long long SmallHigh = (1LL << 62) - 1;
             auto const& r = *as<range_object>(aObject);
-            if (r.start < SmallLow || r.start > SmallHigh || r.stop < SmallLow || r.stop > SmallHigh)
+            if (r.big != nullptr || r.start < SmallLow || r.start > SmallHigh || r.stop < SmallLow || r.stop > SmallHigh)
                 return -1;
             // (unsigned: no overflow)
             if (r.step > 0)
@@ -11099,13 +11522,20 @@ namespace neos::python_runtime
                 return error("TypeError", "range expected at least 1 argument, got 0");
             if (aArgs.size() > 3u)
                 return error("TypeError", "range expected at most 3 arguments, got " + std::to_string(aArgs.size()));
-            long long values[3] = { 0, 0, 1 };
+            // (its arguments: ints of any size (PyNumber_Index's: an exact int))
+            ref parts[3] = { ref{ make_int(0) }, {}, ref{ make_int(1) } };
             for (std::size_t i = 0u; i < aArgs.size(); ++i)
-                if (!to_index(aArgs[i], values[aArgs.size() == 1u ? 1u : i]))
+            {
+                auto& part = parts[aArgs.size() == 1u ? 1u : i];
+                part = slice_index_value(aArgs[i], nullptr);
+                if (!part)
                     return nullptr;
-            if (values[2] == 0)
+                if (kind_of(part.get()) == NEOS_PY_BOOL)
+                    part = ref{ make_int(truth(part.get()) == 1 ? 1 : 0) };
+            }
+            if (!is_big(parts[2].get()) && int_value(parts[2].get()) == 0)
                 return error("ValueError", "range() arg 3 must not be zero");
-            return make_range(values[0], values[1], values[2]);
+            return make_range_of(parts[0].get(), parts[1].get(), parts[2].get());
         }
 
         // (the items of an iterable)
@@ -11533,11 +11963,40 @@ namespace neos::python_runtime
             // (a range: the range's iterator of the range that is its reverse)
             if (k == NEOS_PY_RANGE)
             {
+                // (range_reverse: range(start + (n - 1) * step, start - step, -step), of 64 bits if it is)
                 auto const& r = *as<range_object>(value);
-                auto const n = length(value);
-                if (n < 0)
+                if (range_native(value))
+                {
+                    auto const n = static_cast<__int128>(slice_count(r.start, r.stop, r.step));
+                    auto const first = static_cast<__int128>(r.start) + (n - 1) * r.step;
+                    auto const stop = static_cast<__int128>(r.start) - r.step;
+                    auto const step = -static_cast<__int128>(r.step);
+                    auto const fits = [](__int128 aValue) { return aValue >= std::numeric_limits<long long>::min() && aValue <= std::numeric_limits<long long>::max(); };
+                    if (fits(first) && fits(stop) && fits(step))
+                    {
+                        ref const reverse{ make_range(static_cast<long long>(first), static_cast<long long>(stop), static_cast<long long>(step)) };
+                        return make_iterator(reverse.get());
+                    }
+                }
+                ref start, stop, step;
+                range_parts(value, start, stop, step);
+                ref const n{ range_length_int(value) };
+                if (!n)
                     return nullptr;
-                ref const reverse{ n == 0 ? make_range(0, 0, 1) : make_range(r.start + (n - 1) * r.step, r.start - r.step, -r.step) };
+                ref const one{ make_int(1) };
+                ref const last{ binary(NEOS_PY_SUBTRACT, n.get(), one.get(), false) };
+                if (!last)
+                    return nullptr;
+                ref const first{ range_item_int(value, last.get()) };
+                if (!first)
+                    return nullptr;
+                ref const before{ binary(NEOS_PY_SUBTRACT, start.get(), step.get(), false) };
+                if (!before)
+                    return nullptr;
+                ref const negated{ unary(NEOS_PY_NEGATIVE, step.get()) };
+                if (!negated)
+                    return nullptr;
+                ref const reverse{ make_range_of(first.get(), before.get(), negated.get()) };
                 return make_iterator(reverse.get());
             }
             if (k == NEOS_PY_LIST)
@@ -12032,6 +12491,18 @@ namespace neos::python_runtime
         {
             static std::map<std::string, native_base_hooks, std::less<>> sHooks;
             return sHooks;
+        }
+
+        // (the hooks of the type of a module that a class derives from (null: none))
+        native_base_hooks const* native_hooks(object* aClass)
+        {
+            if (aClass == nullptr || !is_class(aClass))
+                return nullptr;
+            auto const native = as<class_object>(aClass)->nativeBase;
+            if (native == nullptr || !is_type_object(native))
+                return nullptr;
+            auto const found = native_bases().find(as<type_object>(native)->qualifiedName);
+            return found != native_bases().end() ? &found->second : nullptr;
         }
 
 
@@ -12769,6 +13240,16 @@ namespace neos::python_runtime
             }
             if (attribute != nullptr)
                 return bind_attribute(attribute, aSelf, cls);
+            // (a type of a module whose methods are of the instance rather than its value (e.g. datetime.date.replace: its result of the
+            // instance's class))
+            if (builtin_value(aSelf) != aSelf)
+                if (auto const hooks = native_hooks(cls); hooks != nullptr && hooks->attribute != nullptr)
+                {
+                    if (auto const a = hooks->attribute(aSelf, aName))
+                        return a;
+                    if (failed())
+                        return nullptr;
+                }
             // (a type of a module's own pickling method (e.g. array.array.__reduce_ex__): bound to the instance (as CPython's method descriptor))
             if (auto const value = builtin_value(aSelf); value != aSelf && (name == "__reduce_ex__" || name == "__reduce__" || name == "__getstate__"))
                 if (auto const type = python_type(value); type != nullptr)
@@ -13016,6 +13497,13 @@ namespace neos::python_runtime
             {
                 retain(builtin_value(aSelf));
                 return builtin_value(aSelf);
+            }
+            // (a subclass of a type of a module that has a str of its own (e.g. datetime.date's isoformat): its value's (as the type's tp_str))
+            if (auto const value = builtin_value(aSelf); value != aSelf && kind_of(value) == NEOS_PY_OTHER && python_type(value) != nullptr &&
+                python_type(value)->str != nullptr)
+            {
+                std::string text;
+                return str_of(value, text) ? make_str(std::move(text)) : nullptr;
             }
             return instance_repr(aContext, aSelf);
         }
@@ -13735,6 +14223,27 @@ namespace neos::python_runtime
                 if (found)
                     return r.release_ownership();
             }
+            // (subclasses of a type of a module whose operators are of its instances (e.g. datetime.date's: date + timedelta of the date's
+            // class): the type's, of the instances; NotImplemented if none is theirs)
+            {
+                std::size_t valued = 0u;
+                std::size_t hooked = 0u;
+                for (auto const owner : { aLhs, aRhs })
+                {
+                    if (builtin_value(owner) == owner)
+                        continue;
+                    ++valued;
+                    auto const hooks = native_hooks(user_class_of(owner));
+                    if (hooks == nullptr || hooks->binary == nullptr)
+                        continue;
+                    ++hooked;
+                    ref r{ hooks->binary(owner, aOperation, aLhs, aRhs, aInplace) };
+                    if (!r || kind_of(r.get()) != NEOS_PY_NOT_IMPLEMENTED)
+                        return r.release_ownership();
+                }
+                if (hooked != 0u && hooked == valued)
+                    return not_implemented();
+            }
             // (subclasses of builtin types: their values)
             if (builtin_value(aLhs) != aLhs || builtin_value(aRhs) != aRhs)
             {
@@ -14323,14 +14832,7 @@ namespace neos::python_runtime
             {
                 auto& instance = *as<instance_object>(args[0]);
                 auto const& base = as<class_object>(instance.cls)->builtinBase;
-                auto const nativeHooks = [&]() -> native_base_hooks const*
-                {
-                    auto const native = as<class_object>(instance.cls)->nativeBase;
-                    if (native == nullptr || !is_type_object(native))
-                        return nullptr;
-                    auto const found = native_bases().find(as<type_object>(native)->qualifiedName);
-                    return found != native_bases().end() ? &found->second : nullptr;
-                }();
+                auto const nativeHooks = native_hooks(instance.cls);
                 if (nativeHooks != nullptr && nativeHooks->objectInit)
                 {
                     // (a type whose __init__ is object's (object_init): its value is __new__'s; arguments only if the class's __init__ is 
@@ -14850,11 +15352,35 @@ namespace neos::python_runtime
                         class_changed(aSelf);
                         return 0;
                     }
+                    // (a plain value (e.g. a counter): replaced in place; otherwise (a function or a descriptor) the class has changed: the caches
+                    // of its attributes hold functions (find_method's: the old one may now be freed) and know which attributes are data
+                    // descriptors (the instances' attribute caches))
+                    auto const plain = [](object* aObject)
+                    {
+                        if (is_instance(aObject))
+                            return false;
+                        switch (kind_of(aObject))
+                        {
+                        case NEOS_PY_NONE:
+                        case NEOS_PY_BOOL:
+                        case NEOS_PY_INT:
+                        case NEOS_PY_FLOAT:
+                        case NEOS_PY_COMPLEX:
+                        case NEOS_PY_STR:
+                        case NEOS_PY_LIST:
+                        case NEOS_PY_TUPLE:
+                        case NEOS_PY_DICT:
+                            return true;
+                        default:
+                            return false;
+                        }
+                    };
+                    bool const changed = !plain(a->second) || !plain(aValue);
                     retain(aValue);
                     release(a->second);
                     a->second = aValue;
                     // (a hook replaced (class_hook's cache holds its value, not its position: the old one may now be freed))
-                    if (name == "__getattribute__" || name == "__setattr__" || name == "__delattr__" || name == "__init__" || name == "__new__" || 
+                    if (changed || name == "__getattribute__" || name == "__setattr__" || name == "__delattr__" || name == "__init__" || name == "__new__" ||
                         name == "__del__" || name == "__abstractmethods__")
                         class_changed(aSelf);
                     return 0;
@@ -17685,12 +18211,18 @@ namespace neos::python_runtime
             case NEOS_PY_RANGE:
                 {
                     // (range_hash: (length, start, step), None for those a range's length makes irrelevant)
-                    auto const& r = *as<range_object>(aObject);
-                    auto const n = length(aObject);
-                    ref const len{ make_int(n) };
-                    ref const start{ n == 0 ? (retain(none()), none()) : make_int(r.start) };
-                    ref const step{ n <= 1 ? (retain(none()), none()) : make_int(r.step) };
-                    return tuple_hash({ len.get(), start.get(), step.get() }, aResult);
+                    ref const len{ range_length_int(aObject) };
+                    if (!len)
+                        return false;
+                    ref start, stop, step;
+                    range_parts(aObject, start, stop, step);
+                    ref const one{ make_int(1) };
+                    ref const longer{ compare(NEOS_PY_GT, len.get(), one.get()) };
+                    if (!longer)
+                        return false;
+                    ref const first{ truth(len.get()) == 0 ? (retain(none()), none()) : start.release_ownership() };
+                    ref const second{ truth(longer.get()) != 1 ? (retain(none()), none()) : step.release_ownership() };
+                    return tuple_hash({ len.get(), first.get(), second.get() }, aResult);
                 }
             case NEOS_PY_LIST:
             case NEOS_PY_DICT:

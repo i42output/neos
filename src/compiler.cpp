@@ -300,6 +300,7 @@ namespace neos::language
             iGlobalsDeclared = false;
             iInference.returned.clear();
             iInference.functionGlobals.clear();
+            iInference.entryGlobalsAsked.clear();
             iInference.changed = false;
             for (auto& languageCompiler : iLanguageCompilers)
                 languageCompiler->begin_pass();
@@ -318,7 +319,12 @@ namespace neos::language
             iDeclarationPass = true;
             for (auto& unit : aProgram.translationUnits)
                 if (ok && !iLinkedUnits.contains(&unit))
-                    ok = compile(aProgram, unit);
+                {
+                    // (a unit whose language declares nothing in this pass (see i_language_compiler::needs_declarations) is not compiled by it)
+                    auto* const unitLanguage = language(unit.schema->meta().language);
+                    if (unitLanguage == nullptr || unitLanguage->needs_declarations())
+                        ok = compile(aProgram, unit);
+                }
             iDeclarationPass = false;
             if (ok)
             {
@@ -377,8 +383,15 @@ namespace neos::language
                                 entryGlobals.insert(global.first);
                         if (ok && entryGlobals != iInference.entryGlobals)
                         {
+                            // (the code depends on which they are only by the globals that this pass asked about (entry_global, 
+                            // declare_globals): if none of those is one that changed, another pass would make the same code)
+                            for (auto const& name : iInference.entryGlobalsAsked)
+                                if (entryGlobals.contains(name) != iInference.entryGlobals.contains(name))
+                                {
+                                    iInference.changed = true;
+                                    break;
+                                }
                             iInference.entryGlobals = entryGlobals;
-                            iInference.changed = true;
                         }
                         // (the facts that the language compilers found)
                         if (ok)

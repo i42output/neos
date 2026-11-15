@@ -221,7 +221,7 @@ namespace neos::compilers::javascript
         // change a word of another; Any: any word (the default))
         enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header, Validity };
         static alias alias_of_word(std::uint32_t aOffset, bool aArray);     ///< (a word (its offset) of an object's cell (an array's))
-        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, ArrayPop, Count };
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, ArrayPop, GetNamedFirst, Count };
         void generate_stub(stub aStub);
         void generate_slow_function(std::uint32_t aFunction, std::optional<std::uint32_t> aRuntime, std::size_t aParameters);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
@@ -289,6 +289,7 @@ namespace neos::compilers::javascript
         void site_entries(std::uint32_t aSite, std::uint32_t aShape, std::uint32_t aEntry, std::optional<std::uint32_t> aKey, std::size_t aSlow,
             std::function<void()> const& aBody);
         void cached_get_stub(bool aComputed);
+        void get_named_first_stub();
         void cached_set_stub();
         void set_computed();                ///< (object, a computed key, value, strict -> the result: as runtime's set (a call of its stub))
         void set_computed_stub();
@@ -552,6 +553,7 @@ namespace neos::compilers::javascript
         compiler();
         // i_language_compiler
     public:
+        bool needs_declarations() const override { return false; }  ///< (a script's code is generated from its whole tree (see build): pass 1 would only make the tree)
         void begin_compilation() override;
         void begin_pass() override;
         void end_pass() override;

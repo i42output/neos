@@ -469,6 +469,7 @@ namespace neos::language
     void compiler::add_global(neolib::i_string const& aName, type aType)
     {
         iInference.globals.emplace_back(aName.to_std_string(), aType);
+        iInference.globalIndices.try_emplace(iInference.globals.back().first, static_cast<std::uint32_t>(iInference.globals.size() - 1u));
     }
 
     void compiler::set_global_type(std::size_t aIndex, type aType)
@@ -478,7 +479,10 @@ namespace neos::language
 
     bool compiler::entry_global(neolib::i_string_view const& aName) const
     {
-        return iInference.entryGlobals.contains(aName.to_std_string());
+        auto name = aName.to_std_string();
+        bool const result = iInference.entryGlobals.contains(name);
+        iInference.entryGlobalsAsked.insert(std::move(name));
+        return result;
     }
 
     void compiler::function_global(neolib::i_string const& aName)

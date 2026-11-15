@@ -160,11 +160,13 @@ namespace neos::language
 
     i_symbol_table_entry& compiler::define_global(std::string const& aName, type aType)
     {
-        std::uint32_t index = 0u;
-        while (index < iInference.globals.size() && iInference.globals[index].first != aName)
-            ++index;
-        if (index == iInference.globals.size())
+        auto const existing = iInference.globalIndices.find(aName);
+        std::uint32_t const index = existing != iInference.globalIndices.end() ? existing->second : static_cast<std::uint32_t>(iInference.globals.size());
+        if (existing == iInference.globalIndices.end())
+        {
             iInference.globals.emplace_back(aName, aType);
+            iInference.globalIndices.emplace(aName, index);
+        }
         auto& symbols = state().program->symbolTable[&state().program->scope];
         auto& entry = symbols.insert(neolib::string{ aName }, symbol_table_entry{ aType, index + 1u })->second();
         auto& info = iSymbolInfo[&entry];
@@ -189,8 +191,11 @@ namespace neos::language
         iGlobalsDeclared = true;
         auto const globals = iInference.globals;
         for (auto const& global : globals)
+        {
+            iInference.entryGlobalsAsked.insert(global.first);
             if (!iInference.entryGlobals.contains(global.first))
                 define_global(global.first, global.second);
+        }
     }
 
     void compiler::infer(std::string const& aWhat, std::optional<type> const& aOld, type aNew)
