@@ -158,7 +158,12 @@ namespace neos::language
 
     std::uint32_t compiler::runtime_function(neolib::i_string const& aName, neolib::i_vector<type> const& aParameters, type aReturnType)
     {
-        return runtime_function(aName.to_std_string(), std::vector<type>{ aParameters.begin(), aParameters.end() }, aReturnType);
+        // (one that the module has where it was last found: its parameters are not copied)
+        auto const name = aName.to_std_string();
+        if (auto const known = iRuntimeFunctions.find(name); known != iRuntimeFunctions.end() && known->second < iModule.functions.size() &&
+            iModule.functions[known->second].imported && iModule.functions[known->second].name == name)
+            return known->second;
+        return runtime_function(name, std::vector<type>{ aParameters.begin(), aParameters.end() }, aReturnType);
     }
 
     std::uint32_t compiler::indirect_signature(neolib::i_vector<type> const& aParameters, type aReturnType)
@@ -306,8 +311,25 @@ namespace neos::language
     {
         auto const id = add_function(aName.to_std_string(), false);
         auto& function = iModule.functions[id];
-        function.signature = function_signature{ aSignature };
-        function.locals.assign(aLocals.begin(), aLocals.end());
+        // (the signature's lists and the locals are copied by index: not with their interfaces' iterators (each an object of its own))
+        auto const copy = [](function_parameters& aTo, i_function_parameters const& aFrom)
+        {
+            auto& to = aTo.as_std_vector();
+            to.clear();
+            to.reserve(aFrom.size());
+            for (std::size_t i = 0u; i < aFrom.size(); ++i)
+                to.emplace_back(aFrom[i]);
+        };
+        function.signature.functionName = aSignature.name();
+        if (aSignature.parameters().has_value())
+            copy(function.signature.functionParameters.emplace(), *aSignature.parameters());
+        else
+            function.signature.functionParameters = std::nullopt;
+        copy(function.signature.functionLocals, aSignature.locals());
+        function.signature.functionReturnType = aSignature.return_type();
+        function.locals.resize(aLocals.size());
+        for (std::size_t i = 0u; i < aLocals.size(); ++i)
+            function.locals[i] = aLocals[i];
         function.compiled = true;
         if (!aFrameName.empty())
             function.frameName = aFrameName.to_std_string();

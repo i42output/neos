@@ -902,9 +902,20 @@ namespace neos::compilers::javascript
         }
     }
 
+    std::uint32_t compiler::runtime_index(std::string const& aName, std::vector<type> const& aParameters, type aResult)
+    {
+        // (the runtime's function (javascript::aName): its index in the module, remembered for the pass (a module's functions keep
+        // their indices in a pass), so that each call of it need not declare it again through the code generator's interface)
+        if (auto const known = iRuntimeIndices.find(aName); known != iRuntimeIndices.end())
+            return known->second;
+        auto const index = runtime_function("javascript::" + aName, aParameters, aResult);
+        iRuntimeIndices.emplace(aName, index);
+        return index;
+    }
+
     void function_generator::runtime(std::string const& aName, std::vector<type> const& aParameters, type aResult)
     {
-        auto const index = iCompiler.runtime_function("javascript::" + aName, aParameters, aResult);
+        auto const index = iCompiler.runtime_index(aName, aParameters, aResult);
         if (wasm_dump_path() != nullptr)
             wasm_dump_names()[index] = aName;
         call(index);
@@ -912,7 +923,7 @@ namespace neos::compilers::javascript
 
     void function_generator::slow_runtime(std::string const& aName, std::vector<type> const& aParameters, type aResult)
     {
-        auto const index = iCompiler.runtime_function("javascript::" + aName, aParameters, aResult);
+        auto const index = iCompiler.runtime_index(aName, aParameters, aResult);
         if (wasm_dump_path() != nullptr)
             wasm_dump_names()[index] = aName;
         call(iCompiler.slow_function(index, aName, aParameters, aResult));

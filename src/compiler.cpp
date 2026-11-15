@@ -291,6 +291,7 @@ namespace neos::language
                 unit.ast.root()->children().clear();
             }
             iModule = {};
+            iModule.functions.reserve(256u);    // (a function is copied when the list grows: a small program's are not)
             iSymbolInfo.clear();
             iSymbolSequence = 0u;
             aProgram.text.clear();
@@ -1677,14 +1678,11 @@ namespace neos::language
         iRuntimeFunctions[aName] = id;
         auto& function = iModule.functions[id];
         function.signature.set_name(neolib::string{ aName });
-        function_parameters parameters;
-        for (auto const& p : aParameters)
-        {
-            function_parameter parameter;
-            parameter.set_parameter_type(p);
-            parameters.push_back(parameter);
-        }
-        function.signature.set_parameters(parameters);
+        // (its parameters, made in place (not a list of them copied through its interface))
+        auto& parameters = function.signature.functionParameters.emplace().as_std_vector();
+        parameters.resize(aParameters.size());
+        for (std::size_t i = 0u; i < aParameters.size(); ++i)
+            parameters[i].parameterType = aParameters[i];
         function.signature.set_return_type(aReturnType);
         return id;
     }

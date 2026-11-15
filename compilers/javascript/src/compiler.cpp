@@ -36,6 +36,7 @@ namespace neos::compilers::javascript
         clear_nodes();
         iStack.clear();
         iPropertySites = 0u;
+        iRuntimeIndices.clear();
     }
 
     void compiler::set_options(neolib::i_string const& aOptions)
@@ -83,6 +84,7 @@ namespace neos::compilers::javascript
     void compiler::begin_pass()
     {
         iPropertySites = 0u;    // (each pass numbers the program's sites from 0)
+        iRuntimeIndices.clear();    // (and makes the module's functions again)
     }
 
     void compiler::end_pass()

@@ -626,6 +626,8 @@ namespace neos::compilers::javascript
         std::uint32_t array_prototype_global(); ///< (the global that holds %Array.prototype%)
         std::uint32_t direct_builtin_global(std::uint32_t aBuiltin);    ///< (the global that holds the realm's built-in (see function_generator::direct_builtins))
         std::uint32_t allocation_state_global();    ///< (the global (an i64): the region offset of the isolate's allocation state)
+        std::uint32_t runtime_index(std::string const& aName, std::vector<type> const& aParameters, type aResult);  ///< (the runtime's
+                                                    ///< function javascript::aName: its index in the module)
         std::uint32_t program_serial_global();  ///< (the global (an i64): the program's serial (its functions' dispatch keys' high half))
         // (a function of the program's that calls the runtime's function (its index) with its arguments: slow paths call it rather than
         // the runtime's, so that an optimizing tier that inlines it can leave for the function's own code there (see the VM's deopt)
@@ -674,6 +676,8 @@ namespace neos::compilers::javascript
         std::map<std::string, slow_info> iSlowFunctions;    ///< (by the runtime's function's name: see slow_function)
         std::uint32_t iTemplateSites = 0u;
         std::uint32_t iPropertySites = 0u;      ///< (the program's property cache sites (see cached_get_named): the next one's number)
+        std::unordered_map<std::string, std::uint32_t> iRuntimeIndices; ///< (the runtime's functions that the pass has called: their indices
+                                                ///< in the module (see runtime_index))
         std::uint32_t iErrorGlobal = 0u;
         std::map<std::uint32_t, std::string> iFrameNames;
         bool iModule = false;
