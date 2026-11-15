@@ -1417,9 +1417,26 @@ namespace neos::compilers::javascript
                     branch(done, false);
                 }
                 end_control();
+                // (a Uint8Array's element, if the site has had one (see layout::SiteTypedElements: a cached load))
+                begin(control_kind::Block);
+                {
+                    auto const untyped = iControls.size() - 1u;
+                    property_site(site);
+                    site_load(opcode::I32LoadMem8U, layout::SiteTypedElements);
+                    op(opcode::I32Eqz);
+                    branch(untyped, true);
+                    typed_element(object, keyValue, cell, untyped);
+                    get(cell);
+                    mem_load(opcode::I32LoadMem8U, 0u, alias::Any);
+                    op(opcode::F64UConvertI32);
+                    op(opcode::I64ReinterpretF64);
+                    branch(done, false);
+                }
+                end_control();
                 get(object);
                 get(keyValue);
-                runtime("get", { I64, I64 }, I64);
+                get(site);
+                runtime("get_site", { I64, I64, I32 }, I64);
                 branch(done, false);
                 end_control();
             }
@@ -1943,14 +1960,17 @@ namespace neos::compilers::javascript
 
     void function_generator::set_computed()
     {
+        // (a site of its own (see layout::SiteTypedElements))
+        i32(static_cast<std::int32_t>(iCompiler.iPropertySites++));
         call_stub(stub::SetComputed);
     }
 
     void function_generator::set_computed_stub()
     {
-        // (the set stub's code of computed keys (its parameters: object, key, value, strict): an array's element (one that it has),
-        // else the runtime's set)
-        std::uint32_t const object = 0u, keyValue = 1u, value = 2u, strict = 3u;
+        // (the set stub's code of computed keys (its parameters: object, key, value, strict, site): an array's element (one that it 
+        // has), a Uint8Array's (if the site has had one (see layout::SiteTypedElements): a number within int32's range: its low byte),
+        // else the runtime's set_site (which marks the site if it is a Uint8Array's element))
+        std::uint32_t const object = 0u, keyValue = 1u, value = 2u, strict = 3u, site = 4u;
         auto const address = temporary();
         begin(control_kind::Block, I64);
         auto const done = iControls.size() - 1u;
@@ -1970,11 +1990,44 @@ namespace neos::compilers::javascript
             branch(done, false);
         }
         end_control();
+        begin(control_kind::Block);
+        {
+            auto const untyped = iControls.size() - 1u;
+            property_site(site);
+            site_load(opcode::I32LoadMem8U, layout::SiteTypedElements);
+            op(opcode::I32Eqz);
+            branch(untyped, true);
+            typed_element(object, keyValue, address, untyped);
+            get(value);
+            constant(values::TagSpecial);
+            op(opcode::I64GeU);
+            branch(untyped, true);
+            get(value);
+            op(opcode::F64ReinterpretI64);
+            f64(-2147483648.0);
+            op(opcode::F64Ge);
+            get(value);
+            op(opcode::F64ReinterpretI64);
+            f64(2147483648.0);
+            op(opcode::F64Lt);
+            op(opcode::I32And);
+            op(opcode::I32Eqz);
+            branch(untyped, true);
+            get(address);
+            get(value);
+            op(opcode::F64ReinterpretI64);
+            op(opcode::I32SConvertF64);
+            mem_store(opcode::I32StoreMem8, 0u, alias::Any);
+            undefined();
+            branch(done, false);
+        }
+        end_control();
         get(object);
         get(keyValue);
         get(value);
         get(strict);
-        runtime("set", { I64, I64, I64, I32 }, I64);
+        get(site);
+        runtime("set_site", { I64, I64, I64, I32, I32 }, I64);
         end_control();
         release(address);
     }
@@ -1983,8 +2036,9 @@ namespace neos::compilers::javascript
     {
         // (the length stub's code (its parameters: object, site): x.length: a string's, an array's (not sparse) if the site has had 
         // an array's (its first entry's kind: not SiteNone (a cached load: an optimizing tier uses what it was then, so that code of a 
-        // site that only strings have reached has no array's path)), else the runtime's get_length_site (which marks the site if it 
-        // is an array's))
+        // site that only strings have reached has no array's path)), a typed array's (likewise: its first entry's kind SiteTyped) 
+        // whose length is %TypedArray.prototype%'s getter's, else the runtime's get_length_site (which marks the site if it is an 
+        // array's or such a typed array's))
         std::uint32_t const object = 0u, site = 1u;
         auto const cell = temporary();
         begin(control_kind::Block, I64);
@@ -1992,6 +2046,8 @@ namespace neos::compilers::javascript
         begin(control_kind::Block);
         {
             auto const miss = iControls.size() - 1u;
+            begin(control_kind::Block);
+            auto const other = iControls.size() - 1u;
             get(object);
             constant(0xFFFF000000000000ull);
             op(opcode::I64And);
@@ -2020,7 +2076,7 @@ namespace neos::compilers::javascript
             get(cell);
             mem_load(opcode::I32LoadMem8U, layout::ArraySparse, alias::Elements);
             op(opcode::I32Ior);
-            branch(miss, true);
+            branch(other, true);
             // (an array's: if the site has had one; else the runtime's, which marks the site)
             begin(control_kind::Block);
             auto const unmarked = iControls.size() - 1u;
@@ -2038,10 +2094,68 @@ namespace neos::compilers::javascript
             get(site);
             runtime("get_length_site", { I64, I32 }, I64);
             branch(done, false);
+            end_control();
+            // (another object: a typed array's, if the site has had one: one that has no shape and no properties of its own (its 
+            // dictionary has no entries), whose prototype is the one whose typed arrays' length the runtime last found to be the 
+            // getter's (the allocation state's: see layout::AllocTypedLength), that does not track its buffer's length and whose
+            // buffer is not detached or resizable: its length)
+            property_site(site);
+            site_load(opcode::I32LoadMem8U, layout::SiteKind);
+            i32(layout::SiteTyped);
+            op(opcode::I32Ne);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectClass, alias::Header);
+            i32(layout::ClassTypedArray);
+            op(opcode::I32Ne);
+            branch(miss, true);
+            auto const dictionary = temporary();
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
+            op(opcode::I64Eqz);
+            op(opcode::I32Eqz);
+            branch(miss, true);
+            get(cell);
+            unit_load(layout::ObjectDictionary, alias::Values);
+            tee(dictionary);
+            op(opcode::I64Eqz);
+            branch(miss, true);
+            get(dictionary);
+            mem_load(opcode::I64LoadMem32U, layout::DictionaryEntryCount, alias::Dictionary);
+            op(opcode::I64Eqz);
+            op(opcode::I32Eqz);
+            branch(miss, true);
+            get(dictionary);
+            mem_load(opcode::I64LoadMem, layout::DictionaryProto, alias::Dictionary);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            volatile_load(opcode::I64LoadMem, layout::AllocTypedLength, false, alias::Alloc);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::TypedArrayTracking, alias::Any);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::TypedArrayBuffer, alias::Any);
+            set(dictionary);
+            cell_of(dictionary);
+            tee(dictionary);
+            mem_load(opcode::I32LoadMem8U, layout::BufferDetached, alias::Any);
+            get(dictionary);
+            mem_load(opcode::I32LoadMem8U, layout::BufferDetached + 1u, alias::Any);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::TypedArrayLength, alias::Any);
+            op(opcode::F64SConvertI64);
+            op(opcode::I64ReinterpretF64);
+            branch(done, false);
+            release(dictionary);
         }
         end_control();
         get(object);
-        runtime("get_length", { I64 }, I64);
+        get(site);
+        runtime("get_length_site", { I64, I32 }, I64);
         end_control();
         release(cell);
     }
@@ -2893,6 +3007,83 @@ namespace neos::compilers::javascript
         release(index);
     }
 
+    void function_generator::typed_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss)
+    {
+        // (a Uint8Array (one that does not track its buffer's length, whose buffer is not detached or resizable: its elements are
+        // within its buffer's bytes) and a number that is an index (an integer in [0, 2^32 - 1)) below its length: its element's address)
+        auto const index = temporary();
+        auto const buffer = temporary();
+        get(aKey);
+        constant(values::TagSpecial);
+        op(opcode::I64GeU);
+        branch(aMiss, true);
+        get(aObject);
+        constant(0xFFFF000000000000ull);
+        op(opcode::I64And);
+        constant(values::TagObject);
+        op(opcode::I64Ne);
+        branch(aMiss, true);
+        cell_of(aObject);
+        tee(aAddress);
+        mem_load(opcode::I32LoadMem8U, layout::ObjectClass, alias::Header);
+        i32(layout::ClassTypedArray);
+        op(opcode::I32Ne);
+        branch(aMiss, true);
+        get(aAddress);
+        mem_load(opcode::I32LoadMem8U, layout::TypedArrayType, alias::Any);
+        i32(layout::TypeUint8);
+        op(opcode::I32Ne);
+        get(aAddress);
+        mem_load(opcode::I32LoadMem8U, layout::TypedArrayTracking, alias::Any);
+        op(opcode::I32Ior);
+        branch(aMiss, true);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        f64(0.0);
+        op(opcode::F64Ge);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        f64(4294967295.0);
+        op(opcode::F64Lt);
+        op(opcode::I32And);
+        op(opcode::I32Eqz);
+        branch(aMiss, true);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        op(opcode::I64SConvertF64);
+        tee(index);
+        op(opcode::F64SConvertI64);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        op(opcode::F64Ne);
+        branch(aMiss, true);
+        get(index);
+        get(aAddress);
+        mem_load(opcode::I64LoadMem, layout::TypedArrayLength, alias::Any);
+        op(opcode::I64GeU);
+        branch(aMiss, true);
+        get(aAddress);
+        mem_load(opcode::I64LoadMem, layout::TypedArrayBuffer, alias::Any);
+        set(buffer);
+        cell_of(buffer);
+        tee(buffer);
+        mem_load(opcode::I32LoadMem8U, layout::BufferDetached, alias::Any);
+        get(buffer);
+        mem_load(opcode::I32LoadMem8U, layout::BufferDetached + 1u, alias::Any);
+        op(opcode::I32Ior);
+        branch(aMiss, true);
+        get(buffer);
+        mem_load(opcode::I64LoadMem, layout::BufferData, alias::Any);
+        get(aAddress);
+        mem_load(opcode::I64LoadMem, layout::TypedArrayOffset, alias::Any);
+        op(opcode::I64Add);
+        get(index);
+        op(opcode::I64Add);
+        set(aAddress);
+        release(buffer);
+        release(index);
+    }
+
     void function_generator::call_stub(stub aStub)
     {
         iCompiler.iStubsUsed[static_cast<std::size_t>(aStub)] = true;
@@ -2911,7 +3102,7 @@ namespace neos::compilers::javascript
             { "%js.get_named", { I64, I64, I32 }, I64 },
             { "%js.get_computed", { I64, I64, I32 }, I64 },
             { "%js.set_named", { I64, I64, I64, I32, I32 }, I64 },
-            { "%js.set_computed", { I64, I64, I64, I32 }, I64 },
+            { "%js.set_computed", { I64, I64, I64, I32, I32 }, I64 },
             { "%js.callee_number", { I64, I32 }, I32 },
             { "%js.method_number", { I64, I32 }, I32 },
             { "%js.get_length", { I64, I32 }, I64 },
@@ -2962,7 +3153,7 @@ namespace neos::compilers::javascript
             cached_set_stub();
             break;
         case stub::SetComputed:
-            iParameterCount = 4u;
+            iParameterCount = 5u;
             set_computed_stub();
             break;
         case stub::GetLength:

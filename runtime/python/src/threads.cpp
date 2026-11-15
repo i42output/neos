@@ -186,6 +186,12 @@ namespace neos::python_runtime
                     error("ValueError", aNegativeIsNone ? "timeout value must be a non-negative number" : "'timeout' must be a non-negative number");
                     return false;
                 }
+                // (a lock's: beyond TIMEOUT_MAX (CPython's PY_TIMEOUT_MAX))
+                if (aNegativeIsNone && aResult > 9223372036.0)
+                {
+                    error("OverflowError", "timeout value is too large");
+                    return false;
+                }
                 return true;
             }
 
@@ -391,6 +397,55 @@ namespace neos::python_runtime
                     } }
             };
 
+            // (an RLock's: _release_save() ((count, owner): released), _acquire_restore(state) and _recursion_count() (CPython's rlock's, 
+            // which threading.Condition uses))
+            native_method const sRLockMethods[] =
+            {
+                { "_release_save", [](object* aSelf, std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (!aArgs.empty())
+                            return error("TypeError", "_release_save() takes no arguments (" + std::to_string(aArgs.size()) + " given)");
+                        auto& l = as_lock(aSelf);
+                        long long count = 0, owner = 0;
+                        {
+                            std::lock_guard<std::mutex> lock{ l.mutex };
+                            if (!l.locked || l.count == 0)
+                                return error("RuntimeError", "cannot release un-acquired lock");
+                            count = l.count;
+                            owner = l.owner;
+                            l.locked = false;
+                            l.owner = 0;
+                            l.count = 0;
+                        }
+                        l.condition.notify_one();
+                        return make_tuple({ make_int(count), make_int(owner) });
+                    } },
+                { "_acquire_restore", [](object* aSelf, std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 1u)
+                            return error("TypeError", "_acquire_restore() takes exactly one argument (" + std::to_string(aArgs.size()) + " given)");
+                        if (kind_of(aArgs[0]) != NEOS_PY_TUPLE || as<tuple_object>(aArgs[0])->items.size() != 2u)
+                            return error("TypeError", "_acquire_restore() argument must be a tuple of 2 items");
+                        long long count = 0, owner = 0;
+                        if (!to_index(as<tuple_object>(aArgs[0])->items[0], count) || !to_index(as<tuple_object>(aArgs[0])->items[1], owner))
+                            return nullptr;
+                        auto& l = as_lock(aSelf);
+                        lock_acquire(l, true, -1.0);
+                        std::lock_guard<std::mutex> lock{ l.mutex };
+                        l.owner = owner;
+                        l.count = count;
+                        return none();
+                    } },
+                { "_recursion_count", [](object* aSelf, std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (!aArgs.empty())
+                            return error("TypeError", "_recursion_count() takes no arguments (" + std::to_string(aArgs.size()) + " given)");
+                        auto& l = as_lock(aSelf);
+                        std::lock_guard<std::mutex> lock{ l.mutex };
+                        return make_int(l.locked && l.owner == thread_ident() ? l.count : 0);
+                    } }
+            };
+
             neos_py_type make_lock_type(bool aReentrant)
             {
                 auto type = aReentrant ? make_type("_thread.RLock", "RLock", retain_object, release_object<lock_object>) :
@@ -406,6 +461,10 @@ namespace neos::python_runtime
                 };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
+                    if (as_lock(aSelf).reentrant)
+                        for (auto const& m : sRLockMethods)
+                            if (std::strcmp(m.name, aName) == 0)
+                                return make_function(m.name, call_native_method, const_cast<native_method*>(&m), aSelf);
                     return native_getattr(aSelf, aName, sLockMethods, as_lock(aSelf).reentrant ? "_thread.RLock" : "_thread.lock");
                 };
                 return type;
@@ -553,7 +612,36 @@ namespace neos::python_runtime
                             return error("RuntimeError", "cannot notify on un-acquired lock");
                         condition_notify(as_condition(aSelf), static_cast<std::size_t>(-1));
                         return none();
-                    } }
+                    } },
+                { "notifyAll", [](object* aSelf, std::vector<object*> const&, object*) -> object*
+                    {
+                        ref const warned{ invoke(ref{ module_attribute("warnings", "warn") }.get(), { make_str("notifyAll() is deprecated, use notify_all() instead"), 
+                            exception_class("DeprecationWarning"), make_int(2) }) };
+                        if (!warned)
+                            return nullptr;
+                        if (!owned(as_condition(aSelf)))
+                            return error("RuntimeError", "cannot notify on un-acquired lock");
+                        condition_notify(as_condition(aSelf), static_cast<std::size_t>(-1));
+                        return none();
+                    } },
+                // (Lib/threading.py's Condition's: its lock's (an RLock's), else a Lock's: released (no state to save), acquired, and 
+                // whether it is held (by this thread, for an RLock))
+                { "_release_save", [](object* aSelf, std::vector<object*> const&, object*) -> object*
+                    {
+                        auto const lock = as_condition(aSelf).lock;
+                        if (as_lock(lock).reentrant)
+                            return call_method_named(lock, "_release_save", {});
+                        return lock_release(as_lock(lock)) ? none() : nullptr;
+                    } },
+                { "_acquire_restore", [](object* aSelf, std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        auto const lock = as_condition(aSelf).lock;
+                        if (as_lock(lock).reentrant)
+                            return call_method_named(lock, "_acquire_restore", { new_reference(aArgs.empty() ? none() : aArgs[0]) });
+                        lock_acquire(as_lock(lock), true, -1.0);
+                        return none();
+                    } },
+                { "_is_owned", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return make_bool(owned(as_condition(aSelf))); } }
             };
 
             neos_py_type make_condition_type()
@@ -1121,14 +1209,147 @@ namespace neos::python_runtime
                 return text;
             }
 
+            // --- threading.excepthook (Lib/threading.py's ExceptHookArgs, excepthook and _make_invoke_excepthook; Modules/_threadmodule.c's 
+            // thread_excepthook)
+
+            structseq_descriptor const& except_hook_args_type()
+            {
+                return structseq_type("_thread._ExceptHookArgs", { "exc_type", "exc_value", "exc_traceback", "thread" }, 4u);
+            }
+
+            // (sys.stderr, or the thread's _stderr if it is None (null without an exception: neither; with one: an exception))
+            object* hook_stderr(object* aThread)
+            {
+                ref file{ module_attribute("sys", "stderr") };
+                if (!file)
+                    return nullptr;
+                if (kind_of(file.get()) != NEOS_PY_NONE)
+                    return file.release_ownership();
+                if (aThread == nullptr || kind_of(aThread) == NEOS_PY_NONE)
+                    return nullptr;
+                file = ref{ getattr(aThread, "_stderr") };
+                if (!file || kind_of(file.get()) == NEOS_PY_NONE)
+                    return nullptr;
+                return file.release_ownership();
+            }
+
+            // (_thread._excepthook(args): the exception's report on sys.stderr, after "Exception in thread <its name (or the thread's 
+            // identity)>:" (SystemExit: nothing))
+            object* thread_excepthook(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                if (!no_keywords(aKwargs, "_excepthook"))
+                    return nullptr;
+                if (aArgs.size() != 1u)
+                    return error("TypeError", "_thread._excepthook() takes exactly one argument (" + std::to_string(aArgs.size()) + " given)");
+                except_hook_args_type();
+                ref const argsType{ type_object_for("_ExceptHookArgs", "_thread._ExceptHookArgs") };
+                ref const cls{ class_of(aArgs[0]) };
+                std::vector<object*> items;
+                if (cls.get() != argsType.get() || !structseq_items(aArgs[0], items) || items.size() != 4u)
+                    return error("TypeError", "_thread._excepthook argument type must be ExceptHookArgs");
+                ref const systemExit{ exception_class("SystemExit") };
+                if (items[0] == systemExit.get())
+                    return new_reference(none());
+                auto const thread = items[3];
+                ref const file{ hook_stderr(thread) };
+                if (!file)
+                    return failed() ? nullptr : new_reference(none());
+                std::string header = "Exception in thread ";
+                ref name;
+                if (kind_of(thread) != NEOS_PY_NONE)
+                {
+                    name = ref{ optional_attribute(thread, "name") };
+                    if (!name && failed())
+                        return nullptr;
+                }
+                if (name)
+                {
+                    std::string text;
+                    if (!str_of(name.get(), text))
+                        return nullptr;
+                    header += text;
+                }
+                else
+                    header += std::to_string(static_cast<unsigned long long>(thread_ident()));
+                header += ":\n";
+                std::set<object*> seen;
+                auto const report = exception_type_name(items[1]) != nullptr ? exception_report(items[1], seen) : std::string{};
+                for (auto const& text : { header, report })
+                {
+                    ref const written{ call_method_named(file.get(), "write", { make_str(text) }) };
+                    if (!written)
+                        return nullptr;
+                }
+                ref const flushed{ call_method_named(file.get(), "flush", {}) };
+                if (!flushed)
+                    return nullptr;
+                return new_reference(none());
+            }
+
+            builtin_entry const sExceptHook{ "_excepthook", thread_excepthook };
+
+            // (an exception that a thread's run does not handle: Thread._invoke_excepthook: threading.excepthook (its original if it is 
+            // None) of ExceptHookArgs([type, value, traceback, thread]); if that raises: "Exception in threading.excepthook:" and 
+            // sys.excepthook (its original if it is None) of its exception)
             void report_exception(object* aThread)
             {
-                // (an exception that a thread does not handle: printed (sys.excepthook's format, without the traceback))
-                std::string const text = error_text();
+                ref const exception{ take_exception() };
+                if (!exception)
+                    return;
+                ref const type{ class_of(exception.get()) };
+                ref traceback{ optional_attribute(exception.get(), "__traceback__") };
+                if (!traceback)
+                {
+                    clear_error();
+                    traceback = ref{ new_reference(none()) };
+                }
+                ref hook{ module_attribute("threading", "excepthook") };
+                if (!hook || kind_of(hook.get()) == NEOS_PY_NONE)
+                {
+                    clear_error();
+                    hook = ref{ make_builtin(sExceptHook) };
+                }
+                ref const args{ make_structseq(except_hook_args_type(), { new_reference(type.get()), new_reference(exception.get()), 
+                    new_reference(traceback.get()), new_reference(aThread) }) };
+                ref const r{ invoke(hook.get(), { new_reference(args.get()) }) };
+                if (r)
+                    return;
+                // (the hook's exception: its context suppressed, reported by sys.excepthook)
+                ref const hookError{ take_exception() };
+                if (!hookError)
+                    return;
+                ref const yes{ make_bool(true) };
+                setattr(hookError.get(), "__suppress_context__", yes.get());
                 clear_error();
-                auto const name = attribute_text(aThread, "name");
-                write_standard(2, "Exception in thread " + name + ":\nTraceback (most recent call last):\n" + text + "\n");
+                if (ref const file{ hook_stderr(aThread) })
+                {
+                    ref const written{ call_method_named(file.get(), "write", { make_str("Exception in threading.excepthook:\n") }) };
+                    ref const flushed{ call_method_named(file.get(), "flush", {}) };
+                }
+                clear_error();
+                ref sysHook{ module_attribute("sys", "excepthook") };
+                if (!sysHook || kind_of(sysHook.get()) == NEOS_PY_NONE)
+                {
+                    clear_error();
+                    sysHook = ref{ module_attribute("sys", "__excepthook__") };
+                }
+                if (sysHook)
+                {
+                    ref const hookType{ class_of(hookError.get()) };
+                    ref hookTraceback{ optional_attribute(hookError.get(), "__traceback__") };
+                    if (!hookTraceback)
+                    {
+                        clear_error();
+                        hookTraceback = ref{ new_reference(none()) };
+                    }
+                    ref const reported{ invoke(sysHook.get(), { new_reference(hookType.get()), new_reference(hookError.get()), hookTraceback.release_ownership() }) };
+                }
+                clear_error();
             }
+
+            // (threading.settrace's and threading.setprofile's functions (references of their own))
+            object* sTraceHook = nullptr;
+            object* sProfileHook = nullptr;
 
             void run_thread(object* aThread, thread_state* aState)
             {
@@ -1144,6 +1365,15 @@ namespace neos::python_runtime
                 }
                 ref const ident{ make_int(thread_ident()) };
                 setattr(aThread, "_ident", ident.get());
+                // (Lib/threading.py's _bootstrap_inner: the thread's trace and profile functions)
+                for (auto const& [hook, name] : { std::pair{ sTraceHook, "settrace" }, std::pair{ sProfileHook, "setprofile" } })
+                    if (hook != nullptr)
+                    {
+                        ref const set{ module_attribute("sys", name) };
+                        ref const r{ set ? invoke(set.get(), { new_reference(hook) }) : nullptr };
+                        if (!r)
+                            report_exception(aThread);
+                    }
                 {
                     ref const run{ getattr(aThread, "run") };
                     if (run)
@@ -1151,12 +1381,7 @@ namespace neos::python_runtime
                         ref const empty{ make_tuple() };
                         ref const r{ call(run.get(), empty.get(), nullptr) };
                         if (!r && failed())
-                        {
-                            if (std::string_view{ error_text() }.starts_with("SystemExit"))
-                                clear_error();
-                            else
-                                report_exception(aThread);
-                        }
+                            report_exception(aThread);    // (SystemExit too: the default hook ignores it)
                     }
                     else if (failed())
                         report_exception(aThread);
@@ -1229,7 +1454,9 @@ namespace neos::python_runtime
                     }
                 }
                 wait_for(aState.mutex, aState.condition, aTimeout, [&]() { return aState.state == thread_state::Finished; });
-                return true;
+                // (a signal that arrived meanwhile (e.g. the thread's _thread.interrupt_main()): its handler runs (CPython's join runs 
+                // pending calls, and its eval breaker after the call))
+                return signals_check();
             }
 
             // Thread.__init__(self, group=None, target=None, name=None, args=(), kwargs=None, *, daemon=None)
@@ -1562,6 +1789,25 @@ namespace neos::python_runtime
             std::vector<object*> sThreadingAtexits;
             bool sThreadsShuttingDown = false;
 
+            object* set_hook(object*& aHook, char const* aFunction, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!parse_arguments(aFunction, aArgs, aKwargs, { "func" }, 1u, 1u, a))
+                    return nullptr;
+                retain(a[0]);
+                release(aHook);
+                aHook = kind_of(a[0]) == NEOS_PY_NONE ? (release(a[0]), nullptr) : a[0];
+                return none();
+            }
+
+            object* get_hook(object* aHook, char const* aFunction, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!parse_arguments(aFunction, aArgs, aKwargs, {}, 0u, 0u, a))
+                    return nullptr;
+                return aHook != nullptr ? new_reference(aHook) : none();
+            }
+
             builtin_entry const sThreadingFunctions[] =
             {
                 { "_register_atexit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -1589,8 +1835,16 @@ namespace neos::python_runtime
                     } },
                 { "RLock", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
-                        std::vector<object*> a;
-                        return parse_arguments("RLock", aArgs, aKwargs, {}, 0u, 0u, a) ? make_lock(true) : nullptr;
+                        // (arguments: deprecated (Lib/threading.py's RLock(*args, **kwargs)); _thread.RLock ignores them)
+                        if (!aArgs.empty() || (aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty()))
+                        {
+                            ref const warn{ module_attribute("warnings", "warn") };
+                            ref const warned{ warn ? invoke(warn.get(), { make_str("Passing arguments to RLock is deprecated and will be removed in 3.15"),
+                                exception_class("DeprecationWarning"), make_int(2) }) : nullptr };
+                            if (!warned)
+                                return nullptr;
+                        }
+                        return make_lock(true);
                     } },
                 { "Condition", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1693,8 +1947,12 @@ namespace neos::python_runtime
                             result.push_back((retain(t), t));
                         return make_list(std::move(result));
                     } },
-                { "settrace", [](std::vector<object*> const&, object*) -> object* { return none(); } },
-                { "setprofile", [](std::vector<object*> const&, object*) -> object* { return none(); } },
+                // (settrace and setprofile: the functions that threads that start call sys.settrace and sys.setprofile with (Lib/threading.py's 
+                // _trace_hook and _profile_hook); gettrace and getprofile: them)
+                { "settrace", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_hook(sTraceHook, "settrace", aArgs, aKwargs); } },
+                { "setprofile", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_hook(sProfileHook, "setprofile", aArgs, aKwargs); } },
+                { "gettrace", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return get_hook(sTraceHook, "gettrace", aArgs, aKwargs); } },
+                { "getprofile", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return get_hook(sProfileHook, "getprofile", aArgs, aKwargs); } },
                 { "stack_size", [](std::vector<object*> const&, object*) -> object* { return make_int(0); } }
             };
 
@@ -2009,6 +2267,11 @@ namespace neos::python_runtime
                     user_exception_bases()["threading.BrokenBarrierError"] = { "RuntimeError" };
                 aAttributes.emplace_back("BrokenBarrierError", exception_class("threading.BrokenBarrierError"));
                 aAttributes.emplace_back("ThreadError", exception_class("RuntimeError"));
+                // (ExceptHookArgs, excepthook and __excepthook__ (the original): _thread's)
+                except_hook_args_type();
+                aAttributes.emplace_back("ExceptHookArgs", type_object_for("_ExceptHookArgs", "_thread._ExceptHookArgs"));
+                aAttributes.emplace_back("excepthook", make_builtin(sExceptHook));
+                aAttributes.emplace_back("__excepthook__", new_reference(aAttributes.back().second));
                 return true;
             }
 
@@ -2081,6 +2344,9 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("LockType", type_object_for("lock", "_thread.lock"));
                 aAttributes.emplace_back("TIMEOUT_MAX", make_float(9223372036.0));
                 aAttributes.emplace_back("error", exception_class("RuntimeError"));
+                except_hook_args_type();
+                aAttributes.emplace_back("_ExceptHookArgs", type_object_for("_ExceptHookArgs", "_thread._ExceptHookArgs"));
+                aAttributes.emplace_back("_excepthook", make_builtin(sExceptHook));
                 return true;
             }
 

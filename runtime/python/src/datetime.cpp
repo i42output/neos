@@ -1087,6 +1087,9 @@ namespace neos::python_runtime
                 std::optional<long long> gmtoff;    // (seconds)
                 long long gmtoffFraction = 0;       // (microseconds)
                 std::optional<std::string> tzname;
+                int weekday = 0;                    // (time.strptime's: Monday 0)
+                int julian = 1;                     // (the day of the year)
+                int isdst = -1;                     // (the zone that %Z found: 0 (UTC, GMT, standard time), 1 (daylight saving time), or -1)
             };
 
             std::string lower(std::string aText)
@@ -1140,6 +1143,7 @@ namespace neos::python_runtime
                 std::optional<std::string> tzname;
                 std::optional<long long> gmtoff;
                 long long gmtoffFraction = 0;
+                int isdst = -1;
                 // (the format's directives: %c, %x, %X expanded)
                 std::string format;
                 for (std::size_t i = 0u; i < aFormat.size(); ++i)
@@ -1349,17 +1353,40 @@ namespace neos::python_runtime
                         break;
                     case 'Z':
                         {
-                            // (UTC, GMT and the local timezone's names)
+                            // (UTC, GMT and the local timezone's names: standard time (0) and daylight saving time (1), as _strptime's 
+                            // LocaleTime.timezone; time.tzname's two names the same (and daylight saving time): ambiguous (-1))
                             std::vector<std::string> names{ "utc", "gmt" };
                             std::tm january{}, july{};
+                            std::string standard, daylight;
+                            long long janOffset = 0, julOffset = 0;
                             if (local_tm(1704067200ll, january))
-                                names.push_back(lower(zone_of(january)));
+                            {
+                                standard = lower(zone_of(january));
+                                janOffset = gmtoff_of(january, 1704067200ll);
+                            }
                             if (local_tm(1719792000ll, july))
-                                names.push_back(lower(zone_of(july)));
+                            {
+                                daylight = lower(zone_of(july));
+                                julOffset = gmtoff_of(july, 1719792000ll);
+                            }
+                            // (time.tzname's and time.daylight's: standard time's offset is the smaller)
+                            if (janOffset > julOffset)
+                                std::swap(standard, daylight);
+                            bool const hasDaylight = janOffset != julOffset;
+                            names.push_back(standard);
+                            if (hasDaylight)
+                                names.push_back(daylight);
                             auto const start = p;
                             ok = name(names, v);
                             if (ok)
+                            {
                                 tzname = aText.substr(start, p - start);
+                                auto const found = lower(*tzname);
+                                if (found == "utc" || found == "gmt")
+                                    isdst = 0;
+                                else if (!(standard == daylight && hasDaylight))
+                                    isdst = found == standard ? 0 : 1;
+                            }
                         }
                         break;
                     }
@@ -1462,6 +1489,14 @@ namespace neos::python_runtime
                 }
                 else if (!check_date(*year, month, day))
                     return false;
+                // (the day of the year and of the week, if the format has not given them)
+                if (!julian)
+                    julian = ymd_to_ord(*year, static_cast<int>(month), static_cast<int>(day)) - ymd_to_ord(*year, 1, 1) + 1;
+                if (!weekday)
+                    weekday = weekday_of(*year, static_cast<int>(month), static_cast<int>(day));
+                aResult.julian = static_cast<int>(*julian);
+                aResult.weekday = static_cast<int>(*weekday);
+                aResult.isdst = isdst;
                 if (leapYearFix)
                     year = 1900;
                 aResult.f.year = static_cast<int>(*year);
@@ -3679,6 +3714,16 @@ namespace neos::python_runtime
             }
 
             inline bool const sStrptime = register_module("_strptime", strptime_module);
+        }
+
+        // (time.strptime's fields (as _strptime's _strptime: the parsing of datetime.strptime))
+        bool strptime_time_fields(std::string const& aText, std::string const& aFormat, strptime_time& aResult)
+        {
+            strptime_result r;
+            if (!strptime_of(aText, aFormat, r))
+                return false;
+            aResult = { r.f.year, r.f.month, r.f.day, r.f.hour, r.f.minute, r.f.second, r.weekday, r.julian, r.isdst, r.tzname, r.gmtoff };
+            return true;
         }
 
         // (the classes' attributes (e.g. datetime.max, date.today))

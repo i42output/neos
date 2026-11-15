@@ -43,7 +43,9 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 #include "objects.hpp"
@@ -1670,7 +1672,7 @@ namespace neos::python_runtime
             enum class codec_id
             {
                 Utf8, Utf8Sig, Utf16, Utf16Le, Utf16Be, Utf32, Utf32Le, Utf32Be, Ascii, Latin1, Utf7, UnicodeEscape, RawUnicodeEscape, Charmap,
-                Table, Undefined, Hex, Base64, Rot13, Zlib, Unsupported
+                Table, Undefined, Hex, Base64, Rot13, Zlib, Uu, Quopri, Punycode, Idna, Unsupported
             };
 
             struct codec_entry
@@ -1742,7 +1744,7 @@ namespace neos::python_runtime
                         { "utf_32_le", codec_id::Utf32Le }, { "utf_32_be", codec_id::Utf32Be }, { "ascii", codec_id::Ascii }, { "latin_1", codec_id::Latin1 },
                         { "utf_7", codec_id::Utf7 }, { "unicode_escape", codec_id::UnicodeEscape }, { "raw_unicode_escape", codec_id::RawUnicodeEscape },
                         { "charmap", codec_id::Charmap }, { "undefined", codec_id::Undefined }, { "hex_codec", codec_id::Hex }, { "base64_codec", codec_id::Base64 },
-                        { "rot_13", codec_id::Rot13 }, { "zlib_codec", codec_id::Zlib } };
+                        { "rot_13", codec_id::Rot13 }, { "zlib_codec", codec_id::Zlib }, { "uu_codec", codec_id::Uu }, { "quopri_codec", codec_id::Quopri }, { "punycode", codec_id::Punycode }, { "idna", codec_id::Idna } };
                     result.module = module;
                     for (auto const& [name, id] : sIds)
                         if (m == name)
@@ -1759,9 +1761,12 @@ namespace neos::python_runtime
                 return result;
             }
 
+            // (a codec whose text encoding and decoding builtin_encode and builtin_decode do (not punycode's and idna's: their CodecInfo's))
             bool is_text_codec(codec_id aId)
             {
-                return aId != codec_id::Hex && aId != codec_id::Base64 && aId != codec_id::Rot13 && aId != codec_id::Zlib && aId != codec_id::Unsupported;
+                return aId != codec_id::Hex && aId != codec_id::Base64 && aId != codec_id::Rot13 && aId != codec_id::Zlib && aId != codec_id::Uu && 
+                    aId != codec_id::Quopri && aId != codec_id::Punycode && 
+                    aId != codec_id::Idna && aId != codec_id::Unsupported;
             }
 
             // (the text encoding and decoding of the builtin codecs: false (no exception) if aId is not one)
@@ -3473,13 +3478,775 @@ namespace neos::python_runtime
                     aId == codec_id::Utf8Sig;
             }
 
+            // --- punycode (Lib/encodings/punycode.py (RFC 3492), translated to C++)
+
+            namespace punycode
+            {
+                long long threshold(long long j, long long bias)
+                {
+                    auto const res = 36 * (j + 1) - bias;
+                    return res < 1 ? 1 : res > 26 ? 26 : res;
+                }
+
+                char const sDigits[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+                long long adapt(long long delta, bool first, long long numchars)
+                {
+                    delta = first ? delta / 700 : delta / 2;
+                    delta += delta / numchars;
+                    long long divisions = 0;
+                    while (delta > 455)
+                    {
+                        delta = delta / 35;
+                        divisions += 36;
+                    }
+                    return divisions + (36 * delta / (delta + 38));
+                }
+
+                // (punycode_encode: 3.1 segregation, 3.2 insertion unsort coding, 3.3 and 3.4 its integers)
+                std::string encode(std::u32string const& aText)
+                {
+                    std::string base;
+                    std::vector<char32_t> extended;
+                    for (auto c : aText)
+                        if (c < 128u)
+                            base += static_cast<char>(c);
+                        else if (std::find(extended.begin(), extended.end(), c) == extended.end())
+                            extended.push_back(c);
+                    std::sort(extended.begin(), extended.end());
+                    std::vector<long long> deltas;
+                    char32_t oldchar = 0x80u;
+                    long long oldindex = -1;
+                    for (auto c : extended)
+                    {
+                        long long index = -1;
+                        long long pos = -1;
+                        long long curlen = 0;
+                        for (auto x : aText)
+                            if (x < c)
+                                ++curlen;
+                        long long delta = (curlen + 1) * static_cast<long long>(c - oldchar);
+                        for (;;)
+                        {
+                            // (selective_find)
+                            auto const l = static_cast<long long>(aText.size());
+                            bool found = false;
+                            while (++pos < l)
+                            {
+                                auto const x = aText[static_cast<std::size_t>(pos)];
+                                if (x == c)
+                                {
+                                    ++index;
+                                    found = true;
+                                    break;
+                                }
+                                if (x < c)
+                                    ++index;
+                            }
+                            if (!found)
+                                break;
+                            delta += index - oldindex;
+                            deltas.push_back(delta - 1);
+                            oldindex = index;
+                            delta = 0;
+                        }
+                        oldchar = c;
+                    }
+                    std::string result;
+                    long long bias = 72;
+                    for (std::size_t points = 0u; points < deltas.size(); ++points)
+                    {
+                        auto n = deltas[points];
+                        for (long long j = 0;; ++j)
+                        {
+                            auto const t = threshold(j, bias);
+                            if (n < t)
+                            {
+                                result += sDigits[n];
+                                break;
+                            }
+                            result += sDigits[t + ((n - t) % (36 - t))];
+                            n = (n - t) / (36 - t);
+                        }
+                        bias = adapt(deltas[points], points == 0u, static_cast<long long>(base.size() + points + 1u));
+                    }
+                    if (!base.empty())
+                        return base + "-" + result;
+                    return result;
+                }
+
+                struct failure { std::size_t start; std::size_t end; std::string reason; };
+
+                // (insertion_sort (3.2) of the extended code points (decode_generalized_number: 3.3): false: a failure (strict))
+                bool insertion_sort(std::u32string& aBase, std::string const& aExtended, std::string const& aErrors, failure& aFailure)
+                {
+                    long long character = 0x80;
+                    long long pos = -1;
+                    long long bias = 72;
+                    std::size_t extpos = 0u;
+                    while (extpos < aExtended.size())
+                    {
+                        // (decode_generalized_number)
+                        std::optional<long long> delta;
+                        std::size_t newpos = extpos;
+                        {
+                            long long result = 0, w = 1;
+                            for (long long j = 0;; ++j)
+                            {
+                                if (newpos >= aExtended.size())
+                                {
+                                    if (aErrors == "strict")
+                                    {
+                                        aFailure = { newpos, newpos + 1u, "incomplete punycode string" };
+                                        return false;
+                                    }
+                                    ++newpos;
+                                    break;
+                                }
+                                auto const c = static_cast<unsigned char>(aExtended[newpos++]);
+                                long long digit = 0;
+                                if (c >= 0x41u && c <= 0x5Au)
+                                    digit = c - 0x41;
+                                else if (c >= 0x30u && c <= 0x39u)
+                                    digit = c - 22;
+                                else if (aErrors == "strict")
+                                {
+                                    aFailure = { newpos - 1u, newpos, "Invalid extended code point '" + std::to_string(c) + "'" };
+                                    return false;
+                                }
+                                else
+                                    break;
+                                auto const t = threshold(j, bias);
+                                result += digit * w;
+                                if (digit < t)
+                                {
+                                    delta = result;
+                                    break;
+                                }
+                                w = w * (36 - t);
+                            }
+                        }
+                        if (!delta)
+                            return true;
+                        pos += *delta + 1;
+                        auto const length = static_cast<long long>(aBase.size()) + 1;
+                        character += pos / length;
+                        if (character > 0x10FFFF)
+                        {
+                            if (aErrors == "strict")
+                            {
+                                std::ostringstream hex;
+                                hex << std::hex << character;
+                                aFailure = { static_cast<std::size_t>(pos - 1), static_cast<std::size_t>(pos), "Invalid character U+" + hex.str() };
+                                return false;
+                            }
+                            character = '?';
+                        }
+                        pos = pos % length;
+                        aBase.insert(aBase.begin() + static_cast<std::ptrdiff_t>(pos), static_cast<char32_t>(character));
+                        bias = adapt(*delta, extpos == 0u, static_cast<long long>(aBase.size()));
+                        extpos = newpos;
+                    }
+                    return true;
+                }
+
+                // (punycode_decode: a str (null: an exception))
+                object* decode(object* aInput, std::string const& aErrors)
+                {
+                    std::string text;
+                    if (kind_of(aInput) == NEOS_PY_STR)
+                    {
+                        if (!detail::encode(as<str_object>(aInput)->value, "ascii", "strict", text))
+                            return nullptr;
+                    }
+                    else
+                    {
+                        std::string_view data;
+                        if (!data_argument(aInput, data))
+                            return nullptr;
+                        text = std::string{ data };
+                    }
+                    auto const upper = [](std::string aText)
+                    {
+                        for (auto& c : aText)
+                            if (c >= 'a' && c <= 'z')
+                                c = static_cast<char>(c - 'a' + 'A');
+                        return aText;
+                    };
+                    auto const dash = text.rfind('-');
+                    std::u32string base;
+                    std::string extended;
+                    if (dash == std::string::npos)
+                        extended = upper(text);
+                    else
+                    {
+                        // (str(text[:pos], "ascii", errors))
+                        for (std::size_t i = 0u; i < dash; ++i)
+                        {
+                            auto const c = static_cast<unsigned char>(text[i]);
+                            if (c < 0x80u)
+                                base += static_cast<char32_t>(c);
+                            else if (aErrors == "strict")
+                            {
+                                ref const e{ make_exception("UnicodeDecodeError", { make_str("ascii"), make_bytes(text), make_int(static_cast<long long>(i)),
+                                    make_int(static_cast<long long>(i + 1u)), make_str("ordinal not in range(128)") }) };
+                                if (e)
+                                    raise_exception(e.get());
+                                return nullptr;
+                            }
+                            else if (aErrors == "replace")
+                                base += U'�';
+                        }
+                        extended = upper(text.substr(dash + 1u));
+                    }
+                    failure f;
+                    if (!insertion_sort(base, extended, aErrors, f))
+                    {
+                        auto const offset = dash == std::string::npos ? 0u : dash + 1u;
+                        ref const e{ make_exception("UnicodeDecodeError", { make_str("punycode"), make_bytes(text), make_int(static_cast<long long>(offset + f.start)),
+                            make_int(static_cast<long long>(offset + f.end)), make_str(f.reason) }) };
+                        if (e)
+                            raise_exception(e.get());
+                        return nullptr;
+                    }
+                    return make_str(from_code_points(base));
+                }
+
+                object* encode_object(object* aInput)     // (bytes)
+                {
+                    if (kind_of(aInput) != NEOS_PY_STR)
+                        return error("TypeError", std::string{ "ord() expected string of length 1, but " } + type_name(aInput) + " found");
+                    return make_bytes(encode(to_code_points(as<str_object>(aInput)->value)));
+                }
+
+                bool supported_errors(std::string const& aErrors)
+                {
+                    if (aErrors == "strict" || aErrors == "replace" || aErrors == "ignore")
+                        return true;
+                    return (error("UnicodeError", "Unsupported error handling: " + aErrors), false);
+                }
+            }
+
+            // --- idna (Lib/encodings/idna.py (RFC 3490 and its nameprep, RFC 3491), translated to C++)
+
+            namespace idna
+            {
+                using failure = punycode::failure;
+
+                bool is_dot(char32_t c) { return c == U'.' || c == U'。' || c == U'．' || c == U'｡'; }
+
+                // (dots.split(text))
+                std::vector<std::u32string> split_dots(std::u32string const& aText)
+                {
+                    std::vector<std::u32string> result{ std::u32string{} };
+                    for (auto c : aText)
+                        if (is_dot(c))
+                            result.emplace_back();
+                        else
+                            result.back() += c;
+                    return result;
+                }
+
+                bool ascii(std::u32string const& aText)
+                {
+                    return std::all_of(aText.begin(), aText.end(), [](char32_t c) { return c < 128u; });
+                }
+
+                std::string narrow(std::u32string const& aText)
+                {
+                    std::string result;
+                    for (auto c : aText)
+                        result += static_cast<char>(c);
+                    return result;
+                }
+
+                // (a stringprep table's test of a character: -1 an exception)
+                int in_table(char const* aTable, char32_t aCharacter)
+                {
+                    ref const test{ module_attribute("stringprep", aTable) };
+                    if (!test)
+                        return -1;
+                    ref const result{ invoke(test.get(), { make_str(from_code_points(std::u32string(1u, aCharacter))) }) };
+                    return result ? truth(result.get()) : -1;
+                }
+
+                // (nameprep (RFC 3491): false: a failure (aFailure) or an exception (failed()))
+                bool nameprep(std::u32string& aLabel, failure& aFailure)
+                {
+                    std::u32string mapped;
+                    ref const map{ module_attribute("stringprep", "map_table_b2") };
+                    if (!map)
+                        return false;
+                    for (auto c : aLabel)
+                    {
+                        auto const b1 = in_table("in_table_b1", c);
+                        if (b1 < 0)
+                            return false;
+                        if (b1 == 1)
+                            continue;
+                        ref const m{ invoke(map.get(), { make_str(from_code_points(std::u32string(1u, c))) }) };
+                        if (!m)
+                            return false;
+                        mapped += to_code_points(as<str_object>(m.get())->value);
+                    }
+                    ref const ucd{ module_attribute("unicodedata", "ucd_3_2_0") };
+                    ref const normalize{ ucd ? getattr(ucd.get(), "normalize") : nullptr };
+                    ref const normalized{ normalize ? invoke(normalize.get(), { make_str("NFKC"), make_str(from_code_points(mapped)) }) : nullptr };
+                    if (!normalized)
+                        return false;
+                    aLabel = to_code_points(as<str_object>(normalized.get())->value);
+                    for (std::size_t i = 0u; i < aLabel.size(); ++i)
+                        for (auto table : { "in_table_c12", "in_table_c22", "in_table_c3", "in_table_c4", "in_table_c5", "in_table_c6", "in_table_c7", "in_table_c8", 
+                            "in_table_c9" })
+                        {
+                            auto const in = in_table(table, aLabel[i]);
+                            if (in < 0)
+                                return false;
+                            if (in == 1)
+                            {
+                                aFailure = { i, i + 1u, "Invalid character " + repr_text(ref{ make_str(from_code_points(std::u32string(1u, aLabel[i]))) }.get()) };
+                                return false;
+                            }
+                        }
+                    std::vector<bool> randAL;
+                    for (auto c : aLabel)
+                    {
+                        auto const d1 = in_table("in_table_d1", c);
+                        if (d1 < 0)
+                            return false;
+                        randAL.push_back(d1 == 1);
+                    }
+                    if (std::find(randAL.begin(), randAL.end(), true) != randAL.end())
+                    {
+                        for (std::size_t i = 0u; i < aLabel.size(); ++i)
+                        {
+                            auto const d2 = in_table("in_table_d2", aLabel[i]);
+                            if (d2 < 0)
+                                return false;
+                            if (d2 == 1)
+                            {
+                                aFailure = { i, i + 1u, "Violation of BIDI requirement 2" };
+                                return false;
+                            }
+                        }
+                        if (!randAL.front())
+                        {
+                            aFailure = { 0u, 1u, "Violation of BIDI requirement 3" };
+                            return false;
+                        }
+                        if (!randAL.back())
+                        {
+                            aFailure = { aLabel.size() - 1u, aLabel.size(), "Violation of BIDI requirement 3" };
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                // (ToASCII: false: a failure (aFailure) or an exception (failed()))
+                bool to_ascii(std::u32string aLabel, std::string& aResult, failure& aFailure)
+                {
+                    auto const checked = [&](std::u32string const& aAscii)
+                    {
+                        if (!aAscii.empty() && aAscii.size() < 64u)
+                        {
+                            aResult = narrow(aAscii);
+                            return true;
+                        }
+                        aFailure = aAscii.empty() ? failure{ 0u, 1u, "label empty" } : failure{ 0u, aAscii.size(), "label too long" };
+                        return false;
+                    };
+                    if (ascii(aLabel))
+                        return checked(aLabel);
+                    if (!nameprep(aLabel, aFailure))
+                        return false;
+                    if (ascii(aLabel))
+                        return checked(aLabel);
+                    auto lower = aLabel;
+                    for (auto& c : lower)
+                        if (c >= U'A' && c <= U'Z')
+                            c = c - U'A' + U'a';
+                    if (lower.starts_with(U"xn--"))
+                    {
+                        aFailure = { 0u, 4u, "Label starts with ACE prefix" };
+                        return false;
+                    }
+                    aResult = "xn--" + punycode::encode(aLabel);
+                    if (aResult.size() < 64u)
+                        return true;
+                    aFailure = { 0u, aLabel.size(), "label too long" };
+                    return false;
+                }
+
+                // (ToUnicode of a label (bytes, or a str: aText): false: a failure (aFailure) or an exception (failed()))
+                bool to_unicode(std::string aLabel, bool aText, std::u32string& aResult, failure& aFailure)
+                {
+                    auto points = aText ? to_code_points(aLabel) : std::u32string{};
+                    if ((aText ? points.size() : aLabel.size()) > 1024u)
+                    {
+                        // (the label's UTF-8 bytes (a str's))
+                        aFailure = { 0u, aLabel.size(), "label way too long" };
+                        return false;
+                    }
+                    if (aText)
+                    {
+                        if (!ascii(points))
+                        {
+                            if (!nameprep(points, aFailure))
+                                return false;
+                            for (std::size_t i = 0u; i < points.size(); ++i)
+                                if (points[i] >= 128u)
+                                {
+                                    aFailure = { i, i + 1u, "Invalid character in IDN label" };
+                                    return false;
+                                }
+                        }
+                        aLabel = narrow(points);
+                    }
+                    std::string lower = aLabel;
+                    for (auto& c : lower)
+                        if (c >= 'A' && c <= 'Z')
+                            c = static_cast<char>(c - 'A' + 'a');
+                    if (!lower.starts_with("xn--"))
+                    {
+                        // (str(label, "ascii"))
+                        for (std::size_t i = 0u; i < aLabel.size(); ++i)
+                            if (static_cast<unsigned char>(aLabel[i]) >= 0x80u)
+                            {
+                                aFailure = { i, i + 1u, "ordinal not in range(128)" };
+                                return false;
+                            }
+                        aResult = to_code_points(aLabel);
+                        return true;
+                    }
+                    punycode::failure f;
+                    std::u32string result;
+                    {
+                        // (label1.decode("punycode"))
+                        auto const rest = aLabel.substr(4u);
+                        auto const upper = [](std::string aText)
+                        {
+                            for (auto& c : aText)
+                                if (c >= 'a' && c <= 'z')
+                                    c = static_cast<char>(c - 'a' + 'A');
+                            return aText;
+                        };
+                        auto const dash = rest.rfind('-');
+                        std::string extended;
+                        if (dash == std::string::npos)
+                            extended = upper(rest);
+                        else
+                        {
+                            for (std::size_t i = 0u; i < dash; ++i)
+                            {
+                                auto const c = static_cast<unsigned char>(rest[i]);
+                                if (c >= 0x80u)
+                                {
+                                    aFailure = { 4u + i, 4u + i + 1u, "ordinal not in range(128)" };
+                                    return false;
+                                }
+                                result += static_cast<char32_t>(c);
+                            }
+                            extended = upper(rest.substr(dash + 1u));
+                        }
+                        if (!punycode::insertion_sort(result, extended, "strict", f))
+                        {
+                            auto const offset = 4u + (dash == std::string::npos ? 0u : dash + 1u);
+                            aFailure = { offset + f.start, offset + f.end, f.reason };
+                            return false;
+                        }
+                    }
+                    std::string label2;
+                    if (!to_ascii(result, label2, aFailure))
+                        return false;
+                    if (lower != label2)
+                    {
+                        aFailure = { 0u, aLabel.size(), "IDNA does not round-trip, '" + repr_text(ref{ make_bytes(aLabel) }.get()) + "' != '" + 
+                            repr_text(ref{ make_bytes(label2) }.get()) + "'" };
+                        return false;
+                    }
+                    aResult = std::move(result);
+                    return true;
+                }
+
+                object* raise(char const* aType, object* aObject, std::size_t aStart, std::size_t aEnd, std::string const& aReason)    // (steals aObject)
+                {
+                    ref const e{ make_exception(aType, { make_str("idna"), aObject, make_int(static_cast<long long>(aStart)), make_int(static_cast<long long>(aEnd)), 
+                        make_str(aReason) }) };
+                    if (e)
+                        raise_exception(e.get());
+                    return nullptr;
+                }
+
+                bool strict(std::string const& aErrors)
+                {
+                    if (aErrors == "strict")
+                        return true;
+                    return (error("UnicodeError", "Unsupported error handling: " + aErrors), false);
+                }
+
+                // (Codec.encode: (bytes, length))
+                object* encode_pair(object* aInput, std::string const& aErrors)
+                {
+                    if (!strict(aErrors))
+                        return nullptr;
+                    if (kind_of(aInput) != NEOS_PY_STR)
+                    {
+                        // (not input: (b'', 0); else input.encode('ascii'))
+                        auto const t = truth(aInput);
+                        if (t < 0)
+                            return nullptr;
+                        if (t == 0)
+                            return result_pair(make_bytes({}), 0);
+                        return error("AttributeError", std::string{ "'" } + type_name(aInput) + "' object has no attribute 'encode'");
+                    }
+                    auto const& input = as<str_object>(aInput)->value;
+                    auto const points = to_code_points(input);
+                    if (points.empty())
+                        return result_pair(make_bytes({}), 0);
+                    if (ascii(points))
+                    {
+                        std::vector<std::string> labels{ std::string{} };
+                        for (auto c : points)
+                            if (c == U'.')
+                                labels.emplace_back();
+                            else
+                                labels.back() += static_cast<char>(c);
+                        std::size_t offset = 0u;
+                        for (std::size_t i = 0u; i + 1u < labels.size(); offset += labels[i].size() + 1u, ++i)
+                            if (labels[i].empty())
+                                return raise("UnicodeEncodeError", make_str(input), offset, offset + 1u, "label empty");
+                        offset = 0u;
+                        for (std::size_t i = 0u; i < labels.size(); offset += labels[i].size() + 1u, ++i)
+                            if (labels[i].size() >= 64u)
+                                return raise("UnicodeEncodeError", make_str(input), offset, offset + labels[i].size(), "label too long");
+                        return result_pair(make_bytes(narrow(points)), static_cast<long long>(points.size()));
+                    }
+                    auto labels = split_dots(points);
+                    std::string trailingDot;
+                    if (!labels.empty() && labels.back().empty())
+                    {
+                        trailingDot = ".";
+                        labels.pop_back();
+                    }
+                    std::string result;
+                    std::size_t offset = 0u;
+                    for (std::size_t i = 0u; i < labels.size(); offset += labels[i].size() + 1u, ++i)
+                    {
+                        if (!result.empty())
+                            result += '.';
+                        std::string label;
+                        failure f;
+                        if (!to_ascii(labels[i], label, f))
+                            return failed() ? nullptr : raise("UnicodeEncodeError", make_str(input), offset + f.start, offset + f.end, f.reason);
+                        result += label;
+                    }
+                    return result_pair(make_bytes(result + trailingDot), static_cast<long long>(points.size()));
+                }
+
+                // (Codec.decode: (str, length))
+                object* decode_pair(object* aInput, std::string const& aErrors)
+                {
+                    if (!strict(aErrors))
+                        return nullptr;
+                    std::string_view data;
+                    if (kind_of(aInput) == NEOS_PY_STR)
+                        return error("TypeError", "string argument without an encoding");
+                    if (!data_argument(aInput, data))
+                        return nullptr;
+                    std::string const input{ data };
+                    if (input.empty())
+                        return result_pair(make_str(""), 0);
+                    std::string lower = input;
+                    for (auto& c : lower)
+                        if (c >= 'A' && c <= 'Z')
+                            c = static_cast<char>(c - 'A' + 'a');
+                    if (lower.find("xn--") == std::string::npos && std::all_of(input.begin(), input.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80u; }))
+                        return result_pair(make_str(input), static_cast<long long>(input.size()));
+                    std::vector<std::string> labels{ std::string{} };
+                    for (auto c : input)
+                        if (c == '.')
+                            labels.emplace_back();
+                        else
+                            labels.back() += c;
+                    std::string trailingDot;
+                    if (!labels.empty() && labels.back().empty())
+                    {
+                        trailingDot = ".";
+                        labels.pop_back();
+                    }
+                    std::u32string result;
+                    std::size_t offset = 0u;
+                    for (std::size_t i = 0u; i < labels.size(); offset += labels[i].size() + 1u, ++i)
+                    {
+                        std::u32string label;
+                        failure f;
+                        if (!to_unicode(labels[i], false, label, f))
+                            return failed() ? nullptr : raise("UnicodeDecodeError", make_bytes(input), offset + f.start, offset + f.end, f.reason);
+                        if (i > 0u)
+                            result += U'.';
+                        result += label;
+                    }
+                    return result_pair(make_str(from_code_points(result) + trailingDot), static_cast<long long>(input.size()));
+                }
+
+                // (IncrementalEncoder._buffer_encode(self, input, errors, final): (bytes, consumed))
+                object* buffer_encode(neos_py_context*, void*, object* aArgs, object* aKwargs)
+                {
+                    std::vector<object*> a;
+                    if (!self_arguments("_buffer_encode", argument_vector(aArgs), aKwargs, { "input", "errors", "final" }, 3u, 0u, a))
+                        return nullptr;
+                    auto const final = truth(a[2]);
+                    if (final < 0 || !strict(errors_value(a[1])))
+                        return nullptr;
+                    if (kind_of(a[0]) != NEOS_PY_STR)
+                        return error("TypeError", "cannot use a string pattern on a bytes-like object");
+                    auto const& input = as<str_object>(a[0])->value;
+                    auto const points = to_code_points(input);
+                    if (points.empty())
+                        return result_pair(make_bytes({}), 0);
+                    auto labels = split_dots(points);
+                    std::string trailingDot;
+                    if (!labels.empty())
+                    {
+                        if (labels.back().empty())
+                        {
+                            trailingDot = ".";
+                            labels.pop_back();
+                        }
+                        else if (final == 0)
+                        {
+                            labels.pop_back();
+                            if (!labels.empty())
+                                trailingDot = ".";
+                        }
+                    }
+                    std::string result;
+                    std::size_t size = 0u;
+                    for (auto const& label : labels)
+                    {
+                        if (size != 0u)
+                        {
+                            result += '.';
+                            ++size;
+                        }
+                        std::string encoded;
+                        failure f;
+                        if (!to_ascii(label, encoded, f))
+                            return failed() ? nullptr : raise("UnicodeEncodeError", make_str(input), size + f.start, size + f.end, f.reason);
+                        result += encoded;
+                        size += label.size();
+                    }
+                    result += trailingDot;
+                    size += trailingDot.size();
+                    return result_pair(make_bytes(result), static_cast<long long>(size));
+                }
+
+                // (IncrementalDecoder._buffer_decode(self, input, errors, final): (str, consumed))
+                object* buffer_decode(neos_py_context*, void*, object* aArgs, object* aKwargs)
+                {
+                    std::vector<object*> a;
+                    if (!self_arguments("_buffer_decode", argument_vector(aArgs), aKwargs, { "input", "errors", "final" }, 3u, 0u, a))
+                        return nullptr;
+                    auto const final = truth(a[2]);
+                    if (final < 0 || !strict(errors_value(a[1])))
+                        return nullptr;
+                    std::vector<std::u32string> labels;
+                    std::string text;   // (the input as str)
+                    if (kind_of(a[0]) == NEOS_PY_STR)
+                    {
+                        text = as<str_object>(a[0])->value;
+                        if (text.empty())
+                            return result_pair(make_str(""), 0);
+                        labels = split_dots(to_code_points(text));
+                    }
+                    else
+                    {
+                        std::string_view data;
+                        if (!data_argument(a[0], data))
+                            return nullptr;
+                        if (data.empty())
+                            return result_pair(make_str(""), 0);
+                        for (std::size_t i = 0u; i < data.size(); ++i)
+                            if (static_cast<unsigned char>(data[i]) >= 0x80u)
+                                return raise("UnicodeDecodeError", make_bytes(std::string{ data }), i, i + 1u, "ordinal not in range(128)");
+                        text = std::string{ data };
+                        labels.emplace_back();
+                        for (auto c : text)
+                            if (c == '.')
+                                labels.emplace_back();
+                            else
+                                labels.back() += static_cast<char32_t>(c);
+                    }
+                    std::string trailingDot;
+                    if (!labels.empty())
+                    {
+                        if (labels.back().empty())
+                        {
+                            trailingDot = ".";
+                            labels.pop_back();
+                        }
+                        else if (final == 0)
+                        {
+                            labels.pop_back();
+                            if (!labels.empty())
+                                trailingDot = ".";
+                        }
+                    }
+                    std::u32string result;
+                    std::size_t size = 0u;
+                    for (std::size_t i = 0u; i < labels.size(); ++i)
+                    {
+                        std::u32string label;
+                        failure f;
+                        if (!to_unicode(from_code_points(labels[i]), true, label, f))
+                        {
+                            if (failed())
+                                return nullptr;
+                            std::string escaped;
+                            if (!detail::encode(text, "ascii", "backslashreplace", escaped))
+                                return nullptr;
+                            return raise("UnicodeDecodeError", make_bytes(escaped), size + f.start, size + f.end, f.reason);
+                        }
+                        if (i > 0u)
+                            result += U'.';
+                        result += label;
+                        if (size != 0u)
+                            ++size;
+                        size += labels[i].size();
+                    }
+                    size += trailingDot.size();
+                    return result_pair(make_str(from_code_points(result) + trailingDot), static_cast<long long>(size));
+                }
+            }
+
             object* native_encode(codec_descriptor const& aCodec, object* aInput, std::string const& aErrors)    // ((bytes, length))
             {
+                if (aCodec.id == codec_id::Punycode)
+                {
+                    ref const result{ punycode::encode_object(aInput) };
+                    return result ? result_pair(new_reference(result.get()), static_cast<long long>(to_code_points(as<str_object>(aInput)->value).size())) : nullptr;
+                }
+                if (aCodec.id == codec_id::Idna)
+                    return idna::encode_pair(aInput, aErrors);
                 return engine_encode(aCodec, aInput, codec_function_name(aCodec, true).c_str(), aErrors);
             }
 
             object* native_decode(codec_descriptor const& aCodec, object* aInput, std::string const& aErrors, bool aFinal)    // ((str, consumed))
             {
+                if (aCodec.id == codec_id::Punycode)
+                {
+                    // (len(input): of any sequence)
+                    if (!punycode::supported_errors(aErrors))
+                        return nullptr;
+                    ref const result{ punycode::decode(aInput, aErrors) };
+                    if (!result)
+                        return nullptr;
+                    auto const n = length(aInput);
+                    return n < 0 && failed() ? nullptr : result_pair(new_reference(result.get()), n);
+                }
+                if (aCodec.id == codec_id::Idna)
+                    return idna::decode_pair(aInput, aErrors);
                 std::string_view data;
                 if (!data_argument(aInput, data, aCodec.id == codec_id::UnicodeEscape || aCodec.id == codec_id::RawUnicodeEscape))
                     return nullptr;
@@ -3994,10 +4761,91 @@ namespace neos::python_runtime
                 return sig_decode(a[0], errors_value(a[1]), false, true, bomSeen);
             }
 
-            // --- the transform codecs: hex, base64 (bytes to bytes) and rot13 (str to str)
+            // --- the transform codecs: hex, base64, zlib, uu, quopri (bytes to bytes) and rot13 (str to str)
+
+            // (Lib/encodings/uu_codec.py's uu_encode and uu_decode (their default filename and mode))
+            object* uu_transform(object* aInput, bool aEncode)
+            {
+                std::string_view data;
+                if (!bytes_like(aInput, data))
+                    return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(aInput) + "'");
+                std::string const input{ data };
+                std::string result;
+                auto const coded = [&](char const* aFunction, std::string const& aChunk, std::string& aResult)
+                {
+                    ref const f{ module_attribute("binascii", aFunction) };
+                    ref const r{ f ? invoke(f.get(), { make_bytes(aChunk) }) : nullptr };
+                    std::string_view bytes;
+                    if (!r || !bytes_like(r.get(), bytes))
+                        return false;
+                    aResult += bytes;
+                    return true;
+                };
+                if (aEncode)
+                {
+                    result = "begin 666 <data>\n";
+                    for (std::size_t i = 0u; i < input.size(); i += 45u)
+                        if (!coded("b2a_uu", input.substr(i, 45u), result))
+                            return nullptr;
+                    result += " \nend\n";
+                    return make_bytes(std::move(result));
+                }
+                // (its lines (readline's))
+                std::size_t position = 0u;
+                auto const readline = [&]()
+                {
+                    auto const end = input.find('\n', position);
+                    auto const next = end == std::string::npos ? input.size() : end + 1u;
+                    auto line = input.substr(position, next - position);
+                    position = next;
+                    return line;
+                };
+                for (;;)
+                {
+                    auto const s = readline();
+                    if (s.empty())
+                        return error("ValueError", "Missing \"begin\" line in input data");
+                    if (s.starts_with("begin"))
+                        break;
+                }
+                std::string s;
+                for (;;)
+                {
+                    s = readline();
+                    if (s.empty() || s == "end\n")
+                        break;
+                    if (!coded("a2b_uu", s, result))
+                    {
+                        // (binascii.Error: the line's bytes that its length gives)
+                        clear_error();
+                        auto const nbytes = ((((static_cast<unsigned char>(s[0]) - 32) & 63) * 4) + 5) / 3;
+                        if (!coded("a2b_uu", s.substr(0u, static_cast<std::size_t>(nbytes)), result))
+                            return nullptr;
+                    }
+                }
+                if (s.empty())
+                    return error("ValueError", "Truncated input data");
+                return make_bytes(std::move(result));
+            }
 
             object* transform(codec_descriptor const& aCodec, object* aInput, bool aEncode)
             {
+                if (aCodec.id == codec_id::Uu)
+                    return uu_transform(aInput, aEncode);
+                if (aCodec.id == codec_id::Quopri)
+                {
+                    // (Lib/encodings/quopri_codec.py's: quopri.encodestring(input, quotetabs=True) and quopri.decodestring(input))
+                    std::string_view data;
+                    if (!bytes_like(aInput, data))
+                        return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(aInput) + "'");
+                    ref const f{ module_attribute("quopri", aEncode ? "encodestring" : "decodestring") };
+                    if (!f)
+                        return nullptr;
+                    if (!aEncode)
+                        return invoke(f.get(), { make_bytes(std::string{ data }) });
+                    ref const kw{ keywords({ { "quotetabs", make_bool(true) } }) };
+                    return invoke(f.get(), { make_bytes(std::string{ data }) }, kw.get());
+                }
                 if (aCodec.id == codec_id::Rot13)
                 {
                     std::string_view text;
@@ -4144,10 +4992,33 @@ namespace neos::python_runtime
                     streamWriter = ref{ codec_class(module, "StreamWriter", { sStreamWriter }, { { "reset", sig_writer_reset }, { "encode", sig_writer_encode } }, codec) };
                     streamReader = ref{ codec_class(module, "StreamReader", { sStreamReader }, { { "reset", bom_reader_reset }, { "decode", sig_reader_decode } }, codec) };
                     break;
+                case codec_id::Punycode:
+                case codec_id::Idna:
+                    {
+                        // (punycode's and idna's (Lib/encodings): an IncrementalEncoder and IncrementalDecoder (idna's are buffered: of labels))
+                        encode = native("encode", module_encode);
+                        decode = native("decode", module_decode);
+                        if (aEntry.id == codec_id::Idna)
+                        {
+                            incrementalEncoder = ref{ codec_class(module, "IncrementalEncoder", { sBufferedIncrementalEncoder }, { { "_buffer_encode", idna::buffer_encode } }, codec) };
+                            incrementalDecoder = ref{ codec_class(module, "IncrementalDecoder", { sBufferedIncrementalDecoder }, { { "_buffer_decode", idna::buffer_decode } }, codec) };
+                        }
+                        else
+                        {
+                            incrementalEncoder = ref{ codec_class(module, "IncrementalEncoder", { sIncrementalEncoder }, { { "encode", incremental_encode } }, codec) };
+                            incrementalDecoder = ref{ codec_class(module, "IncrementalDecoder", { sIncrementalDecoder }, { { "decode", incremental_decode } }, codec) };
+                        }
+                        ref const codecClass{ codec_class(module, "Codec", { sCodec }, { { "encode", method_encode }, { "decode", method_decode } }, codec) };
+                        streamWriter = ref{ codec_class(module, "StreamWriter", { codecClass.get(), sStreamWriter }, {}, codec) };
+                        streamReader = ref{ codec_class(module, "StreamReader", { codecClass.get(), sStreamReader }, {}, codec) };
+                    }
+                    break;
                 case codec_id::Hex:
                 case codec_id::Base64:
                 case codec_id::Rot13:
                 case codec_id::Zlib:
+                case codec_id::Uu:
+                case codec_id::Quopri:
                     {
                         isText = false;
                         encode = native("encode", [](neos_py_context* c, void* d, object* a, object* k) -> object* { return transform_module(c, d, a, k, true, false); });

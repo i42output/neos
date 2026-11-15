@@ -304,6 +304,8 @@ namespace neos::compilers::javascript
         bool simple_object_literal(node* aNode);
         void array_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss); ///< (an array's dense
                                                     ///< element (the key a number): its address (in aAddress), else to aMiss)
+        void typed_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss); ///< (likewise a
+                                                    ///< Uint8Array's element (a byte))
         void callee_number_stub(stub aStub);
         void mem_load(opcode aOpcode, std::uint32_t aOffset, alias aAlias = alias::Any);   ///< (a load from the runtime's heap (its external memory: layout::Memory))
         void mem_store(opcode aOpcode, std::uint32_t aOffset, alias aAlias = alias::Any);

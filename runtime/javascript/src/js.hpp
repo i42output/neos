@@ -347,8 +347,8 @@ namespace neos::javascript_runtime
             // (growing as push_back does (an element at a time: amortized constant))
             if (aSize > iCapacity)
                 reserve(std::max<std::size_t>(aSize, static_cast<std::size_t>(iCapacity) * 2u));
-            for (std::size_t i = iSize; i < aSize; ++i)
-                data()[i] = aValue;
+            if (aSize > iSize)
+                std::fill(data() + iSize, data() + aSize, aValue);
             iSize = narrow(aSize);
         }
         template <typename Predicate>
@@ -420,6 +420,8 @@ namespace neos::javascript_runtime
         std::uint64_t bumpLimit[Classes];   ///< (... and the end's (0 when there is none: compiled code finds a slot beyond it))
         std::uint64_t plainArrays[3];       ///< (compiled code's push stub: %Array.prototype%'s shape, its prototype (%Object.prototype%) and that
                                             ///< one's shape when they were last plain (see remember_plain_arrays); all ones: not known)
+        std::uint64_t typedLengthProto;     ///< (compiled code's length stub: the prototype (a value) of the typed arrays whose length is
+                                            ///< %TypedArray.prototype%'s getter's (see api's remember_typed_length); 0: none)
     };
     // (an entry of the megamorphic cache (MegamorphicEntries of them): an own data property's position in the objects of a shape (a key 
     // and shape whose entry it is: by their hash (see megamorphic_index)); shapes do not change, so an entry is never wrong)
@@ -1189,6 +1191,7 @@ namespace neos::javascript_runtime
         void const* values_field() const { return &iStorage; }      ///< (a shape's: its values' storage (u32: its region offset >> 3), then
                                                                     ///< their capacity (u32); no shape's: its dictionary's (u32: the same))
         void const* capacity_field() const { return &iCapacity; }
+        static std::size_t dictionary_proto_field() { return offsetof(dictionary, proto); }     ///< (layout::DictionaryProto)
     private:
         void reindex();
         // (no shape: its properties (in the region, that compiled code reads: the dictionary's first member is their storage's offset

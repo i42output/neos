@@ -1983,7 +1983,8 @@ namespace neos::python_runtime
             auto const handler = sHandlers[aSignal];
             if (handler != nullptr && !is_int_like(builtin_value(handler)) && is_callable(handler))
                 trip_signal(static_cast<int>(aSignal));
-            return true;
+            // (called on the main thread: its handler runs before the call returns (CPython's eval breaker, checked after the call))
+            return signals_check();
         }
 
         void signals_end()

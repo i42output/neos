@@ -589,16 +589,43 @@ namespace neos::python_runtime
 
             // --- total_ordering
 
-            struct ordering_entry { char const* root; char const* name; int kind; };
+            struct ordering_entry { char const* root; char const* name; int kind; char const* function; char const* doc; };
 
-            // (the derived comparisons (CPython's _convert): kind 0: not r and != ; 1: r or ==; 2: not r; 3: not r or ==; 4: r and !=)
+            // (the derived comparisons (CPython's _convert, and its functions (_gt_from_lt, ...)): kind 0: not r and != ; 1: r or ==; 2: not r; 
+            // 3: not r or ==; 4: r and !=)
             ordering_entry const sOrderings[] =
             {
-                { "__lt__", "__gt__", 0 }, { "__lt__", "__le__", 1 }, { "__lt__", "__ge__", 2 },
-                { "__le__", "__ge__", 3 }, { "__le__", "__lt__", 4 }, { "__le__", "__gt__", 2 },
-                { "__gt__", "__lt__", 0 }, { "__gt__", "__ge__", 1 }, { "__gt__", "__le__", 2 },
-                { "__ge__", "__le__", 3 }, { "__ge__", "__gt__", 4 }, { "__ge__", "__lt__", 2 }
+                { "__lt__", "__gt__", 0, "_gt_from_lt", "Return a > b.  Computed by @total_ordering from (not a < b) and (a != b)." },
+                { "__lt__", "__le__", 1, "_le_from_lt", "Return a <= b.  Computed by @total_ordering from (a < b) or (a == b)." },
+                { "__lt__", "__ge__", 2, "_ge_from_lt", "Return a >= b.  Computed by @total_ordering from (not a < b)." },
+                { "__le__", "__ge__", 3, "_ge_from_le", "Return a >= b.  Computed by @total_ordering from (not a <= b) or (a == b)." },
+                { "__le__", "__lt__", 4, "_lt_from_le", "Return a < b.  Computed by @total_ordering from (a <= b) and (a != b)." },
+                { "__le__", "__gt__", 2, "_gt_from_le", "Return a > b.  Computed by @total_ordering from (not a <= b)." },
+                { "__gt__", "__lt__", 0, "_lt_from_gt", "Return a < b.  Computed by @total_ordering from (not a > b) and (a != b)." },
+                { "__gt__", "__ge__", 1, "_ge_from_gt", "Return a >= b.  Computed by @total_ordering from (a > b) or (a == b)." },
+                { "__gt__", "__le__", 2, "_le_from_gt", "Return a <= b.  Computed by @total_ordering from (not a > b)." },
+                { "__ge__", "__le__", 3, "_le_from_ge", "Return a <= b.  Computed by @total_ordering from (not a >= b) or (a == b)." },
+                { "__ge__", "__gt__", 4, "_gt_from_ge", "Return a > b.  Computed by @total_ordering from (a >= b) and (a != b)." },
+                { "__ge__", "__lt__", 2, "_lt_from_ge", "Return a < b.  Computed by @total_ordering from (not a >= b)." }
             };
+
+            object* derived_comparison(neos_py_context*, void* aData, object* aArgs, object*);
+
+            // (the module's function of a derived comparison (one object: the classes that total_ordering completes share it, and it 
+            // pickles as functools's (e.g. functools._gt_from_lt)): borrowed)
+            object* ordering_function(ordering_entry const& aEntry)
+            {
+                static object* sFunctions[std::size(sOrderings)] = {};
+                auto& f = sFunctions[&aEntry - sOrderings];
+                if (f == nullptr)
+                {
+                    f = make_function(aEntry.function, derived_comparison, const_cast<ordering_entry*>(&aEntry));
+                    auto& function = *reinterpret_cast<function_object*>(f);
+                    function.module = "functools";
+                    function.doc = aEntry.doc;
+                }
+                return f;
+            }
 
             object* derived_comparison(neos_py_context*, void* aData, object* aArgs, object*)
             {
@@ -670,8 +697,7 @@ namespace neos::python_runtime
                 for (auto const& entry : sOrderings)
                     if (root == entry.root && std::find(roots.begin(), roots.end(), entry.name) == roots.end())
                     {
-                        ref const function{ make_function(entry.name, derived_comparison, const_cast<ordering_entry*>(&entry)) };
-                        if (setattr(cls, entry.name, function.get()) < 0)
+                        if (setattr(cls, entry.name, ordering_function(entry)) < 0)
                             return nullptr;
                     }
                 return borrowed(cls);
@@ -1259,6 +1285,8 @@ namespace neos::python_runtime
                 for (auto const& f : sFunctoolsFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
                 set_functions_module(aAttributes, "_functools", { "reduce", "cmp_to_key" });
+                for (auto const& entry : sOrderings)
+                    aAttributes.emplace_back(entry.function, new_reference(ordering_function(entry)));
                 aAttributes.emplace_back("partial", context()->type_new(context(), "partial", "functools.partial", new_partial, nullptr, partial_instancecheck));
                 aAttributes.emplace_back("WRAPPER_ASSIGNMENTS", make_tuple({ make_str("__module__"), make_str("__name__"), make_str("__qualname__"),
                     make_str("__doc__"), make_str("__annotations__"), make_str("__type_params__") }));

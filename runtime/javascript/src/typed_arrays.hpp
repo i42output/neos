@@ -74,7 +74,8 @@ namespace neos::javascript_runtime
 
     char const* element_type_name(element_type aType);     ///< (its typed array's name, e.g. "Int8Array")
 
-    // (an ArrayBuffer or a SharedArrayBuffer: its data block is a vector of bytes; a resizable (growable) one's data is resized)
+    // (an ArrayBuffer or a SharedArrayBuffer: its data block is a vector of bytes (in the region: compiled code reads and writes a
+    // Uint8Array's elements); a resizable (growable) one's data is resized)
     class array_buffer_object : public object
     {
     public:
@@ -91,7 +92,7 @@ namespace neos::javascript_runtime
         std::size_t byte_length() const { return data.size(); }
         std::uint8_t* bytes() { return data.data(); }
     public:
-        std::vector<std::uint8_t> data;
+        region_vector<std::uint8_t> data;   ///< (first: compiled code reads its offset (layout::BufferData), and the two that follow it)
         bool detached = false;
         bool resizable = false;             ///< (a resizable ArrayBuffer or a growable SharedArrayBuffer)
         std::size_t maxByteLength = 0u;     ///< ([[ArrayBufferMaxByteLength]] (resizable))

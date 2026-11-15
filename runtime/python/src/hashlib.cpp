@@ -653,6 +653,8 @@ namespace neos::python_runtime
                                                 return nullptr;
                                             if (n < 0)
                                                 return error("ValueError", "negative digest length");
+                                            if (n >= (1ll << 29))
+                                                return error("ValueError", "length is too large");
                                             length = static_cast<std::size_t>(n);
                                         }
                                         else if (!rest.empty())
@@ -686,6 +688,19 @@ namespace neos::python_runtime
                 return result.release_ownership();
             }
 
+            // (the data argument, or the deprecated string argument (CPython's _Py_hashlib_data_argument): not both)
+            bool data_or_string(object* aData, object* aString, object*& aResult)
+            {
+                if (aData != nullptr && aString != nullptr)
+                {
+                    error("TypeError", "'data' and 'string' are mutually exclusive and support for 'string' keyword parameter is slated for removal "
+                        "in a future version.");
+                    return false;
+                }
+                aResult = aData != nullptr ? aData : aString;
+                return true;
+            }
+
             struct constructor_entry { char const* name; };
             constructor_entry const sConstructors[] = { { "md5" }, { "sha1" }, { "sha224" }, { "sha256" }, { "sha384" }, { "sha512" }, { "sha3_224" }, { "sha3_256" },
                 { "sha3_384" }, { "sha3_512" }, { "shake_128" }, { "shake_256" } };
@@ -696,14 +711,19 @@ namespace neos::python_runtime
                 std::vector<object*> a;
                 if (!parse_arguments(entry.name, as<tuple_object>(aArgs)->items, aKwargs, { "data", "usedforsecurity", "string" }, 0u, 0u, a))
                     return nullptr;
-                return new_hash(entry.name, make_hasher(entry.name), a[0] != nullptr ? a[0] : a[2]);
+                object* data = nullptr;
+                if (!data_or_string(a[0], a[2], data))
+                    return nullptr;
+                return new_hash(entry.name, make_hasher(entry.name), data);
             }
 
             object* blake(std::vector<object*> const& aArgs, object* aKwargs, bool aB)
             {
                 std::vector<object*> a;
                 if (!parse_arguments(aB ? "blake2b" : "blake2s", aArgs, aKwargs, { "data", "digest_size", "key", "salt", "person", "fanout", "depth", "leaf_size",
-                    "node_offset", "node_depth", "inner_size", "last_node", "usedforsecurity" }, 0u, 1u, a))
+                    "node_offset", "node_depth", "inner_size", "last_node", "usedforsecurity", "string" }, 0u, 0u, a))
+                    return nullptr;
+                if (!data_or_string(a[0], a[13], a[0]))
                     return nullptr;
                 std::size_t const maxSize = aB ? 64u : 32u;
                 long long size = static_cast<long long>(maxSize);
@@ -760,25 +780,169 @@ namespace neos::python_runtime
                 return outer->digest(0u);
             }
 
+            object* sBuiltinConstructorCache = nullptr;    // (hashlib.__builtin_constructor_cache)
+
+            // (new(name, data=b'', **kwargs): the named hash's constructor's object (Lib/hashlib.py's __hash_new))
+            object* b_new(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                object* nameArgument = aArgs.empty() ? nullptr : aArgs[0];
+                ref kwargs{ make_dict() };
+                if (aKwargs != nullptr)
+                    for (auto const& item : as<dict_object>(aKwargs)->items)
+                    {
+                        if (as<str_object>(item.first)->value == "name" && nameArgument == nullptr)
+                            nameArgument = item.second;
+                        else
+                            dict_set(kwargs.get(), item.first, item.second);
+                    }
+                if (nameArgument == nullptr)
+                    return error("TypeError", "new() missing required argument 'name' (pos 1)");
+                if (kind_of(nameArgument) != NEOS_PY_STR)
+                    return error("TypeError", std::string{ "new() argument 'name' must be str, not " } + type_name(nameArgument));
+                std::vector<object*> const rest{ aArgs.empty() ? aArgs.end() : aArgs.begin() + 1, aArgs.end() };
+                object* const keywords = as<dict_object>(kwargs.get())->items.empty() ? nullptr : kwargs.get();
+                std::string name = as<str_object>(nameArgument)->value;
+                for (auto& c : name)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (name == "sha-256")
+                    name = "sha256";
+                if (name == "blake2b" || name == "blake2s")
+                    return blake(rest, keywords, name == "blake2b");
+                std::vector<object*> a;
+                if (!parse_arguments("new", rest, keywords, { "data", "usedforsecurity", "string" }, 0u, 0u, a))
+                    return nullptr;
+                object* data = nullptr;
+                if (!data_or_string(a[0], a[2], data))
+                    return nullptr;
+                auto state = make_hasher(name);
+                if (!state)
+                    return error("ValueError", "unsupported hash type " + name);
+                return new_hash(name, std::move(state), data);
+            }
+
+            // (file_digest(fileobj, digest, /, *, _bufsize=2**18): the hash of a file object's data (Lib/hashlib.py's))
+            object* b_file_digest(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!parse_arguments("file_digest", aArgs, aKwargs, { "fileobj", "digest", "_bufsize" }, 2u, 2u, a))
+                    return nullptr;
+                ref digest{ kind_of(a[1]) == NEOS_PY_STR ? b_new({ a[1] }, nullptr) : invoke(a[1], {}) };
+                if (!digest)
+                    return nullptr;
+                // (an io.BytesIO object: its buffer)
+                ref const getbuffer{ optional_attribute(a[0], "getbuffer") };
+                if (getbuffer)
+                {
+                    ref const buffer{ invoke(getbuffer.get(), {}) };
+                    if (!buffer)
+                        return nullptr;
+                    ref const updated{ call_method_named(digest.get(), "update", { new_reference(buffer.get()) }) };
+                    return updated ? digest.release_ownership() : nullptr;
+                }
+                if (failed())
+                    return nullptr;
+                // (only binary files implement readinto())
+                ref const readinto{ optional_attribute(a[0], "readinto") };
+                if (!readinto && failed())
+                    return nullptr;
+                ref const readable{ readinto ? optional_attribute(a[0], "readable") : nullptr };
+                if (readinto && !readable && failed())
+                    return nullptr;
+                ref const isReadable{ readable ? invoke(readable.get(), {}) : nullptr };
+                if (readable && !isReadable)
+                    return nullptr;
+                int const yes = isReadable ? truth(isReadable.get()) : 0;
+                if (yes < 0)
+                    return nullptr;
+                if (yes == 0)
+                    return error("ValueError", "'" + repr_text(a[0]) + "' is not a file-like object in binary reading mode.");
+                long long size = 1ll << 18;
+                if (a[2] != nullptr && !to_index(a[2], size))
+                    return nullptr;
+                ref const buffer{ make_bytearray(std::string(static_cast<std::size_t>(std::max(size, 0ll)), '\0')) };
+                for (;;)
+                {
+                    ref const read{ invoke(readinto.get(), { new_reference(buffer.get()) }) };
+                    if (!read)
+                        return nullptr;
+                    if (kind_of(read.get()) == NEOS_PY_NONE)
+                        return error("BlockingIOError", "I/O operation would block.");
+                    long long n = 0;
+                    if (!to_index(read.get(), n))
+                        return nullptr;
+                    if (n == 0)
+                        break;
+                    std::string_view data;
+                    if (!bytes_like(buffer.get(), data))
+                        return nullptr;
+                    ref const updated{ call_method_named(digest.get(), "update", { make_bytes(std::string{ data.substr(0u, static_cast<std::size_t>(n)) }) }) };
+                    if (!updated)
+                        return nullptr;
+                }
+                return digest.release_ownership();
+            }
+
             builtin_entry const sHashlibFunctions[] =
             {
-                { "new", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                { "new", b_new },
+                { "file_digest", b_file_digest },
+                { "__get_builtin_constructor", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
+                        // (Lib/hashlib.py's: the constructor of the module that implements a hash (_md5, _sha1, _sha2, _sha3, _blake2), cached)
                         std::vector<object*> a;
-                        if (!parse_arguments("new", aArgs, aKwargs, { "name", "data", "usedforsecurity", "string" }, 1u, 0u, a))
+                        if (!parse_arguments("__get_builtin_constructor", aArgs, aKwargs, { "name" }, 1u, 1u, a))
                             return nullptr;
-                        std::string name;
-                        if (!str_of(a[0], name))
+                        if (kind_of(a[0]) != NEOS_PY_STR)
+                            return error("TypeError", std::string{ "new() argument 'name' must be str, not " } + type_name(a[0]));
+                        auto const& name = as<str_object>(a[0])->value;
+                        ref const cached{ call_method_named(sBuiltinConstructorCache, "get", { new_reference(a[0]) }) };
+                        if (!cached)
                             return nullptr;
-                        for (auto& c : name)
-                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        if (name == "sha-256") name = "sha256";
-                        if (name == "blake2b" || name == "blake2s")
-                            return blake(a[1] != nullptr ? std::vector<object*>{ a[1] } : std::vector<object*>{}, nullptr, name == "blake2b");
-                        auto state = make_hasher(name);
-                        if (!state)
-                            return error("ValueError", "unsupported hash type " + name);
-                        return new_hash(name, std::move(state), a[1] != nullptr ? a[1] : a[3]);
+                        if (kind_of(cached.get()) != NEOS_PY_NONE)
+                            return new_reference(cached.get());
+                        static std::vector<std::pair<std::vector<std::string>, char const*>> const sModules = {
+                            { { "SHA1", "sha1" }, "_sha1" }, { { "MD5", "md5" }, "_md5" },
+                            { { "SHA224", "sha224", "SHA256", "sha256" }, "_sha2" }, { { "SHA384", "sha384", "SHA512", "sha512" }, "_sha2" },
+                            { { "blake2b", "blake2s" }, "_blake2" }, 
+                            { { "sha3_224", "sha3_256", "sha3_384", "sha3_512", "shake_128", "shake_256" }, "_sha3" } };
+                        for (auto const& [names, module] : sModules)
+                            if (std::find(names.begin(), names.end(), name) != names.end())
+                            {
+                                // (no extension module (ImportError): the hash is not supported)
+                                bool const imported = [&]()
+                                {
+                                    ref const m{ fn_import(module) };
+                                    if (!m)
+                                        return false;
+                                    for (auto const& n : names)
+                                    {
+                                        std::string lower = n;
+                                        for (auto& c : lower)
+                                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                                        ref const constructor{ getattr(m.get(), lower.c_str()) };
+                                        if (!constructor)
+                                            return false;
+                                        ref const key{ make_str(n) };
+                                        dict_set(sBuiltinConstructorCache, key.get(), constructor.get());
+                                    }
+                                    return true;
+                                }();
+                                if (!imported)
+                                {
+                                    ref const e{ take_exception() };
+                                    if (!exception_is(e.get(), "ImportError"))
+                                    {
+                                        reraise_exception(e.get());
+                                        return nullptr;
+                                    }
+                                    break;
+                                }
+                                ref constructor{ call_method_named(sBuiltinConstructorCache, "get", { new_reference(a[0]) }) };
+                                if (constructor && kind_of(constructor.get()) != NEOS_PY_NONE)
+                                    return constructor.release_ownership();
+                                break;
+                            }
+                        return error("ValueError", "unsupported hash type " + name);
                     } },
                 { "blake2b", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return blake(aArgs, aKwargs, true); } },
                 { "blake2s", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return blake(aArgs, aKwargs, false); } },
@@ -829,6 +993,9 @@ namespace neos::python_runtime
                     aAttributes.emplace_back(c.name, make_function(std::string{ "openssl_" } + c.name, call_constructor, const_cast<constructor_entry*>(&c)));
                 for (auto const& f : sHashlibFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                if (sBuiltinConstructorCache == nullptr)
+                    sBuiltinConstructorCache = make_dict();
+                aAttributes.emplace_back("__builtin_constructor_cache", new_reference(sBuiltinConstructorCache));
                 std::vector<object*> names;
                 for (auto n : { "blake2b", "blake2s", "md5", "sha1", "sha224", "sha256", "sha384", "sha3_224", "sha3_256", "sha3_384", "sha3_512", "sha512",
                     "shake_128", "shake_256" })

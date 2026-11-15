@@ -144,6 +144,8 @@ namespace neos::javascript_runtime
                 offsetof(allocation_state, compiledLimit) == jsl::AllocLimit && offsetof(allocation_state, megamorphic) == jsl::AllocMegamorphic &&
                 offsetof(allocation_state, bump) == jsl::AllocBump && offsetof(allocation_state, bumpLimit) == jsl::AllocBumpLimit &&
                 offsetof(allocation_state, plainArrays) == jsl::AllocPlainArrays &&
+                offsetof(allocation_state, typedLengthProto) == jsl::AllocTypedLength &&
+                property_table::dictionary_proto_field() == jsl::DictionaryProto &&
                 MegamorphicEntries == jsl::MegamorphicEntries && sizeof(megamorphic_entry) == jsl::MegamorphicEntrySize &&
                 offsetof(megamorphic_entry, key) == jsl::MegamorphicKey && offsetof(megamorphic_entry, position) == jsl::MegamorphicPosition &&
                 offsetof(megamorphic_entry, reserved) == jsl::MegamorphicWritable;
@@ -172,11 +174,25 @@ namespace neos::javascript_runtime
                 field(array, &array.length) == jsl::ArrayLength && sizeof(array.length) == 4u &&
                 field(array, &array.lengthWritable) == jsl::ArrayLengthWritable && sizeof(array.lengthWritable) == 1u &&
                 sizeof(array.sparse) == 1u && sizeof(array.cls) == 1u;
+            typed_array_object const typed{ Undefined, element_type::Uint8 };
+            array_buffer_object const buffer{ Undefined, false };
+            bool const typedOk = static_cast<std::uint32_t>(object_class::TypedArray) == jsl::ClassTypedArray &&
+                field(typed, &typed.type) == jsl::TypedArrayType && sizeof(typed.type) == 1u &&
+                static_cast<std::uint32_t>(element_type::Uint8) == jsl::TypeUint8 &&
+                field(typed, &typed.byteOffset) == jsl::TypedArrayOffset && sizeof(typed.byteOffset) == 8u &&
+                field(buffer, buffer.data.offset_field()) == jsl::BufferData &&
+                field(typed, &typed.buffer) == jsl::TypedArrayBuffer && field(typed, &typed.arrayLength) == jsl::TypedArrayLength &&
+                sizeof(typed.arrayLength) == 8u && field(typed, &typed.lengthTracking) == jsl::TypedArrayTracking &&
+                sizeof(typed.lengthTracking) == 1u && field(buffer, &buffer.detached) == jsl::BufferDetached &&
+                field(buffer, &buffer.resizable) == jsl::BufferDetached + 1u && sizeof(buffer.detached) == 1u && sizeof(buffer.resizable) == 1u;
+            if (!typedOk)
+                std::fprintf(stderr, "JavaScript runtime: typed array buffer %zu, length %zu, tracking %zu; buffer detached %zu\n",
+                    field(typed, &typed.buffer), field(typed, &typed.arrayLength), field(typed, &typed.lengthTracking), field(buffer, &buffer.detached));
             if (!ok || !arrayOk)
                 std::fprintf(stderr, "JavaScript runtime: object prototype %zu, shape %zu, values %zu, dictionary %zu, class %zu, extensible %zu; array elements %zu, length %zu, sparse %zu\n",
                     std::size_t{ 0u }, at(o.properties.shape_field()), at(o.properties.values_field()), at(o.properties.capacity_field()), at(&o.cls),
                     at(&o.extensible), field(array, array.elements.offset_field()), field(array, &array.length), field(array, &array.sparse));
-            if (!ok || !environmentOk || !arrayOk || !stringOk)
+            if (!ok || !environmentOk || !arrayOk || !stringOk || !typedOk)
             {
                 std::fputs("JavaScript runtime: the heap's layout is not the one compiled code reads (neos::language::javascript::layout)\n", stderr);
                 std::abort();
@@ -234,8 +250,40 @@ namespace neos::javascript_runtime
         return sHost;
     }
 
+    namespace
+    {
+        // (the validity words (see watch) of the prototypes, to %TypedArray.prototype%'s length getter's, of the typed arrays whose length
+        // compiled code has (see api's remember_typed_length): a change of one of them clears the allocation state's prototype)
+        struct typed_length_words
+        {
+            std::uint64_t const* words[typed_array_length_cache::MaxDepth] = {};
+            std::size_t count = 0u;
+        };
+        typed_length_words& the_typed_length_words()
+        {
+            static isolate_local<typed_length_words> sWords;
+            return *sWords;
+        }
+        root_tracer const sTypedLengthRoot{ [](tracer& aTracer)
+        {
+            // (the prototype: a value that compiled code compares with a typed array's (not another object's with its handle))
+            aTracer.mark(the_heap().the_allocation_state().typedLengthProto);
+        } };
+    }
+
     void validity_changed(std::uint64_t const* aWord)
     {
+        if (auto& state = the_heap().the_allocation_state(); state.typedLengthProto != 0u)
+        {
+            auto& w = the_typed_length_words();
+            for (std::size_t i = 0u; i < w.count; ++i)
+                if (w.words[i] == aWord)
+                {
+                    state.typedLengthProto = 0u;
+                    w.count = 0u;
+                    break;
+                }
+        }
         if (sHost != nullptr && sHost->version >= 17u && sHost->watched_changed != nullptr)
             sHost->watched_changed(aWord);
     }
@@ -1449,6 +1497,8 @@ namespace neos::javascript_runtime
             static_assert(std::is_standard_layout_v<site> && sizeof(site) == jsl::SiteEntrySize);
             static_assert(offsetof(site, key) == jsl::SiteKey && offsetof(site, shape) == jsl::SiteShape);
             static_assert(offsetof(site, kind) == jsl::SiteKind && offsetof(site, depth) == jsl::SiteDepth);
+            static_assert(offsetof(site, reserved) + 1u == jsl::SiteTypedElements);
+            constexpr std::uint16_t TypedElements = 0x8000u;    ///< (a first entry's reserved: see jsl::SiteTypedElements (its other bits: its misses))
             static_assert(offsetof(site, position) == jsl::SitePosition && offsetof(site, prototypes) == jsl::SitePrototype);
             static_assert(offsetof(site, added) == jsl::SiteAdded && offsetof(site, function) == jsl::SiteFunction);
             static_assert(offsetof(site, number) == jsl::SiteNumber && offsetof(site, dispatch) == jsl::SiteDispatch);
@@ -1935,14 +1985,73 @@ namespace neos::javascript_runtime
             });
         }
 
+        // (a typed array whose length is %TypedArray.prototype%'s getter's (typed_array_length_is_getter found it: the realm's cache has
+        // its prototypes, to the getter's): the prototypes are watched and the typed array's prototype is the allocation state's, so that
+        // compiled code (the length stub) has the length of a typed array of that prototype that has no properties of its own, until
+        // one of the prototypes changes (see validity_changed))
+        void remember_typed_length(typed_array_object const& aTypedArray)
+        {
+            auto& state = the_heap().the_allocation_state();
+            auto const prototype = aTypedArray.proto();
+            if (state.typedLengthProto == prototype || !is_object(prototype))
+                return;
+            auto const& cache = the_realm().typedArrayLengthCache;
+            auto& w = the_typed_length_words();
+            state.typedLengthProto = 0u;
+            w.count = 0u;
+            for (std::size_t d = 1u; d < cache.depth; ++d)
+            {
+                auto const* const word = watch(const_cast<object&>(*cache.objects[d]));
+                if (word == nullptr)
+                {
+                    w.count = 0u;
+                    return;
+                }
+                w.words[w.count++] = word;
+            }
+            if (w.count != 0u)
+                state.typedLengthProto = prototype;
+        }
+
         value get_length_site(value aObject, std::int32_t aSite)
         {
             // (x.length where compiled code's path did not have it (see the length stub): an array's (not sparse) marks its site (its
-            // first entry's kind: SiteArray), so that its code then has the array's path)
+            // first entry's kind: SiteArray), so that its code then has the array's path; likewise a typed array's whose length is the
+            // getter's (SiteTyped: see remember_typed_length))
             if (auto const* a = as_array(aObject); a != nullptr && !a->sparse)
+            {
                 if (auto* const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone)
                     entries[0].kind = jsl::SiteArray;
+            }
+            else if (auto const* t = as_typed_array(aObject); t != nullptr && typed_array_length_is_getter(*t))
+            {
+                if (auto* const entries = site_of(aSite); entries != nullptr && (entries[0].kind == jsl::SiteNone || entries[0].kind == jsl::SiteArray))
+                    entries[0].kind = jsl::SiteTyped;
+                remember_typed_length(*t);
+                return number(static_cast<double>(t->length()));
+            }
             return get_length(aObject);
+        }
+
+        // (o[k] and o[k] = v where compiled code's path did not have it (see the get and set stubs of computed keys): a Uint8Array's 
+        // element (by a number) marks its site (see jsl::SiteTypedElements), so that its code then has the typed array's path)
+        void mark_typed_elements(value aObject, value aKey, std::int32_t aSite)
+        {
+            if (auto const* t = as_typed_array(aObject); t != nullptr && t->type == element_type::Uint8 && is_number(aKey))
+                if (auto* const entries = site_of(aSite); entries != nullptr)
+                    entries[0].reserved |= TypedElements;
+        }
+
+        value get_site(value aObject, value aKey, std::int32_t aSite)
+        {
+            mark_typed_elements(aObject, aKey, aSite);
+            return get(aObject, aKey);
+        }
+
+        value set_site(value aObject, value aKey, value aValue, std::int32_t aStrict, std::int32_t aSite)
+        {
+            mark_typed_elements(aObject, aKey, aSite);
+            return set(aObject, aKey, aValue, aStrict);
         }
 
         // (the megamorphic cache's: an own data property of an object of a shape (see megamorphic_entry)); the site remembers it)
@@ -2699,6 +2808,8 @@ namespace neos::javascript_runtime
             { "concat_string_number", NEOS_RT_FUNCTION(concat_string_number), I64, 3u, { I64, I64, I32 }, 0u },
             { "get_length", NEOS_RT_FUNCTION(get_length), I64, 1u, { I64 }, 0u },
             { "get_length_site", NEOS_RT_FUNCTION(get_length_site), I64, 2u, { I64, I32 }, 0u },
+            { "get_site", NEOS_RT_FUNCTION(get_site), I64, 3u, { I64, I64, I32 }, 0u },
+            { "set_site", NEOS_RT_FUNCTION(set_site), I64, 5u, { I64, I64, I64, I32, I32 }, 0u },
             { "global_delete", NEOS_RT_FUNCTION(global_delete), I64, 1u, { I64 }, 0u },
             { "env_new", NEOS_RT_FUNCTION(env_new), I64, 2u, { I64, I32 }, 0u },
             { "env_copy", NEOS_RT_FUNCTION(env_copy), I64, 1u, { I64 }, 0u },

@@ -251,10 +251,20 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t ValueUnitShift = 3u;
         inline constexpr std::uint32_t DictionaryEntries = 0u;      ///< (u64: the offset of its properties (PropertySize each))
         inline constexpr std::uint32_t DictionaryEntryCount = 8u;   ///< (u32: their number)
+        inline constexpr std::uint32_t DictionaryProto = 40u;       ///< (value: its object's prototype)
         inline constexpr std::uint32_t ObjectClass = 1u;           ///< (u8: its class (ClassArray ...): in its cell's first word)
         inline constexpr std::uint32_t ObjectExtensible = 2u;      ///< (u8: it is extensible (checked by the runtime: see check_layout))
         inline constexpr std::uint32_t ClassArray = 1u;             ///< (an array (exotic): its elements)
         inline constexpr std::uint32_t ClassHTMLDDA = 40u;          ///< (an object that [[IsHTMLDDA]] (ToBoolean: false))
+        inline constexpr std::uint32_t ClassTypedArray = 23u;       ///< (a typed array (it has no shape: its dictionary has its prototype))
+        inline constexpr std::uint32_t TypedArrayType = 16u;        ///< (u8: a typed array's elements' type (TypeUint8 ...))
+        inline constexpr std::uint32_t TypeUint8 = 1u;              ///< (a Uint8Array's)
+        inline constexpr std::uint32_t TypedArrayBuffer = 24u;      ///< (value: its buffer (an object))
+        inline constexpr std::uint32_t TypedArrayOffset = 32u;      ///< (u64: its first element's offset in its buffer's bytes)
+        inline constexpr std::uint32_t TypedArrayLength = 40u;      ///< (u64: its length (its elements), unless it tracks its buffer's ...)
+        inline constexpr std::uint32_t TypedArrayTracking = 48u;    ///< (u8: ... which this says)
+        inline constexpr std::uint32_t BufferData = 16u;            ///< (u64: the offset of an array buffer's bytes)
+        inline constexpr std::uint32_t BufferDetached = 32u;        ///< (u8: it is detached; then (u8) it is resizable)
         inline constexpr std::uint32_t ArrayElements = 16u;         ///< (u64: the offset of an array's elements (value), then their number)
         inline constexpr std::uint32_t ArrayLength = 32u;           ///< (u32: its length)
         inline constexpr std::uint32_t ArrayLengthWritable = 36u;   ///< (u8: its length is writable)
@@ -305,6 +315,9 @@ namespace neos::language::javascript
                                                                     ///< ObjectSize bytes: its new objects' are a copy of it, then their handle,
                                                                     ///< prototype and values' offset))
         inline constexpr std::uint32_t SiteClass = SiteDepth;       ///< (u8: SiteConstruct: the object's slot's size class (see AllocFreeLists))
+        inline constexpr std::uint32_t SiteTypedElements = 19u;     ///< (u8: a computed key's site's (its first entry's): not 0: a get or set of
+                                                                    ///< a Uint8Array's element has reached the site (see the stubs of
+                                                                    ///< computed keys))
         // (an isolate's allocation state (see the runtime's allocation_state): its size classes' free lists (u64 each: the region offset of the
         // first free slot (0: none); a free slot's first u64 is the next's), the bytes allocated (u64) and the bytes (u64) at which compiled
         // code's allocations are the runtime's instead)
@@ -320,6 +333,11 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t AllocPlainArrays = 984u;     ///< (u64 each: %Array.prototype%'s shape, its prototype (%Object.prototype%) and
                                                                     ///< that one's shape when they were last known to have no elements (all ones:
                                                                     ///< not known): the push stub compares them with what they are)
+        inline constexpr std::uint32_t AllocTypedLength = 1008u;    ///< (value: the prototype of the typed arrays whose length the runtime
+                                                                    ///< last found to be %TypedArray.prototype%'s getter's (0: none): one with
+                                                                    ///< no properties of its own and that prototype has the getter's length
+                                                                    ///< (the runtime clears it when one of the prototypes to the getter's
+                                                                    ///< changes: see the runtime's remember_typed_length))
         inline constexpr std::uint32_t MegamorphicEntries = 4096u;
         inline constexpr std::uint32_t MegamorphicEntrySize = 32u;
         inline constexpr std::uint32_t MegamorphicKey = 8u;
@@ -343,8 +361,9 @@ namespace neos::language::javascript
                                     ///< SiteClass, SiteSlotSize; SitePrototype: their prototype)
             SiteLiteral = 8u,       ///< (an object literal's (its properties data properties of identifier keys): its objects are made by compiled
                                     ///< code (SiteTemplate, SiteClass, SiteSlotSize; SiteShape: their shape; SitePrototype: their prototype)
-            SiteMegamorphic = 9u    ///< (a named get's site (its first entry) whose receivers have had more shapes than its entries: its gets of 
+            SiteMegamorphic = 9u,   ///< (a named get's site (its first entry) whose receivers have had more shapes than its entries: its gets of 
                                     ///< own data properties are found in the megamorphic cache (see AllocMegamorphic))
+            SiteTyped = 10u         ///< (a length's site (its first entry) that a typed array has reached (see the length stub))
         };
     }
 }

@@ -580,6 +580,14 @@ namespace neos::python_runtime
         object* fraction_class_function(char const* aName);  // (fractions.cpp: Fraction.from_float etc.)
         object* decimal_class_function(char const* aName);   // (decimal.cpp: Decimal.from_float)
         object* datetime_class_function(std::string const& aClass, char const* aName);    // (datetime.cpp: e.g. datetime.max, date.today)
+        // (time.strptime's struct_time fields (datetime.cpp: the parsing of _strptime's _strptime, as datetime.strptime's))
+        struct strptime_time
+        {
+            int year, month, day, hour, minute, second, weekday, julian, isdst;
+            std::optional<std::string> zone;
+            std::optional<long long> gmtoff;
+        };
+        bool strptime_time_fields(std::string const& aText, std::string const& aFormat, strptime_time& aResult);
         // (big integers (objects.cpp))
         object* make_int(big_integer aValue);
         object* digits_int(std::string_view aDigits, unsigned aBase, bool aNegative);  // (its digits valid (base 2 to 36), without a sign)

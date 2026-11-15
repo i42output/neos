@@ -338,7 +338,7 @@ namespace neos::compilers::python
                 // (nothing to rewrite: no nested functions, decorators or lambdas that need closures)
                 bool needed = !iStripped.empty();
                 for (auto const& s : iScopes)
-                    if (s->kind == scope::Function ? (s->parent != &iModule || !s->decorators.empty() || s->generator || s->classBody || conditional(*s)) : (!s->frees.empty() || has_defaults(*s) || s->generator))
+                    if (s->kind == scope::Function ? (s->parent != &iModule || !s->decorators.empty() || s->generator || s->classBody || conditional(*s)) : (!s->frees.empty() || has_defaults(*s) || s->generator || !s->globals.empty()))
                         needed = true;
                 if (!needed)
                     return iText;
@@ -1073,10 +1073,25 @@ namespace neos::compilers::python
                 {
                     if (tokens[t].kind == token::Name && t + 1u < n && is_op(aLine, t + 1u, ":="))
                     {
-                        // (in a comprehension, the function's)
+                        // (in a comprehension, the function's; in a generator expression (a lambda of _qit: see statements.cpp), the 
+                        // scope's that contains it (PEP 572): a cell of a function's, a global of the module's)
                         iBinding[aLine][t] = true;
                         iSkip[aLine][t] = true;
-                        iOwners[aLine][t]->bound.insert(std::string{ text(aLine, t) });
+                        std::string const name{ text(aLine, t) };
+                        auto* owner = iOwners[aLine][t];
+                        std::vector<scope*> comprehensions;
+                        while (owner->kind == scope::Lambda && owner->parent != nullptr && owner->parameters.size() == 1u && 
+                            owner->parameters[0].name == "_qit" && !owner->local(name))
+                        {
+                            comprehensions.push_back(owner);
+                            owner = owner->parent;
+                        }
+                        owner->bound.insert(name);
+                        if (owner == &iModule || owner->globals.contains(name))
+                            for (auto* c : comprehensions)
+                                c->globals.insert(name);
+                        else if (!comprehensions.empty())
+                            comprehensions.front()->referenced.insert(name);
                     }
                 }
                 {
@@ -1970,11 +1985,14 @@ namespace neos::compilers::python
                                     if (!cells.empty())
                                         iClosers.emplace_back(std::make_pair(l, i.end), cells);
                                 }
-                        // (a walrus whose target is a cell's name: "(setattr(_k_x, 'v', value) or _k_x.v)" (a walrus cannot bind _k_x.v))
-                        if (k.kind == token::Name && t + 1u < line.tokens.size() && is_op(l, t + 1u, ":=") && owner->kind != scope::Module &&
-                            (owner->cells.contains(std::string{ text(k) }) || owner->frees.contains(std::string{ text(k) })))
+                        // (a walrus whose target is a cell's name: "(setattr(_k_x, 'v', value) or _k_x.v)" (a walrus cannot bind _k_x.v); 
+                        // a module's name (in a generator expression of the module's, see analyze_line): "(globals().__setitem__('x', value) or x)")
+                        bool const globalWalrus = k.kind == token::Name && t + 1u < line.tokens.size() && is_op(l, t + 1u, ":=") && 
+                            owner->kind == scope::Lambda && owner->globals.contains(std::string{ text(k) });
+                        if (globalWalrus || (k.kind == token::Name && t + 1u < line.tokens.size() && is_op(l, t + 1u, ":=") && owner->kind != scope::Module &&
+                            (owner->cells.contains(std::string{ text(k) }) || owner->frees.contains(std::string{ text(k) }))))
                         {
-                            auto const name = cell(std::string{ text(k) });
+                            auto const name = globalWalrus ? std::string{ text(k) } : cell(std::string{ text(k) });
                             auto end = t + 2u;
                             int depth = 0;
                             for (; end < line.tokens.size(); ++end)
@@ -1997,9 +2015,9 @@ namespace neos::compilers::python
                                     break;
                             }
                             emit(k.begin);
-                            result += "(setattr(" + name + ", 'v', ";
+                            result += globalWalrus ? "(globals().__setitem__('" + name + "', " : "(setattr(" + name + ", 'v', ";
                             position = tok(l, t + 1u).end;
-                            iClosers.emplace_back(std::make_pair(l, end), ") or " + name + ".v)");
+                            iClosers.emplace_back(std::make_pair(l, end), ") or " + name + (globalWalrus ? ")" : ".v)"));
                             ++t;
                             continue;
                         }

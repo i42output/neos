@@ -3979,6 +3979,7 @@ namespace neos::python_runtime
 
         long long dict_find(dict_object& aDict, object* aKey, long long aHash)
         {
+            // (a key's __eq__ can change the dict (CPython's lookdict: the lookup restarts if its keys changed): 2: restart)
             auto const matches = [&](std::size_t aPosition) -> int
             {
                 auto const key = aDict.items[aPosition].first;
@@ -3986,23 +3987,58 @@ namespace neos::python_runtime
                     return 1;
                 if (aDict.hashes[aPosition] != aHash)
                     return 0;
+                auto const items = aDict.items.data();
+                auto const count = aDict.items.size();
+                auto const index = aDict.index.data();
+                auto const indexSize = aDict.index.size();
                 ref const k = ref::borrowed(key);
-                return equal(key, aKey);
+                auto const result = equal(key, aKey);
+                if (result < 0)
+                    return result;
+                if (aDict.items.data() != items || aDict.items.size() != count || aDict.index.data() != index || aDict.index.size() != indexSize ||
+                    aDict.items[aPosition].first != key)
+                    return 2;
+                return result;
             };
-            if (aDict.items.size() < kDictIndexMinimum)
+            for (;;)
             {
-                for (std::size_t i = 0u; i < aDict.items.size(); ++i)
-                    if (auto const m = matches(i); m != 0)
-                        return m < 0 ? -2 : static_cast<long long>(i);
+                bool restart = false;
+                if (aDict.items.size() < kDictIndexMinimum)
+                {
+                    for (std::size_t i = 0u; i < aDict.items.size(); ++i)
+                    {
+                        auto const m = matches(i);
+                        if (m == 2)
+                        {
+                            restart = true;
+                            break;
+                        }
+                        if (m != 0)
+                            return m < 0 ? -2 : static_cast<long long>(i);
+                    }
+                    if (restart)
+                        continue;
+                    return -1;
+                }
+                if (aDict.index.empty())
+                    dict_reindex(aDict);
+                auto const mask = aDict.index.size() - 1u;
+                for (auto i = static_cast<std::size_t>(aHash) & mask; aDict.index[i] != -1; i = (i + 1u) & mask)
+                {
+                    auto const position = aDict.index[i];
+                    auto const m = matches(static_cast<std::size_t>(position));
+                    if (m == 2)
+                    {
+                        restart = true;
+                        break;
+                    }
+                    if (m != 0)
+                        return m < 0 ? -2 : position;
+                }
+                if (restart)
+                    continue;
                 return -1;
             }
-            if (aDict.index.empty())
-                dict_reindex(aDict);
-            auto const mask = aDict.index.size() - 1u;
-            for (auto i = static_cast<std::size_t>(aHash) & mask; aDict.index[i] != -1; i = (i + 1u) & mask)
-                if (auto const m = matches(static_cast<std::size_t>(aDict.index[i])); m != 0)
-                    return m < 0 ? -2 : aDict.index[i];
-            return -1;
         }
 
         long long dict_find(object* aDict, object* aKey)
@@ -17709,6 +17745,11 @@ namespace neos::python_runtime
             if (auto const existing = sFunctions.find(key); existing != sFunctions.end())
                 return new_reference(existing->second);
             auto const result = class_function_of(aClass, aName);
+            // (the builtin types' class and static methods (e.g. dict.fromkeys, int.from_bytes, str.maketrans): not methods of a class whose 
+            // attribute they are (CPython's are builtin methods of their types, or builtin functions: not descriptors))
+            static std::set<std::string_view> const sNotMethods = { "maketrans", "fromhex", "fromkeys", "from_bytes" };
+            if (result != nullptr && kind_of(result) == NEOS_PY_FUNCTION && as<function_object>(result)->self == nullptr && sNotMethods.contains(aName))
+                as<function_object>(result)->binds = false;
             if (result != nullptr)
                 sFunctions.emplace(std::move(key), new_reference(result));
             return result;

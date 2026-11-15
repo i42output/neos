@@ -42,7 +42,9 @@
 
 #include <neolib/neolib.hpp>
 #include <algorithm>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -596,8 +598,20 @@ namespace neos::compilers::python
                 std::size_t lastLine; 
                 bool yields = false;                                        ///< (a function's: it is a generator)
                 std::optional<std::pair<std::size_t, std::size_t>> returned;  ///< (an async function's first return with a value: its span)
+                // (a function's or class's (or the module's) names (the symbol table's): its parameters, the names that its statements bind
+                // and use, and its global and nonlocal declarations (their statements' spans))
+                std::vector<std::string> parameters;
+                std::set<std::string, std::less<>> assigned;
+                std::set<std::string, std::less<>> used;
+                std::map<std::string, std::pair<std::size_t, std::size_t>, std::less<>> globals;
+                std::map<std::string, std::pair<std::size_t, std::size_t>, std::less<>> nonlocals;
             };
             std::vector<block> blocks;
+            block moduleNames{ 0u, Other, 0u };
+            bool futureAllowed = true;      // (from __future__ imports: only at the beginning of the module (after its docstring))
+            bool docstringAllowed = true;
+            std::map<std::size_t, std::optional<std::pair<std::size_t, std::size_t>>> bareExcepts;  // (by indentation: a try's except clause without a type)
+            std::vector<std::string> headerParameters;  // (the parameters of the def whose header is being checked)
             auto const add = [&](syntax_issue::stage_t aStage, std::string aMessage, std::size_t aBegin, std::size_t aEnd)
             {
                 aIssues.push_back(make_issue(aSource, aStage, std::move(aMessage), aBegin, aEnd));
@@ -667,6 +681,15 @@ namespace neos::compilers::python
                 std::vector<std::string_view> names;
                 auto const d = depths(aSource, aTokens);
                 bool expectName = true;
+                std::optional<std::size_t> bareStar;    // (a * without a name: names must follow it (the parser's))
+                bool reported = false;
+                auto const bare_star = [&]()
+                {
+                    if (bareStar && !reported)
+                        aIssues.push_back(make_issue(aSource, syntax_issue::Parser, "named arguments must follow bare *", aTokens[*bareStar].begin, aTokens[*bareStar].end));
+                    reported = reported || bareStar.has_value();
+                    bareStar.reset();
+                };
                 for (std::size_t i = aOpen + 1u; i < aClose; ++i)
                 {
                     if (d[i] != d[aOpen + 1u])
@@ -677,11 +700,21 @@ namespace neos::compilers::python
                         expectName = true;
                         continue;
                     }
+                    if (is_op(aSource, t, "*") && (i + 1u == aClose || is_op(aSource, aTokens[i + 1u], ",")))
+                    {
+                        bareStar = i;
+                        continue;
+                    }
+                    if (is_op(aSource, t, "**"))
+                        bare_star();
                     if (is_op(aSource, t, "*") || is_op(aSource, t, "**") || is_op(aSource, t, "/"))
                         continue;
                     if (expectName && t.kind == token::Name)
+                        bareStar.reset();
+                    if (expectName && t.kind == token::Name)
                     {
                         auto const name = text_of(aSource, t);
+                        headerParameters.emplace_back(name);
                         if (std::find(names.begin(), names.end(), name) != names.end())
                         {
                             auto issue = make_issue(aSource, syntax_issue::Symtable, "duplicate argument '" + std::string{ name } + "' in function definition",
@@ -692,6 +725,7 @@ namespace neos::compilers::python
                     }
                     expectName = false;
                 }
+                bare_star();
             };
             std::vector<statement> statements;
             for (std::size_t l = 0u; l < lines.size(); ++l)
@@ -705,6 +739,7 @@ namespace neos::compilers::python
                 // (the statements: a compound statement's header (to its colon), then simple statements separated by ';')
                 std::size_t start = 0u;
                 std::optional<kind_t> opened;
+                headerParameters.clear();
                 bool const async = is_name(aSource, t[0], "async") && t.size() > 1u;
                 auto const& head = async ? t[1] : t[0];
                 for (auto k : { "if", "elif", "else", "while", "for", "with", "try", "except", "finally", "def", "class" })
@@ -738,7 +773,10 @@ namespace neos::compilers::python
                             for (std::size_t i = 0u; i < colon; ++i)
                                 if (is_op(aSource, t[i], "("))
                                 {
+                                {
+                                    headerParameters.clear();
                                     parameters(t, i, matching(aSource, t, i));
+                                }
                                     break;
                                 }
                         start = colon + 1u;
@@ -746,6 +784,8 @@ namespace neos::compilers::python
                         {
                             // (a body on the header's line: within the block)
                             blocks.push_back({ line.indent + 1u, *opened, l });
+                            if (*opened == Function || *opened == AsyncFunction)
+                                blocks.back().parameters = headerParameters;
                         }
                         break;
                     }
@@ -758,6 +798,673 @@ namespace neos::compilers::python
                     }
                 if (start < t.size())
                     statements.push_back({ start, t.size() });
+                // (assignment expressions (name := value), comprehensions and calls' arguments: the parser's errors and the symbol table's 
+                // (as CPython's invalid_named_expression, invalid_comprehension, invalid_arguments and symtable_handle_namedexpr))
+                {
+                    auto const n = t.size();
+                    // (the colon of the parameters of the lambda at aLambda)
+                    auto const lambda_colon = [&](std::size_t aLambda) -> std::size_t
+                    {
+                        int lambdas = 0;
+                        for (auto j = aLambda + 1u; j < n; ++j)
+                        {
+                            if (d[j] < d[aLambda])
+                                break;
+                            if (d[j] != d[aLambda])
+                                continue;
+                            if (is_name(aSource, t[j], "lambda"))
+                                ++lambdas;
+                            else if (is_op(aSource, t[j], ":"))
+                            {
+                                if (lambdas == 0)
+                                    return j;
+                                --lambdas;
+                            }
+                        }
+                        return n;
+                    };
+                    // (the body of the lambda at aLambda contains the token at aAt)
+                    auto const lambda_contains = [&](std::size_t aLambda, std::size_t aAt)
+                    {
+                        auto const colon = lambda_colon(aLambda);
+                        if (colon >= aAt)
+                            return false;
+                        for (auto j = colon + 1u; j < aAt; ++j)
+                            if (d[j] < d[aLambda] || (d[j] == d[aLambda] && (is_op(aSource, t[j], ",") || is_op(aSource, t[j], ";") || is_name(aSource, t[j], "for"))))
+                                return false;
+                        return true;
+                    };
+                    // (the items of brackets [aOpen, aClose]: separated by commas at their level (not a lambda's parameters'), up to aEnd)
+                    auto const items = [&](std::size_t aOpen, std::size_t aEnd)
+                    {
+                        std::vector<std::pair<std::size_t, std::size_t>> result;
+                        auto const level = d[aOpen] + 1;
+                        auto begin = aOpen + 1u;
+                        bool targets = false;   // (a comprehension's for clause's targets (for a, b in ...): its commas)
+                        for (auto j = aOpen + 1u; j <= aEnd; ++j)
+                        {
+                            if (j < aEnd && d[j] == level && is_name(aSource, t[j], "lambda"))
+                            {
+                                j = std::min(lambda_colon(j), aEnd - 1u);
+                                continue;
+                            }
+                            if (j < aEnd && d[j] == level && (is_name(aSource, t[j], "for") || is_name(aSource, t[j], "in")))
+                                targets = is_name(aSource, t[j], "for");
+                            if (j < aEnd && targets)
+                                continue;
+                            if (j == aEnd || (d[j] == level && is_op(aSource, t[j], ",")))
+                            {
+                                if (begin < j)
+                                    result.emplace_back(begin, j);
+                                begin = j + 1u;
+                            }
+                        }
+                        return result;
+                    };
+                    // (a comprehension's for and if clauses (within brackets [aOpen, aClose]): none if they are not a comprehension's)
+                    struct clause { std::size_t begin; bool isFor; std::size_t in; std::size_t end; };
+                    auto const clauses_of = [&](std::size_t aOpen, std::size_t aClose)
+                    {
+                        std::vector<clause> result;
+                        auto const level = d[aOpen] + 1;
+                        for (auto j = aOpen + 1u; j < aClose; ++j)
+                        {
+                            if (d[j] != level || t[j].kind != token::Name)
+                                continue;
+                            if (is_name(aSource, t[j], "for"))
+                                result.push_back({ j, true, aClose, aClose });
+                            else if (is_name(aSource, t[j], "if") && !result.empty())
+                                result.push_back({ j, false, aClose, aClose });
+                            else if (is_name(aSource, t[j], "in") && !result.empty() && result.back().isFor && result.back().in == aClose)
+                                result.back().in = j;
+                        }
+                        for (std::size_t k = 0u; k + 1u < result.size(); ++k)
+                            result[k].end = result[k + 1u].begin > 0u && is_name(aSource, t[result[k + 1u].begin - 1u], "async") ? result[k + 1u].begin - 1u : result[k + 1u].begin;
+                        return result;
+                    };
+                    // (the names that a for clause's targets bind (not those in attributes, subscripts or calls))
+                    auto const iteration_names = [&](clause const& aClause)
+                    {
+                        std::vector<std::pair<std::string_view, std::size_t>> names;   // (and their tokens)
+                        std::vector<bool> plain;
+                        for (auto j = aClause.begin + 1u; j < aClause.in; ++j)
+                        {
+                            if (opening(aSource, t[j]))
+                            {
+                                bool const applied = j > aClause.begin + 1u && ends_expression(aSource, t[j - 1u]);
+                                plain.push_back(!applied && (plain.empty() || plain.back()));
+                                continue;
+                            }
+                            if (closing(aSource, t[j]))
+                            {
+                                if (!plain.empty())
+                                    plain.pop_back();
+                                continue;
+                            }
+                            if (t[j].kind != token::Name || keyword(aSource, t[j]) || (!plain.empty() && !plain.back()) || is_op(aSource, t[j - 1u], "."))
+                                continue;
+                            if (j + 1u < aClause.in && (is_op(aSource, t[j + 1u], ".") || is_op(aSource, t[j + 1u], "(") || is_op(aSource, t[j + 1u], "[")))
+                                continue;
+                            names.emplace_back(text_of(aSource, t[j]), j);
+                        }
+                        return names;
+                    };
+                    auto const applied = [&](std::size_t aOpen)
+                    {
+                        return aOpen > 0u && ends_expression(aSource, t[aOpen - 1u]);
+                    };
+                    // (a def's parameters: their brackets)
+                    std::optional<std::pair<std::size_t, std::size_t>> defParameters;
+                    {
+                        auto const h = async ? 1u : 0u;
+                        if (h + 2u < n && is_name(aSource, t[h], "def") && is_op(aSource, t[h + 2u], "("))
+                            defParameters = std::make_pair(h + 2u, matching(aSource, t, h + 2u));
+                    }
+                    for (std::size_t o = 0u; o < n; ++o)
+                    {
+                        if (!opening(aSource, t[o]))
+                            continue;
+                        auto const c = matching(aSource, t, o);
+                        if (c >= n)
+                            continue;
+                        if (is_op(aSource, t[o], "(") && applied(o) && !(defParameters && defParameters->first == o))
+                        {
+                            // (a call's arguments: positional ones after keyword ones)
+                            bool keywordSeen = false, unpackingSeen = false;
+                            auto const arguments = items(o, c);
+                            if (arguments.size() > 1u)
+                            {
+                                bool generator = false;
+                                for (auto const& [b, e] : arguments)
+                                    for (auto j = b; j < e && !generator; ++j)
+                                        if (d[j] == d[o] + 1 && is_name(aSource, t[j], "for"))
+                                        {
+                                            add(syntax_issue::Parser, "Generator expression must be parenthesized", t[b].begin, t[e - 1u].end);
+                                            generator = true;
+                                        }
+                                if (generator)
+                                    continue;
+                            }
+                            for (auto const& [b, e] : arguments)
+                            {
+                                if (is_op(aSource, t[b], "**"))
+                                    unpackingSeen = true;
+                                else if (is_op(aSource, t[b], "*"))
+                                {
+                                    if (unpackingSeen)
+                                    {
+                                        add(syntax_issue::Parser, "iterable argument unpacking follows keyword argument unpacking", t[b].begin, t[e - 1u].end);
+                                        break;
+                                    }
+                                }
+                                else if (t[b].kind == token::Name && b + 1u < e && is_op(aSource, t[b + 1u], "="))
+                                    keywordSeen = true;
+                                else if (unpackingSeen || keywordSeen)
+                                {
+                                    add(syntax_issue::Parser, unpackingSeen ? "positional argument follows keyword argument unpacking" : 
+                                        "positional argument follows keyword argument", t[b].begin, t[e - 1u].end);
+                                    break;
+                                }
+                            }
+                        }
+                        else if ((is_op(aSource, t[o], "[") && !applied(o)) || is_op(aSource, t[o], "{"))
+                        {
+                            // (a comprehension of several elements without parentheses: [x, y for x, y in z])
+                            auto const clauses = clauses_of(o, c);
+                            if (!clauses.empty())
+                            {
+                                bool colon = false;
+                                for (auto j = o + 1u; j < clauses.front().begin; ++j)
+                                    if (d[j] == d[o] + 1 && is_op(aSource, t[j], ":"))
+                                        colon = true;
+                                auto const elements = items(o, clauses.front().begin);
+                                if (!colon && elements.size() > 1u)
+                                    add(syntax_issue::Parser, "did you forget parentheses around the comprehension target?", t[elements.front().first].begin,
+                                        t[elements.back().second - 1u].end);
+                            }
+                        }
+                    }
+                    // (async and await: keywords (the parser's: as names, or an await of what is not a primary); an asynchronous comprehension 
+                    // (not a generator expression), an async for or with statement, or an await in a def's parameters' defaults or annotations 
+                    // (evaluated in the enclosing scope) outside an async function (the compiler's))
+                    {
+                        // (the scope that encloses the line's header (its inline body's block is not)
+                        block const* outer = nullptr;
+                        {
+                            bool const inline_ = opened && start < n && !blocks.empty() && blocks.back().lastLine == l && blocks.back().indent == line.indent + 1u;
+                            for (auto b = blocks.rbegin(); b != blocks.rend(); ++b)
+                                if ((!inline_ || b != blocks.rbegin()) && (b->kind == Function || b->kind == AsyncFunction || b->kind == Class))
+                                {
+                                    outer = &*b;
+                                    break;
+                                }
+                        }
+                        auto const* const inner = scope();
+                        bool keywordIssue = false;
+                        for (std::size_t i = 0u; i < n && !keywordIssue; ++i)
+                        {
+                            if (is_name(aSource, t[i], "async"))
+                            {
+                                if (i + 1u >= n || !(is_name(aSource, t[i + 1u], "def") || is_name(aSource, t[i + 1u], "for") || is_name(aSource, t[i + 1u], "with")))
+                                {
+                                    add(syntax_issue::Parser, "invalid syntax", t[i].begin, t[i].end);
+                                    keywordIssue = true;
+                                }
+                            }
+                            else if (is_name(aSource, t[i], "await"))
+                            {
+                                bool const primary = i + 1u < n && (starts_expression(aSource, t[i + 1u]) || is_op(aSource, t[i + 1u], "..."));
+                                if (!primary || (i > 0u && (is_name(aSource, t[i - 1u], "def") || is_name(aSource, t[i - 1u], "class") || is_op(aSource, t[i - 1u], "."))))
+                                {
+                                    auto const& at = i + 1u < n && i > 0u && !is_name(aSource, t[i - 1u], "def") && !is_name(aSource, t[i - 1u], "class") ? t[i + 1u] : t[i];
+                                    add(syntax_issue::Parser, "invalid syntax", at.begin, at.end);
+                                    keywordIssue = true;
+                                }
+                            }
+                        }
+                        if (!keywordIssue)
+                        {
+                            // (an async for or with statement)
+                            for (auto const& st : statements)
+                                if (st.begin + 1u < st.end && is_name(aSource, t[st.begin], "async") && 
+                                    (is_name(aSource, t[st.begin + 1u], "for") || is_name(aSource, t[st.begin + 1u], "with")) && st.begin != 0u)
+                                    if (inner == nullptr || inner->kind != AsyncFunction)
+                                        add(syntax_issue::Compiler, "'async " + std::string{ text_of(aSource, t[st.begin + 1u]) } + "' outside async function", 
+                                            t[st.begin].begin, t[st.end - 1u].end);
+                            if (async && n > 1u && (is_name(aSource, t[1], "for") || is_name(aSource, t[1], "with")) && (outer == nullptr || outer->kind != AsyncFunction))
+                                add(syntax_issue::Compiler, "'async " + std::string{ text_of(aSource, t[1]) } + "' outside async function", t[0].begin, t[n - 1u].end);
+                            // (an await in a def's parameters)
+                            if (defParameters)
+                                for (auto i = defParameters->first + 1u; i < defParameters->second; ++i)
+                                    if (is_name(aSource, t[i], "await") && (outer == nullptr || outer->kind != AsyncFunction))
+                                    {
+                                        bool inLambda = false;
+                                        for (auto j = defParameters->first + 1u; j < i && !inLambda; ++j)
+                                            if (is_name(aSource, t[j], "lambda") && lambda_contains(j, i))
+                                                inLambda = true;
+                                        if (inLambda)
+                                            continue;
+                                        auto e = i + 1u;
+                                        while (e < defParameters->second && !(d[e] == d[i] && (is_op(aSource, t[e], ",") || is_op(aSource, t[e], "="))) && d[e] >= d[i])
+                                            ++e;
+                                        add(syntax_issue::Compiler, outer == nullptr || outer->kind == Class ? "'await' outside function" : "'await' outside async function", 
+                                            t[i].begin, t[e - 1u].end);
+                                        break;
+                                    }
+                            // (an asynchronous comprehension: in an async function's body (not a lambda's), or a generator expression)
+                            for (std::size_t i = 1u; i < n; ++i)
+                            {
+                                if (!is_name(aSource, t[i], "for") || !is_name(aSource, t[i - 1u], "async") || d[i] == 0)
+                                    continue;
+                                // (its brackets)
+                                std::size_t o = i;
+                                while (o-- > 0u && !(opening(aSource, t[o]) && d[o] == d[i] - 1))
+                                    ;
+                                if (o >= n || is_op(aSource, t[o], "("))
+                                    continue;
+                                bool inLambda = false;
+                                for (std::size_t j = 0u; j < o && !inLambda; ++j)
+                                    if (is_name(aSource, t[j], "lambda") && lambda_contains(j, o))
+                                        inLambda = true;
+                                bool inParameters = defParameters && o > defParameters->first && o < defParameters->second;
+                                auto const* const s = inParameters ? outer : inner;
+                                if (inLambda || s == nullptr || s->kind != AsyncFunction)
+                                {
+                                    auto const c = matching(aSource, t, o);
+                                    add(syntax_issue::Compiler, "asynchronous comprehension outside of an asynchronous function", t[o].begin, t[std::min(c, n - 1u)].end);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    for (std::size_t i = 1u; i < n; ++i)
+                    {
+                        if (!is_op(aSource, t[i], ":="))
+                            continue;
+                        auto const& target = t[i - 1u];
+                        // (the parser's: a target that is not a name)
+                        std::string kind;
+                        std::size_t targetBegin = i - 1u;
+                        if (target.kind == token::Number || target.kind == token::String)
+                            kind = "literal";
+                        else if (is_name(aSource, target, "None") || is_name(aSource, target, "True") || is_name(aSource, target, "False"))
+                            kind = std::string{ text_of(aSource, target) };
+                        else if (target.kind == token::Name && i >= 2u && is_op(aSource, t[i - 2u], "."))
+                        {
+                            kind = "attribute";
+                            targetBegin = primary_start(aSource, t, i - 1u);
+                        }
+                        else if (is_op(aSource, target, ")") || is_op(aSource, target, "]"))
+                        {
+                            auto const open = matching(aSource, t, i - 1u);
+                            if (open < n)
+                            {
+                                targetBegin = applied(open) ? primary_start(aSource, t, i - 1u) : open;
+                                if (applied(open))
+                                    kind = is_op(aSource, target, ")") ? "function call" : "subscript";
+                                else if (is_op(aSource, target, "]"))
+                                    kind = "list";
+                                else
+                                {
+                                    bool comma = open + 1u == i - 1u;
+                                    for (auto j = open + 1u; j + 1u < i; ++j)
+                                        if (d[j] == d[open] + 1 && is_op(aSource, t[j], ","))
+                                            comma = true;
+                                    if (comma)
+                                        kind = "tuple";
+                                }
+                            }
+                        }
+                        if (!kind.empty())
+                        {
+                            add(syntax_issue::Parser, "cannot use assignment expressions with " + kind, t[targetBegin].begin, target.end);
+                            continue;
+                        }
+                        if (target.kind != token::Name || keyword(aSource, target))
+                            continue;
+                        // (the parser's: the body of a lambda ("lambda: x := 1": the lambda is the target), a keyword argument's or a default 
+                        // value's (f(a=b := 1)), a def's parameter's)
+                        {
+                            std::optional<std::size_t> lambda;
+                            for (auto j = i - 1u; j-- > 0u;)
+                                if (d[j] == d[i] && is_name(aSource, t[j], "lambda") && lambda_contains(j, i - 1u) && lambda_colon(j) + 2u == i)
+                                {
+                                    lambda = j;
+                                    break;
+                                }
+                            if (lambda)
+                            {
+                                if (*lambda > 0u && is_op(aSource, t[*lambda - 1u], ":="))
+                                    add(syntax_issue::Parser, "invalid syntax", t[i].begin, t[i].end);
+                                else
+                                    add(syntax_issue::Parser, "cannot use assignment expressions with lambda", t[*lambda].begin, target.end);
+                                continue;
+                            }
+                            if ((i >= 2u && d[i - 2u] == d[i] && d[i] > 0 && is_op(aSource, t[i - 2u], "=")) ||
+                                (defParameters && i > defParameters->first && i < defParameters->second && d[i] == d[defParameters->first] + 1))
+                            {
+                                add(syntax_issue::Parser, "invalid syntax", t[i].begin, t[i].end);
+                                continue;
+                            }
+                        }
+                        // (the symbol table's: within comprehensions, innermost first)
+                        auto const name = text_of(aSource, target);
+                        bool function = false;          // (a lambda contains it: the comprehensions beyond it are not its scope's)
+                        bool comprehension = false;     // (a comprehension's, its scope's)
+                        bool reported = false;
+                        // (within any comprehension's iterable, a nested comprehension's or lambda's included: an error first)
+                        {
+                            auto level = d[i];
+                            for (std::size_t j = i - 1u; j-- > 0u && level > 0 && !reported;)
+                            {
+                                if (!opening(aSource, t[j]) || d[j] != level - 1)
+                                    continue;
+                                level = d[j];
+                                auto const c = matching(aSource, t, j);
+                                if (c >= n || c < i)
+                                    continue;
+                                for (auto const& k : clauses_of(j, c))
+                                    if (k.isFor && k.in < i && i < k.end)
+                                    {
+                                        // (unparenthesized: the parser's (an iterable is a disjunction))
+                                        if (d[i] == d[j] + 1)
+                                            add(syntax_issue::Parser, "invalid syntax", t[i].begin, t[i].end);
+                                        else
+                                            add(syntax_issue::Symtable, "assignment expression cannot be used in a comprehension iterable expression", target.begin, t[i].end);
+                                        reported = true;
+                                        break;
+                                    }
+                            }
+                        }
+                        auto level = d[i];
+                        for (std::size_t j = i - 1u; j-- > 0u && level > 0 && !reported;)
+                        {
+                            if (d[j] == level && is_name(aSource, t[j], "lambda") && lambda_contains(j, i))
+                                function = true;
+                            if (!opening(aSource, t[j]) || d[j] != level - 1)
+                                continue;
+                            level = d[j];
+                            auto const c = matching(aSource, t, j);
+                            if (c >= n || c < i)
+                                continue;
+                            auto const clauses = clauses_of(j, c);
+                            if (clauses.empty())
+                                continue;
+                            // (where it is: the element (before the clauses), or a clause)
+                            std::optional<std::size_t> in;
+                            for (std::size_t k = 0u; k < clauses.size(); ++k)
+                                if (clauses[k].begin < i && i < clauses[k].end)
+                                    in = k;
+                            if (in && clauses[*in].isFor && i > clauses[*in].in)
+                            {
+                                add(syntax_issue::Symtable, "assignment expression cannot be used in a comprehension iterable expression", target.begin, t[i].end);
+                                reported = true;
+                                break;
+                            }
+                            if (function)
+                                continue;
+                            comprehension = true;
+                            for (std::size_t k = 0u; k < clauses.size() && !reported; ++k)
+                            {
+                                if (!clauses[k].isFor)
+                                    continue;
+                                auto const names = iteration_names(clauses[k]);
+                                auto const found = std::find_if(names.begin(), names.end(), [&](auto const& aName) { return aName.first == name; });
+                                if (found == names.end())
+                                    continue;
+                                // (an inner loop's target: its location)
+                                if (!in || k < *in)
+                                    add(syntax_issue::Symtable, "assignment expression cannot rebind comprehension iteration variable '" + std::string{ name } + "'", target.begin, t[i].end);
+                                else
+                                    add(syntax_issue::Symtable, "comprehension inner loop cannot rebind assignment expression target '" + std::string{ name } + "'", 
+                                        t[found->second].begin, t[found->second].end);
+                                reported = true;
+                            }
+                        }
+                        if (!reported && comprehension && !function)
+                            if (auto const* const enclosing = scope(); enclosing != nullptr && enclosing->kind == Class)
+                                add(syntax_issue::Symtable, "assignment expression within a comprehension cannot be used in a class body", target.begin, t[i].end);
+                    }
+                }
+                // (the symbol table's: the names that a scope's statements bind and use, its global and nonlocal declarations (a name that
+                // is a parameter, or that is bound or used before its declaration, or both global and nonlocal), import * (the module's only); 
+                // the parser's: an except clause without a type before another (or except* without one))
+                {
+                    auto const n = t.size();
+                    // (the tokens of comprehensions and of lambdas: their scopes' names, not the line's)
+                    std::vector<bool> excluded(n, false);
+                    for (std::size_t o = 0u; o < n; ++o)
+                    {
+                        if (opening(aSource, t[o]))
+                        {
+                            auto const c = matching(aSource, t, o);
+                            if (c >= n)
+                                continue;
+                            bool comprehension = false;
+                            for (auto j = o + 1u; j < c && !comprehension; ++j)
+                                comprehension = d[j] == d[o] + 1 && is_name(aSource, t[j], "for");
+                            if (comprehension)
+                                for (auto j = o; j <= c; ++j)
+                                    excluded[j] = true;
+                        }
+                        else if (is_name(aSource, t[o], "lambda"))
+                        {
+                            auto j = o + 1u;
+                            bool body = false;
+                            int lambdas = 0;
+                            for (; j < n; ++j)
+                            {
+                                if (d[j] < d[o])
+                                    break;
+                                if (d[j] != d[o])
+                                    continue;
+                                if (!body)
+                                {
+                                    if (is_name(aSource, t[j], "lambda"))
+                                        ++lambdas;
+                                    else if (is_op(aSource, t[j], ":") && lambdas-- == 0)
+                                        body = true;
+                                    continue;
+                                }
+                                if (is_op(aSource, t[j], ",") || is_op(aSource, t[j], ";") || is_op(aSource, t[j], "=") || is_name(aSource, t[j], "for") || 
+                                    (is_op(aSource, t[j], ":") && j > 0u))
+                                    break;
+                            }
+                            for (auto k = o; k < j; ++k)
+                                excluded[k] = true;
+                        }
+                    }
+                    // (a name that is a plain target (not an attribute's, subscript's or call's object))
+                    auto const plain_target = [&](std::size_t aAt, std::size_t aBegin)
+                    {
+                        if (aAt + 1u < n && (is_op(aSource, t[aAt + 1u], ".") || is_op(aSource, t[aAt + 1u], "(") || is_op(aSource, t[aAt + 1u], "[")))
+                            return false;
+                        // (its brackets: groups, not calls or subscripts)
+                        auto level = d[aAt];
+                        for (auto j = aAt; j-- > aBegin && level > 0;)
+                            if (opening(aSource, t[j]) && d[j] == level - 1)
+                            {
+                                if (j > 0u && ends_expression(aSource, t[j - 1u]) && j > aBegin)
+                                    return false;
+                                level = d[j];
+                            }
+                        return level == d[aBegin];
+                    };
+                    auto const record_names = [&](block& aScope, std::size_t aBegin, std::size_t aEnd, std::optional<std::size_t> aTargetsEnd, std::size_t aTargetsBegin)
+                    {
+                        for (auto i = aBegin; i < aEnd; ++i)
+                        {
+                            if (excluded[i] || t[i].kind != token::Name || keyword(aSource, t[i]) || (i > 0u && is_op(aSource, t[i - 1u], ".")))
+                                continue;
+                            // (a keyword argument's name)
+                            if (d[i] > 0 && i + 1u < n && is_op(aSource, t[i + 1u], "=") && i > 0u && (is_op(aSource, t[i - 1u], "(") || is_op(aSource, t[i - 1u], ",")))
+                                continue;
+                            std::string const name{ text_of(aSource, t[i]) };
+                            bool const target = (aTargetsEnd && i >= aTargetsBegin && i < *aTargetsEnd && plain_target(i, aTargetsBegin)) || 
+                                (i + 1u < n && is_op(aSource, t[i + 1u], ":="));
+                            (target ? aScope.assigned : aScope.used).insert(name);
+                        }
+                    };
+                    static char const* const sAugmented[] = { "+=", "-=", "*=", "/=", "//=", "%=", "**=", ">>=", "<<=", "&=", "|=", "^=", "@=" };
+                    // (the header's scope: not its inline body's block)
+                    block* headerScope = &moduleNames;
+                    {
+                        bool const inline_ = opened && start < n && !blocks.empty() && blocks.back().lastLine == l && blocks.back().indent == line.indent + 1u;
+                        for (auto b = blocks.rbegin(); b != blocks.rend(); ++b)
+                            if ((!inline_ || b != blocks.rbegin()) && (b->kind == Function || b->kind == AsyncFunction || b->kind == Class))
+                            {
+                                headerScope = &*b;
+                                break;
+                            }
+                    }
+                    if (opened && start > 0u)
+                    {
+                        auto const h = async ? 1u : 0u;
+                        auto const headerEnd = start - 1u;   // (its colon)
+                        if (is_name(aSource, t[h], "def") || is_name(aSource, t[h], "class"))
+                        {
+                            if (h + 1u < headerEnd && t[h + 1u].kind == token::Name)
+                                headerScope->assigned.insert(std::string{ text_of(aSource, t[h + 1u]) });
+                        }
+                        else if (is_name(aSource, t[h], "for"))
+                        {
+                            std::size_t in = headerEnd;
+                            for (auto j = h + 1u; j < headerEnd; ++j)
+                                if (d[j] == 0 && is_name(aSource, t[j], "in"))
+                                {
+                                    in = j;
+                                    break;
+                                }
+                            record_names(*headerScope, h + 1u, headerEnd, in, h + 1u);
+                        }
+                        else
+                        {
+                            // (with ... as x, except E as x: x is bound)
+                            for (auto j = h + 1u; j < headerEnd; ++j)
+                            {
+                                if (j > 0u && is_name(aSource, t[j - 1u], "as") && t[j].kind == token::Name && !excluded[j])
+                                    headerScope->assigned.insert(std::string{ text_of(aSource, t[j]) });
+                                else
+                                    record_names(*headerScope, j, j + 1u, std::nullopt, 0u);
+                            }
+                        }
+                        // (except clauses: one without a type is the last)
+                        if (is_name(aSource, t[0], "try"))
+                            bareExcepts[line.indent].reset();
+                        else if (is_name(aSource, t[0], "except"))
+                        {
+                            auto& bare = bareExcepts[line.indent];
+                            if (bare)
+                                add(syntax_issue::Parser, "default 'except:' must be last", bare->first, bare->second);
+                            else if (headerEnd == 1u)
+                                bare = std::make_pair(t[0].begin, t[n - 1u].end);
+                            else if (headerEnd == 2u && is_op(aSource, t[1], "*"))
+                                add(syntax_issue::Parser, "expected one or more exception types", t[2].begin, t[2].end);
+                        }
+                    }
+                    if (!(opened && start > 0u && is_name(aSource, t[0], "except")))
+                        if (auto b = bareExcepts.find(line.indent); b != bareExcepts.end() && !is_name(aSource, t[0], "else") && !is_name(aSource, t[0], "finally"))
+                            bareExcepts.erase(b);
+                    if (opened)
+                        futureAllowed = docstringAllowed = false;
+                    for (auto const& st : statements)
+                    {
+                        if (st.begin >= st.end)
+                            continue;
+                        // (from __future__ import: its features (the compiler's future.c))
+                        if (st.begin + 3u < st.end && is_name(aSource, t[st.begin], "from") && is_name(aSource, t[st.begin + 1u], "__future__") && 
+                            is_name(aSource, t[st.begin + 2u], "import"))
+                        {
+                            if (!futureAllowed || opened || line.indent > 0u)
+                                add(syntax_issue::Symtable, "from __future__ imports must occur at the beginning of the file", t[st.begin].begin, t[st.end - 1u].end);
+                            else
+                            {
+                                static std::set<std::string_view> const sFeatures = { "nested_scopes", "generators", "division", "absolute_import", 
+                                    "with_statement", "print_function", "unicode_literals", "barry_as_FLUFL", "generator_stop", "annotations" };
+                                for (auto j = st.begin + 3u; j < st.end; ++j)
+                                {
+                                    if (t[j].kind != token::Name || (j > 0u && is_name(aSource, t[j - 1u], "as")) || is_name(aSource, t[j], "as"))
+                                        continue;
+                                    auto const feature = text_of(aSource, t[j]);
+                                    if (feature == "braces")
+                                        add(syntax_issue::Symtable, "not a chance", t[j].begin, t[j].end);
+                                    else if (!sFeatures.contains(feature))
+                                        add(syntax_issue::Symtable, "future feature " + std::string{ feature } + " is not defined", t[j].begin, t[j].end);
+                                    else
+                                        continue;
+                                    break;
+                                }
+                            }
+                            docstringAllowed = false;
+                        }
+                        else if (docstringAllowed && st.end == st.begin + 1u && t[st.begin].kind == token::String)
+                            docstringAllowed = false;
+                        else
+                            futureAllowed = docstringAllowed = false;
+                        auto* const statementScope = const_cast<block*>(scope());
+                        auto& names = statementScope != nullptr ? *statementScope : moduleNames;
+                        auto const& f = t[st.begin];
+                        std::pair<std::size_t, std::size_t> const span{ f.begin, t[st.end - 1u].end };
+                        bool const global = is_name(aSource, f, "global");
+                        if (global || is_name(aSource, f, "nonlocal"))
+                        {
+                            std::string const kind = global ? "global" : "nonlocal";
+                            for (auto j = st.begin + 1u; j < st.end; ++j)
+                            {
+                                if (t[j].kind != token::Name)
+                                    continue;
+                                std::string const name{ text_of(aSource, t[j]) };
+                                std::optional<std::string> message;
+                                std::pair<std::size_t, std::size_t> at = span;
+                                if (std::find(names.parameters.begin(), names.parameters.end(), name) != names.parameters.end())
+                                    message = "name '" + name + "' is parameter and " + kind;
+                                else if (names.assigned.contains(name))
+                                    message = "name '" + name + "' is assigned to before " + kind + " declaration";
+                                else if (names.used.contains(name))
+                                    message = "name '" + name + "' is used prior to " + kind + " declaration";
+                                else if (auto const other = global ? names.nonlocals.find(name) : names.globals.find(name); other != (global ? names.nonlocals.end() : names.globals.end()))
+                                {
+                                    message = "name '" + name + "' is nonlocal and global";
+                                    at = other->second;
+                                }
+                                if (message && (global || statementScope != nullptr))
+                                {
+                                    add(syntax_issue::Symtable, *message, at.first, at.second);
+                                    break;
+                                }
+                                (global ? names.globals : names.nonlocals).emplace(name, span);
+                            }
+                            continue;
+                        }
+                        if (is_name(aSource, f, "from") || is_name(aSource, f, "import"))
+                        {
+                            if (is_name(aSource, f, "from") && statementScope != nullptr && is_op(aSource, t[st.end - 1u], "*"))
+                                add(syntax_issue::Symtable, "import * only allowed at module level", t[st.end - 1u].begin, t[st.end - 1u].end);
+                            continue;
+                        }
+                        if (is_name(aSource, f, "del"))
+                            continue;
+                        // (an assignment's targets: before its last '=' (or an augmented assignment's operator); an annotation: not recorded)
+                        std::optional<std::size_t> targetsEnd;
+                        bool annotated = false;
+                        for (auto j = st.begin; j < st.end; ++j)
+                        {
+                            if (d[j] != 0 || excluded[j])
+                                continue;
+                            if (is_op(aSource, t[j], "="))
+                                targetsEnd = j;
+                            else if (std::any_of(std::begin(sAugmented), std::end(sAugmented), [&](char const* aOp) { return is_op(aSource, t[j], aOp); }))
+                            {
+                                targetsEnd = j;
+                                break;
+                            }
+                            else if (is_op(aSource, t[j], ":"))
+                                annotated = true;
+                        }
+                        if (!annotated)
+                            record_names(names, st.begin, st.end, targetsEnd, st.begin);
+                    }
+                }
                 for (auto const& s : statements)
                 {
                     if (s.begin >= s.end)
@@ -906,11 +1613,36 @@ namespace neos::compilers::python
                                         expectName = false;
                                     }
                                 }
+                                // (a * without a name: names must follow it)
+                                std::optional<std::size_t> bareStar;
+                                for (std::size_t p = 1u; p <= params.size(); ++p)
+                                {
+                                    if (p < params.size() && pd[p] != pd[0])
+                                        continue;
+                                    if (p == params.size() || is_op(aSource, params[p], "**"))
+                                    {
+                                        // (at the token that follows it (and its comma), as CPython's invalid_lambda_star_etc)
+                                        if (bareStar)
+                                        {
+                                            auto const after = i + *bareStar + (is_op(aSource, t[i + *bareStar + 1u], ",") ? 2u : 1u);
+                                            add(syntax_issue::Parser, "named arguments must follow bare *", t[after].begin, t[after].end);
+                                        }
+                                        break;
+                                    }
+                                    if (is_op(aSource, params[p], "*") && (p + 1u == params.size() || is_op(aSource, params[p + 1u], ",")))
+                                        bareStar = p;
+                                    else if (params[p].kind == token::Name)
+                                        bareStar.reset();
+                                }
                             }
                         }
                     // (the parser's: x := v as a statement; an assignment to (or del of) what is not a target)
-                    if (s.end - s.begin >= 2u && first.kind == token::Name && is_op(aSource, t[s.begin + 1u], ":="))
-                        add(syntax_issue::Parser, "invalid syntax", t[s.begin + 1u].begin, t[s.begin + 1u].end);
+                    for (std::size_t i = s.begin + 1u; i < s.end && !is_op(aSource, first, "@"); ++i)
+                        if (d[i] == 0 && is_op(aSource, t[i], ":=") && t[i - 1u].kind == token::Name && !keyword(aSource, t[i - 1u]))
+                        {
+                            add(syntax_issue::Parser, "invalid syntax", t[i].begin, t[i].end);
+                            break;
+                        }
                     // (the parser's: an augmented assignment to several targets (a, b += 1): a tuple)
                     {
                         static char const* const sAugmented[] = { "+=", "-=", "*=", "/=", "//=", "%=", "**=", ">>=", "<<=", "&=", "|=", "^=", "@=" };
@@ -979,7 +1711,11 @@ namespace neos::compilers::python
                     finish_block(b);
                 }
                 else if (opened)
+                {
                     blocks.push_back({ line.indent, *opened, l });
+                    if (*opened == Function || *opened == AsyncFunction)
+                        blocks.back().parameters = headerParameters;
+                }
             }
             close_blocks(0u, std::nullopt);
         }

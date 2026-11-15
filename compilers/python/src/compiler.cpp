@@ -8629,7 +8629,17 @@ namespace neos::compilers::python
                 iPySyntax[joined] = std::move(info);
                 return;
             }
-            py_join_lines(aFragment);
+            try
+            {
+                py_join_lines(aFragment);
+            }
+            catch (std::runtime_error const&)
+            {
+                // (a rewrite's error (e.g. a nonlocal without a binding): the source's syntax error that CPython reports, if it has one)
+                iPySyntax[aFragment.source().to_std_string()] = info;
+                parsed(aFragment);
+                throw;
+            }
             iPySyntax[aFragment.source().to_std_string()] = std::move(info);
         }
         else
@@ -8711,6 +8721,14 @@ namespace neos::compilers::python
                 if (!issue)
                     for (auto const& i : info.issues)
                         if ((i.stage == syntax_issue::Symtable || i.stage == syntax_issue::Compiler) && i.position <= position && position <= i.endPosition)
+                        {
+                            issue = i;
+                            break;
+                        }
+                // (one whose statement the grammar parsed (its rewrite did not): the symbol table's or the compiler's error before it)
+                if (!issue)
+                    for (auto const& i : info.issues)
+                        if ((i.stage == syntax_issue::Symtable || i.stage == syntax_issue::Compiler) && i.position <= position)
                         {
                             issue = i;
                             break;
@@ -9747,6 +9765,53 @@ namespace neos::compilers::python
         case construct::ComprehensionStart:
             // (the statement's temporaries that precede the comprehension are not its own)
             state().pyComprehensions.push_back(in_function() && !declaration_pass() ? py_function().pendingObjects.size() : 0u);
+            if (!declaration_pass())
+            {
+                // (its assignment expressions' targets (name := value) are the enclosing scope's variables (PEP 572): defined before its 
+                // element is compiled, which precedes its clauses (e.g. "[(x, y) for x in xs if (y := f(x))]"); not if it has a lambda 
+                // (whose own targets they would be))
+                using namespace tokens;
+                auto const whole = generator().current_fragment().source().to_std_string_view();
+                auto const at = aSource.to_std_string_view().data();
+                if (at >= whole.data() && at < whole.data() + whole.size())
+                {
+                    std::string const rest{ whole.substr(static_cast<std::size_t>(at - whole.data())) };
+                    auto const lines = tokenize(rest);
+                    if (!lines.empty())
+                    {
+                        auto const& t = lines.front().tokens;
+                        auto const word = [&](std::size_t aToken) { return std::string_view{ rest }.substr(t[aToken].begin, t[aToken].end - t[aToken].begin); };
+                        std::vector<std::string> names;
+                        bool lambda = false;
+                        int depth = 0;
+                        for (std::size_t i = 0u; i < t.size(); ++i)
+                        {
+                            if (t[i].kind == token::Op)
+                            {
+                                auto const op = word(i);
+                                if (op == "(" || op == "[" || op == "{")
+                                    ++depth;
+                                else if ((op == ")" || op == "]" || op == "}") && --depth == 0)
+                                    break;
+                                continue;
+                            }
+                            if (t[i].kind != token::Name)
+                                continue;
+                            if (word(i) == "lambda")
+                                lambda = true;
+                            else if (i + 1u < t.size() && t[i + 1u].kind == token::Op && word(i + 1u) == ":=")
+                                names.emplace_back(word(i));
+                        }
+                        if (!lambda)
+                            for (auto const& name : names)
+                            {
+                                auto& variable = py_variable(name, type::Object);
+                                if (variable.type() != type::Object)
+                                    py_kind_change(name);
+                            }
+                    }
+                }
+            }
             break;
         case construct::ComprehensionFor:
         case construct::ComprehensionIf:
