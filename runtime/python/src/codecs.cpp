@@ -55,6 +55,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        object* multibyte_codec_info(std::string const& aModule, std::string const& aName);   // (multibytecodec.cpp: a CJK codec's CodecInfo, or None)
+
         namespace
         {
             namespace ct = codec_tables;
@@ -2133,6 +2135,9 @@ namespace neos::python_runtime
                 std::size_t consumed = 0u;
                 if (!engine_decode(*descriptor_of(aId), data, errors, final, result, consumed))
                     return nullptr;
+                // (final: the input's size (an error handler can have replaced the input: _codecs' decoders' consumed is data->len then))
+                if (final)
+                    consumed = data.size();
                 return result_pair(make_str(std::move(result)), static_cast<long long>(consumed));
             }
 
@@ -2163,6 +2168,8 @@ namespace neos::python_runtime
                 int bo = byteorder < 0 ? -1 : byteorder > 0 ? 1 : 0;
                 if (!engine_decode(*descriptor_of(aId), data, errors, final, result, consumed, &bo))
                     return nullptr;
+                if (final)
+                    consumed = data.size();
                 return make_tuple({ make_str(std::move(result)), make_int(static_cast<long long>(consumed)), make_int(bo) });
             }
 
@@ -2256,9 +2263,18 @@ namespace neos::python_runtime
                     raise_exception(e);
                     return nullptr;
                 }
-                bool const encodeError = exception_is(e, "UnicodeEncodeError");
-                bool const decodeError = exception_is(e, "UnicodeDecodeError");
-                bool const translateError = exception_is(e, "UnicodeTranslateError");
+                // (by its type (PyObject_TypeCheck: not its __class__, which a class can assign))
+                auto const of_type = [&](char const* aClass)
+                {
+                    ref const type{ class_of(e) };
+                    ref const cls{ exception_class(aClass) };
+                    ref const r{ type && cls ? b_issubclass({ type.get(), cls.get() }, nullptr) : nullptr };
+                    clear_error();
+                    return r && truth(r.get()) == 1;
+                };
+                bool const encodeError = of_type("UnicodeEncodeError");
+                bool const decodeError = of_type("UnicodeDecodeError");
+                bool const translateError = of_type("UnicodeTranslateError");
                 if (!encodeError && !decodeError && !translateError)
                     return error("TypeError", std::string{ "don't know how to handle " } + type + " in error callback");
                 long long start = 0, end = 0;
@@ -5089,6 +5105,15 @@ namespace neos::python_runtime
             object* builtin_search(std::string const& aNormalized)
             {
                 auto const entry = find_codec(normalized_encoding(aNormalized));
+                // (a CJK codec: its CodecInfo is multibytecodec.cpp's (None if it is not one))
+                if (entry.id == codec_id::Unsupported && entry.module != nullptr)
+                {
+                    static std::map<std::string, object*> sMultibyteInfos;
+                    auto& info = sMultibyteInfos[entry.module->module];
+                    if (info == nullptr)
+                        info = multibyte_codec_info(entry.module->module, entry.module->name);
+                    return info != nullptr ? new_reference(info) : nullptr;
+                }
                 if (entry.id == codec_id::Unsupported)
                     return new_reference(none());
                 static std::map<std::string, object*> sInfos;

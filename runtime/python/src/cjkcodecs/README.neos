@@ -1,0 +1,20 @@
+CPython's CJK codecs (the neos Python runtime plugin's)
+=======================================================
+
+These files are CPython 3.13.18's Modules/cjkcodecs (written by Hye-Shik Chang),
+Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are
+used under the Python Software Foundation License Version 2 (see
+runtime/python/LICENSE.PSF and runtime/python/NOTICE).
+
+As they are (compiled as C, by CMakeLists.txt's NEOS_PYTHON_CJK_SOURCE_FILES):
+_codecs_cn.c, _codecs_hk.c, _codecs_iso2022.c, _codecs_jp.c, _codecs_kr.c,
+_codecs_tw.c, mappings_cn.h, mappings_hk.h, mappings_jisx0213_pair.h,
+mappings_jp.h, mappings_kr.h, mappings_tw.h, alg_jisx0201.h,
+emu_jisx0213_2000.h and README.
+
+Adapted: cjkcodecs.h and multibytecodec.h (the codecs' interface without
+CPython's objects: a codec module's codecs and mappings are its accessor's,
+neos_cjk_module_<locale>; the encoders read code points and the decoders write
+them to a buffer). The modules' objects (_multibytecodec's MultibyteCodec,
+MultibyteIncrementalEncoder and so on, and the codec modules' getcodec) are
+runtime/python/src/multibytecodec.cpp's.

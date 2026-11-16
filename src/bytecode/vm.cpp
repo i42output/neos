@@ -1992,6 +1992,12 @@ namespace neos
                         }
                         return iErrorGlobal;
                     }
+                    // (an error of the program's that is pending (see error_global): exchanged for aError (zero: none))
+                    value exchange_pending_error(value aError)
+                    {
+                        auto const g = error_global();
+                        return g ? std::exchange(iGlobals[*g], aError) : value{ 0u };
+                    }
                     // (the error that the program did not handle (see error_global): taken)
                     std::optional<std::string> take_error()
                     {
@@ -3183,6 +3189,11 @@ namespace neos
                     tCoroutine = &c;
                     c.resumerActivations = tActivation;
                     tActivation = c.activations;
+                    // (an error of the resumer's program that is pending (e.g. while the program releases objects as it handles it, and a 
+                    // plugin's release of one resumes a coroutine to close it): not the coroutine's (the call that it runs in would report 
+                    // it: see call_from_plugin); it runs without it, and it is pending again when it suspends or finishes)
+                    auto* const resumerProgram = tRunning.program;
+                    value const pendingError = resumerProgram != nullptr ? resumerProgram->exchange_pending_error(0u) : value{ 0u };
                     // (the program running in it is its own: the resumer's is restored when it suspends (or finishes))
                     c.resumerRunning = tRunning;
                     if (c.suspendedRunning)
@@ -3207,6 +3218,8 @@ namespace neos
                     tCoroutine = c.previous;
                     c.suspendedRunning = tRunning;
                     tRunning = c.resumerRunning;
+                    if (pendingError != 0u)
+                        resumerProgram->exchange_pending_error(pendingError);
                     return c.finished ? 1 : 0;
                 }
 

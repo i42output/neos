@@ -30,8 +30,8 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Objects/bytesobject.c, Objects/bytearrayobject.c and
-  Objects/bytes_methods.c), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under
+  Portions of this file are derived from CPython 3.13 (Objects/bytesobject.c, Objects/bytearrayobject.c,
+  Objects/bytes_methods.c, Objects/memoryobject.c and Objects/typeobject.c (the buffer protocol of Python classes, PEP 688)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under
   the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from C to C++ for
   the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
@@ -59,6 +59,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        bool process_exited();      // (objects.cpp: the process is exiting: no code of the program runs)
+
         namespace
         {
             struct bytes_object
@@ -66,6 +68,7 @@ namespace neos::python_runtime
                 header h;
                 std::string data;
                 long long hash = -1;
+                long long exports = 0;      ///< (a bytearray: the views of its buffer (memoryviews): it cannot be resized while it has any)
             };
 
             struct bytes_iterator_object
@@ -88,6 +91,15 @@ namespace neos::python_runtime
             bytes_object& as_bytes(object* aObject) { return *reinterpret_cast<bytes_object*>(aObject); }
             std::string& data_of(object* aObject) { return as_bytes(aObject).data; }
             char const* name_of(object* aObject) { return is_bytearray(aObject) ? "bytearray" : "bytes"; }
+
+            // (a bytearray that is to be resized (to aSize bytes): not while its buffer is exported (as CPython's _canresize: BufferError))
+            bool resizable(object* aSelf, std::size_t aSize)
+            {
+                if (!is_bytearray(aSelf) || as_bytes(aSelf).exports <= 0 || aSize == data_of(aSelf).size())
+                    return true;
+                error("BufferError", "Existing exports of data: object cannot be re-sized");
+                return false;
+            }
 
             // (a result of the same type as aSelf)
             object* same_type(object* aSelf, std::string aData)
@@ -155,6 +167,8 @@ namespace neos::python_runtime
                 return true;
             }
 
+            bool python_buffer_bytes(object* aObject, std::string& aResult);
+
             // (the bytes of bytes(x) and bytearray(x): an int (zeros), a bytes-like object, or an iterable of ints)
             bool bytes_from(object* aSource, std::string& aResult, char const* aName)
             {
@@ -164,6 +178,9 @@ namespace neos::python_runtime
                     aResult = std::string{ data };
                     return true;
                 }
+                // (an object whose class has __buffer__ (PEP 688): its buffer's bytes (then the view is released))
+                if (is_instance(aSource) && has_special_method(aSource, "__buffer__"))
+                    return python_buffer_bytes(aSource, aResult);
                 auto const k = kind_of(aSource);
                 if (k == NEOS_PY_STR)
                 {
@@ -279,6 +296,7 @@ namespace neos::python_runtime
         }
 
         bool memoryview_data(object* aObject, std::string_view& aData);
+        bool is_big(object* aObject);   // (objects.cpp: an int beyond 64 bits)
 
         std::map<neos_rt_object_type const*, buffer_provider>& buffer_providers()
         {
@@ -300,6 +318,9 @@ namespace neos::python_runtime
             // (the buffer of an exporter: bytes, bytearray or a provider's object)
             bool exporter_buffer(object* aObject, buffer_info& aResult)
             {
+                // (an instance of a subclass of bytes, bytearray or a provider's type (e.g. array.array): its value's)
+                if (auto const value = builtin_value(aObject); value != aObject)
+                    return exporter_buffer(value, aResult);
                 if (is_bytes(aObject) || is_bytearray(aObject))
                 {
                     auto& data = data_of(aObject);
@@ -603,6 +624,19 @@ namespace neos::python_runtime
         {
             object* m_hex(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs);
 
+            // (a view of aBase made (aDelta 1) or released (-1): its exports (a bytearray's, or a provider's object's))
+            void export_delta(object* aBase, int aDelta)
+            {
+                auto const value = builtin_value(aBase);
+                if (is_bytearray(value))
+                    as_bytes(value).exports += aDelta;
+                else if (auto const p = provider_of(value); p != nullptr && p->exports != nullptr)
+                    p->exports(value, aDelta);
+            }
+
+            struct memoryview_object;
+            void released_view(memoryview_object& aView);
+
             struct memoryview_object
             {
                 header h;
@@ -615,17 +649,28 @@ namespace neos::python_runtime
                 bool readonly = true;
                 bool released = false;
                 std::string gathered;       ///< (the bytes of a view that is not contiguous, as bytes_like has them)
+                long long exports = 0;      ///< (its own buffer's exports (while its hash or hex() runs code): it cannot be released)
+                bool hashed = false;        ///< (its hash, once computed: kept after it is released (memory_hash's))
+                long long hash = 0;
+                bool restricted = false;    ///< (the view that __release_buffer__ is called with: no view can be made of it (_Py_MEMORYVIEW_RESTRICTED))
+                bool counted = true;        ///< (an export of its exporter's buffer (a restricted view is not))
+                object* wrapperView = nullptr;      ///< (a view of the view that a class's __buffer__ returned: that view (CPython's _PyBufferWrapper's mv))
+                object* wrapperObject = nullptr;    ///< (and the object whose __buffer__ it is (its obj))
                 void unexport()
                 {
                     if (released)
                         return;
                     released = true;
-                    if (auto const p = provider_of(base); p != nullptr && p->exports != nullptr)
-                        p->exports(base, -1);
+                    if (!counted)
+                        return;
+                    export_delta(base, -1);
+                    released_view(*this);
                 }
                 ~memoryview_object()
                 {
                     unexport();
+                    release(wrapperView);
+                    release(wrapperObject);
                     release(base);
                 }
             };
@@ -644,6 +689,21 @@ namespace neos::python_runtime
                     return false;
                 }
                 return true;
+            }
+
+            // (an index of a view (PyNumber_AsSsize_t(key, PyExc_IndexError)): aKey is an int or has __index__ (index_key))
+            bool index_key(object* aKey)
+            {
+                return is_int_like(aKey) || (python_type(aKey) != nullptr && python_type(aKey)->index != nullptr) || has_special_method(aKey, "__index__");
+            }
+            bool view_index(object* aKey, long long& aIndex)
+            {
+                if (is_big(aKey))
+                {
+                    error("IndexError", "cannot fit 'int' into an index-sized integer");
+                    return false;
+                }
+                return to_index(aKey, aIndex);
             }
 
             // (a native single character format, prefixed with an optional '@' (get_native_fmtchar): its size (0: not one))
@@ -710,8 +770,7 @@ namespace neos::python_runtime
             object* make_view(object* aBase, std::size_t aStart, std::size_t aCount, long long aStride, std::string aFormat, std::size_t aItemsize, bool aReadonly)
             {
                 retain(aBase);
-                if (auto const p = provider_of(aBase); p != nullptr && p->exports != nullptr)
-                    p->exports(aBase, 1);
+                export_delta(aBase, 1);
                 auto const view = new memoryview_object{ { { &sMemoryviewType.base } }, aBase, aStart, aCount, aStride, std::move(aFormat), aItemsize, aReadonly };
                 return &view->h.base;
             }
@@ -719,6 +778,182 @@ namespace neos::python_runtime
             object* make_view(memoryview_object const& aView, std::size_t aStart, std::size_t aCount, long long aStride)
             {
                 return make_view(aView.base, aStart, aCount, aStride, aView.format, aView.itemsize, aView.readonly);
+            }
+
+            // --- the buffer protocol of Python classes (PEP 688: __buffer__ and __release_buffer__; CPython 3.13's typeobject.c 
+            // slot_bf_getbuffer, slot_bf_releasebuffer, bufferwrapper_releasebuf, wrap_buffer and wrap_releasebuffer)
+
+            constexpr long long BufWritable = 0x0001;    // (PyBUF_WRITABLE)
+            constexpr long long BufFullRo = 0x011C;      // (PyBUF_FULL_RO: memoryview(x)'s)
+
+            // (no view is made of a restricted view (CHECK_RESTRICTED))
+            bool unrestricted(memoryview_object const& aView)
+            {
+                if (!aView.restricted)
+                    return true;
+                error("ValueError", "cannot create new view on restricted memoryview");
+                return false;
+            }
+
+            // (a class's __release_buffer__ (a method of a Python class of its, not a builtin base's): null if none)
+            ref python_release_buffer(object* aObject)
+            {
+                return is_instance(aObject) ? ref{ special_method(aObject, "__release_buffer__") } : ref{};
+            }
+
+            // (aObject.__release_buffer__(aView): an exception is unraisable (and an exception that was being raised is raised again))
+            void call_release_buffer(object* aObject, object* aMethod, object* aView)
+            {
+                ref const pending{ failed() ? take_exception() : ref{} };
+                ref const r{ invoke(aMethod, { new_reference(aView) }) };
+                if (!r)
+                {
+                    ref const message{ make_str(std::string{ "Exception ignored in __release_buffer__ of " } + type_name(aObject)) };
+                    write_unraisable(nullptr, message.get());
+                }
+                if (pending)
+                    reraise_exception(pending.get());
+            }
+
+            // (a view has been released: the __release_buffer__ of its exporter's class, if it has one: for a view of the view that the 
+            // exporter's __buffer__ returned (a view of another object's buffer), that view; otherwise a restricted view of the buffer, released 
+            // afterwards)
+            void released_view(memoryview_object& aView)
+            {
+                ref const inner{ std::exchange(aView.wrapperView, nullptr) };
+                ref const owner{ std::exchange(aView.wrapperObject, nullptr) };
+                if (process_exited())
+                    return;
+                if (inner)
+                {
+                    // (a view of the exporter's own buffer: its release (when it is released) calls it)
+                    if (builtin_value(as_memoryview(inner.get()).base) != builtin_value(owner.get()))
+                        if (ref const method{ python_release_buffer(owner.get()) })
+                            call_release_buffer(owner.get(), method.get(), inner.get());
+                    return;
+                }
+                ref const method{ python_release_buffer(aView.base) };
+                if (!method)
+                    return;
+                retain(aView.base);
+                auto const restricted = new memoryview_object{ { { &sMemoryviewType.base } }, aView.base, aView.start, aView.count, aView.stride, aView.format, 
+                    aView.itemsize, aView.readonly };
+                restricted->restricted = true;
+                restricted->counted = false;
+                ref const view{ &restricted->h.base };
+                call_release_buffer(aView.base, method.get(), view.get());
+                restricted->released = true;
+            }
+
+            // (a view of an object's buffer (aFlags: PyBUF_*, of which PyBUF_WRITABLE is checked): a memoryview's (a view of the same items), 
+            // the one of the memoryview that its class's __buffer__ returns (PEP 688), or its own (bytes, bytearray or a provider's object))
+            object* memoryview_of(object* aObject, long long aFlags)
+            {
+                bool const writable = (aFlags & BufWritable) != 0;
+                if (is_memoryview(aObject))
+                {
+                    auto const& view = as_memoryview(aObject);
+                    if (!view_checked(view) || !unrestricted(view))
+                        return nullptr;
+                    if (writable && view.readonly)
+                        return error("BufferError", "memoryview: underlying buffer is not writable");
+                    return make_view(view, view.start, view.count, view.stride);
+                }
+                if (ref const method{ is_instance(aObject) ? special_method(aObject, "__buffer__") : nullptr })
+                {
+                    ref const flags{ make_int(aFlags) };
+                    ref const result{ invoke(method.get(), { new_reference(flags.get()) }) };
+                    if (!result)
+                        return nullptr;
+                    if (!is_memoryview(result.get()))
+                        return error("TypeError", "__buffer__ returned non-memoryview object");
+                    auto& inner = as_memoryview(result.get());
+                    if (!view_checked(inner) || !unrestricted(inner))
+                        return nullptr;
+                    // (a view of its own value (a builtin base's __buffer__, of the value): of the object (its view.obj))
+                    if (inner.base != aObject && builtin_value(inner.base) == builtin_value(aObject))
+                    {
+                        retain(aObject);
+                        release(std::exchange(inner.base, aObject));
+                    }
+                    if (writable && inner.readonly)
+                        return error("BufferError", "memoryview: underlying buffer is not writable");
+                    auto const outer = make_view(inner, inner.start, inner.count, inner.stride);
+                    as_memoryview(outer).wrapperView = new_reference(result.get());
+                    as_memoryview(outer).wrapperObject = new_reference(aObject);
+                    return outer;
+                }
+                if (failed())
+                    return nullptr;
+                buffer_info buffer;
+                if (!exporter_buffer(aObject, buffer))
+                    return error("TypeError", std::string{ "memoryview: a bytes-like object is required, not '" } + type_name(aObject) + "'");
+                if (writable && buffer.readonly)
+                    return error("BufferError", "Object is not writable.");
+                return make_view(aObject, 0u, buffer.size / buffer.itemsize, static_cast<long long>(buffer.itemsize), buffer.format, buffer.itemsize, buffer.readonly);
+            }
+
+            // (the bytes of the buffer of an object whose class has __buffer__ (PyBUF_SIMPLE): its view released afterwards)
+            bool python_buffer_bytes(object* aObject, std::string& aResult)
+            {
+                ref const view{ memoryview_of(aObject, 0) };
+                if (!view)
+                    return false;
+                auto& v = as_memoryview(view.get());
+                aResult = std::string{ view_data(v) };
+                v.unexport();
+                return true;
+            }
+
+            // (buffer flags: an int (__index__) in C int's range (wrap_buffer's))
+            bool buffer_flags(object* aFlags, long long& aResult)
+            {
+                if (is_big(aFlags))
+                {
+                    error("OverflowError", "Python int too large to convert to C ssize_t");
+                    return false;
+                }
+                if (!to_index(aFlags, aResult))
+                    return false;
+                if (aResult > std::numeric_limits<int>::max() || aResult < std::numeric_limits<int>::min())
+                {
+                    error("OverflowError", "buffer flags out of range");
+                    return false;
+                }
+                return true;
+            }
+
+            // (x.__buffer__(flags) of a builtin exporter (wrap_buffer): a view of its own buffer (not its class's __buffer__'s))
+            object* own_buffer(object* aSelf, object* aFlags)
+            {
+                long long flags = 0;
+                if (!buffer_flags(aFlags, flags))
+                    return nullptr;
+                if (is_memoryview(aSelf))
+                    return memoryview_of(aSelf, flags);
+                buffer_info buffer;
+                if (!exporter_buffer(aSelf, buffer))
+                    return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(aSelf) + "'");
+                if ((flags & BufWritable) != 0 && buffer.readonly)
+                    return error("BufferError", "Object is not writable.");
+                return make_view(aSelf, 0u, buffer.size / buffer.itemsize, static_cast<long long>(buffer.itemsize), buffer.format, buffer.itemsize, buffer.readonly);
+            }
+
+            // (x.__release_buffer__(view) of a builtin exporter (wrap_releasebuffer): the view, if it is one of its buffer, released)
+            object* own_release_buffer(object* aSelf, object* aView)
+            {
+                if (!is_memoryview(aView))
+                    return error("TypeError", "expected a memoryview object");
+                auto& view = as_memoryview(aView);
+                if (view.released)
+                    return (retain(none()), none());
+                auto const exporter = is_memoryview(aSelf) ? as_memoryview(aSelf).base : aSelf;   // (a view's: the buffer that it views)
+                if (builtin_value(view.base) != builtin_value(exporter))
+                    return error("ValueError", "memoryview's buffer is not this object");
+                if (view.exports > 0)
+                    return error("BufferError", "memoryview has " + std::to_string(view.exports) + " exported buffer" + (view.exports == 1 ? "" : "s"));
+                view.unexport();
+                return (retain(none()), none());
             }
 
             // (an item (unpack_single))
@@ -919,8 +1154,19 @@ namespace neos::python_runtime
                 {
                     if (name == "release" ? !parse_arguments(qualified.c_str(), rest, aKwargs, {}, 0u, 0u, a) : !no_keywords(aKwargs, qualified.c_str()))
                         return nullptr;
+                    // (not while its own buffer is exported (memoryview_release_impl's))
+                    if (view.exports > 0)
+                        return error("BufferError", "memoryview has " + std::to_string(view.exports) + " exported buffer" + (view.exports == 1 ? "" : "s"));
                     view.unexport();
                     return name == "__exit__" ? make_bool(false) : (retain(none()), none());
+                }
+                if (name == "__buffer__" || name == "__release_buffer__")
+                {
+                    if (!no_keywords(aKwargs, qualified.c_str()))
+                        return nullptr;
+                    if (rest.size() != 1u)
+                        return error("TypeError", "expected 1 argument, got " + std::to_string(rest.size()));
+                    return name == "__buffer__" ? own_buffer(items[0], rest[0]) : own_release_buffer(items[0], rest[0]);
                 }
                 if (!view_checked(view))
                     return nullptr;
@@ -951,17 +1197,26 @@ namespace neos::python_runtime
                 }
                 if (name == "hex")
                 {
+                    // (its buffer exported while hex() runs code (the separator's __len__): it cannot be released (memoryview_hex_impl's))
                     ref const data{ make_bytes(std::string{ view_data(view) }) };
-                    return m_hex(data.get(), rest, aKwargs);
+                    ref const self{ ref::borrowed(items[0]) };
+                    ++view.exports;
+                    auto const result = m_hex(data.get(), rest, aKwargs);
+                    --view.exports;
+                    return result;
                 }
                 if (name == "toreadonly")
                 {
                     if (!parse_arguments(qualified.c_str(), rest, aKwargs, {}, 0u, 0u, a))
                         return nullptr;
+                    if (!unrestricted(view))
+                        return nullptr;
                     return make_view(view.base, view.start, view.count, view.stride, view.format, view.itemsize, true);
                 }
                 // (cast)
                 if (!parse_arguments(qualified.c_str(), rest, aKwargs, { "format", "shape" }, 1u, 0u, a))
+                    return nullptr;
+                if (!unrestricted(view))
                     return nullptr;
                 return view_cast(view, a[0], a[1]);
             }
@@ -1003,7 +1258,8 @@ namespace neos::python_runtime
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
                     auto& view = as_memoryview(aSelf);
-                    static char const* const sMethods[] = { "tobytes", "tolist", "hex", "release", "toreadonly", "cast", "__enter__", "__exit__" };
+                    static char const* const sMethods[] = { "tobytes", "tolist", "hex", "release", "toreadonly", "cast", "__enter__", "__exit__", "__buffer__",
+                        "__release_buffer__" };
                     for (auto m : sMethods)
                         if (std::strcmp(m, aName) == 0)
                             return make_function(m, view_method, const_cast<char*>(m), aSelf);
@@ -1042,30 +1298,54 @@ namespace neos::python_runtime
                     buffer_info buffer;
                     return static_cast<long long>(view_buffer(view, buffer));
                 };
+                // (memory_subscript's, of a one-dimensional view: an index (or a tuple of one), or a slice)
                 type.getitem = [](neos_py_context*, object* aSelf, object* aKey) -> object*
                 {
+                    ref const self{ ref::borrowed(aSelf) };
                     auto const& view = as_memoryview(aSelf);
                     if (!view_checked(view))
                         return nullptr;
-                    buffer_info buffer;
-                    auto const n = static_cast<long long>(view_buffer(view, buffer));
                     if (kind_of(aKey) == NEOS_PY_SLICE)
                     {
+                        buffer_info buffer;
+                        auto const n = static_cast<long long>(view_buffer(view, buffer));
                         long long start = 0, stop = 0, step = 0;
                         if (!slice_indices(aKey, n, start, stop, step))
+                            return nullptr;
+                        if (!unrestricted(view))
                             return nullptr;
                         auto const count = static_cast<long long>(slice_count(start, stop, step));
                         return make_view(view, static_cast<std::size_t>(static_cast<long long>(view.start) + start * view.stride), static_cast<std::size_t>(count), 
                             view.stride * step);
                     }
+                    object* key = aKey;
                     if (kind_of(aKey) == NEOS_PY_TUPLE)
+                    {
+                        auto const& keys = as<tuple_object>(aKey)->items;
+                        if (std::all_of(keys.begin(), keys.end(), index_key))
+                        {
+                            // (memory_item_multi's)
+                            if (keys.empty())
+                                return error("NotImplementedError", "sub-views are not implemented");
+                            if (keys.size() > 1u)
+                                return error("TypeError", "cannot index 1-dimension view with " + std::to_string(keys.size()) + "-element tuple");
+                            key = keys[0];
+                        }
+                        else if (!keys.empty() && std::all_of(keys.begin(), keys.end(), [](object* k) { return kind_of(k) == NEOS_PY_SLICE; }))
+                            return error("NotImplementedError", "multi-dimensional slicing is not implemented");
+                        else
+                            return error("TypeError", "memoryview: invalid slice key");
+                    }
+                    else if (!index_key(aKey))
                         return error("TypeError", "memoryview: invalid slice key");
                     long long index = 0;
-                    if (!to_index(aKey, index))
-                    {
-                        clear_error();
-                        return error("TypeError", "memoryview: invalid slice key");
-                    }
+                    if (!view_index(key, index))
+                        return nullptr;
+                    // (__index__ can have released it (memory_item's check))
+                    if (!view_checked(view))
+                        return nullptr;
+                    buffer_info buffer;
+                    auto const n = static_cast<long long>(view_buffer(view, buffer));
                     if (index < 0)
                         index += n;
                     if (index < 0 || index >= n)
@@ -1087,15 +1367,12 @@ namespace neos::python_runtime
                         error("TypeError", "cannot delete memory");
                         return -1;
                     }
-                    buffer_info buffer;
-                    auto const n = static_cast<long long>(view_buffer(view, buffer));
-                    auto const item = [&](long long aIndex) { return buffer.data + static_cast<long long>(view.start) + aIndex * view.stride; };
+                    // (memory_ass_sub's, of a one-dimensional view; code that the key or the value runs (__index__, __float__, ...) can 
+                    // release it: then nothing is written (CHECK_RELEASED_INT_AGAIN))
+                    ref const self{ ref::borrowed(aSelf) };
                     if (kind_of(aKey) == NEOS_PY_SLICE)
                     {
-                        long long start = 0, stop = 0, step = 0;
-                        if (!slice_indices(aKey, n, start, stop, step))
-                            return -1;
-                        auto const count = static_cast<long long>(slice_count(start, stop, step));
+                        // (the rvalue is an exporter (its buffer first, as PyObject_GetBuffer's))
                         std::string format, bytes;
                         std::size_t itemsize = 0u, items = 0u;
                         if (!other_buffer(aValue, format, itemsize, items, bytes))
@@ -1104,22 +1381,78 @@ namespace neos::python_runtime
                                 error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(aValue) + "'");
                             return -1;
                         }
+                        buffer_info buffer;
+                        auto const n = static_cast<long long>(view_buffer(view, buffer));
+                        long long start = 0, stop = 0, step = 0;
+                        if (!slice_indices(aKey, n, start, stop, step))
+                            return -1;
+                        if (!view_checked(view))
+                            return -1;
+                        // (its buffer again (its exporter cannot have been resized while the view exports it))
+                        view_buffer(view, buffer);
+                        auto const count = static_cast<long long>(slice_count(start, stop, step));
                         if (bare_format(format) != bare_format(view.format) || itemsize != view.itemsize || static_cast<long long>(items) != count)
                         {
                             error("ValueError", "memoryview assignment: lvalue and rvalue have different structures");
                             return -1;
                         }
                         for (long long i = 0; i < count; ++i)
-                            std::memcpy(item(start + i * step), bytes.data() + i * static_cast<long long>(itemsize), itemsize);
+                            std::memcpy(buffer.data + static_cast<long long>(view.start) + (start + i * step) * view.stride, bytes.data() + i * static_cast<long long>(itemsize), itemsize);
                         return 0;
                     }
-                    long long index = 0;
-                    if (!to_index(aKey, index))
+                    object* key = aKey;
+                    if (kind_of(aKey) == NEOS_PY_TUPLE)
                     {
-                        clear_error();
+                        auto const& keys = as<tuple_object>(aKey)->items;
+                        if (std::all_of(keys.begin(), keys.end(), index_key))
+                        {
+                            if (keys.empty())
+                            {
+                                error("NotImplementedError", "sub-views are not implemented");
+                                return -1;
+                            }
+                            if (keys.size() > 1u)
+                            {
+                                error("TypeError", "cannot index 1-dimension view with " + std::to_string(keys.size()) + "-element tuple");
+                                return -1;
+                            }
+                            key = keys[0];
+                        }
+                        else if (!keys.empty() && std::all_of(keys.begin(), keys.end(), [](object* k) { return kind_of(k) == NEOS_PY_SLICE; }))
+                        {
+                            error("NotImplementedError", "memoryview slice assignments are currently restricted to ndim = 1");
+                            return -1;
+                        }
+                        else
+                        {
+                            error("TypeError", "memoryview: invalid slice key");
+                            return -1;
+                        }
+                    }
+                    else if (!index_key(aKey))
+                    {
                         error("TypeError", "memoryview: invalid slice key");
                         return -1;
                     }
+                    long long index = 0;
+                    if (!view_index(key, index))
+                        return -1;
+                    {
+                        buffer_info buffer;
+                        auto const n = static_cast<long long>(view.released ? 0u : view_buffer(view, buffer));
+                        if (!view.released && (index < 0 ? index + n < 0 : index >= n))
+                        {
+                            error("IndexError", "index out of bounds on dimension 1");
+                            return -1;
+                        }
+                    }
+                    std::string value(view.itemsize, '\0');
+                    if (!pack_item(value.data(), aValue, view.format))
+                        return -1;
+                    if (!view_checked(view))
+                        return -1;
+                    buffer_info buffer;
+                    auto const n = static_cast<long long>(view_buffer(view, buffer));
                     if (index < 0)
                         index += n;
                     if (index < 0 || index >= n)
@@ -1127,10 +1460,7 @@ namespace neos::python_runtime
                         error("IndexError", "index out of bounds on dimension 1");
                         return -1;
                     }
-                    std::string value(view.itemsize, '\0');
-                    if (!pack_item(value.data(), aValue, view.format))
-                        return -1;
-                    std::memcpy(item(index), value.data(), view.itemsize);
+                    std::memcpy(buffer.data + static_cast<long long>(view.start) + index * view.stride, value.data(), view.itemsize);
                     return 0;
                 };
                 type.iter = [](neos_py_context*, object* aSelf) -> object*
@@ -1199,6 +1529,11 @@ namespace neos::python_runtime
                 type.hash = [](neos_py_context*, object* aSelf, long long* aResult) -> int
                 {
                     auto& view = as_memoryview(aSelf);
+                    if (view.hashed)
+                    {
+                        *aResult = view.hash;
+                        return 0;
+                    }
                     if (!view_checked(view))
                         return -1;
                     if (!view.readonly)
@@ -1211,19 +1546,29 @@ namespace neos::python_runtime
                         error("ValueError", "memoryview: hashing is restricted to formats 'B', 'b' or 'c'");
                         return -1;
                     }
+                    // (its exporter's hash (it must be hashable), while its own buffer is exported: that code cannot release it)
+                    ref const self{ ref::borrowed(aSelf) };
                     long long h = 0;
-                    if (!hash_of(view.base, h))
+                    ++view.exports;
+                    bool const hashable = hash_of(view.base, h);
+                    --view.exports;
+                    if (!hashable || !view_checked(view))
                         return -1;
-                    *aResult = bytes_hash(view_data(view));
+                    view.hash = bytes_hash(view_data(view));
+                    view.hashed = true;
+                    *aResult = view.hash;
                     return 0;
                 };
                 return type;
             }
         }
 
+        // (a released view is not one (its buffer cannot be had): false, as is_memoryview's for bytes_like)
         bool memoryview_data(object* aObject, std::string_view& aData)
         {
             if (!is_memoryview(aObject))
+                return false;
+            if (as_memoryview(aObject).released)
                 return false;
             aData = view_data(as_memoryview(aObject));
             return true;
@@ -1247,17 +1592,31 @@ namespace neos::python_runtime
             std::vector<object*> a;
             if (!parse_arguments("memoryview", aArgs, aKwargs, { "object" }, 1u, 0u, a))
                 return nullptr;
-            if (is_memoryview(a[0]))
-            {
-                auto const& view = as_memoryview(a[0]);
-                if (!view_checked(view))
-                    return nullptr;
-                return make_view(view, view.start, view.count, view.stride);
-            }
-            buffer_info buffer;
-            if (!exporter_buffer(a[0], buffer))
-                return error("TypeError", std::string{ "memoryview: a bytes-like object is required, not '" } + type_name(a[0]) + "'");
-            return make_view(a[0], 0u, buffer.size / buffer.itemsize, static_cast<long long>(buffer.itemsize), buffer.format, buffer.itemsize, buffer.readonly);
+            return memoryview_of(a[0], BufFullRo);
+        }
+
+        // (memoryview._from_flags(object, flags): a view of its buffer, with the buffer flags (PyMemoryView_FromObjectAndFlags))
+        object* memoryview_from_flags(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            std::vector<object*> a;
+            if (!parse_arguments("_from_flags", aArgs, aKwargs, { "object", "flags" }, 2u, 2u, a))
+                return nullptr;
+            long long flags = 0;
+            if (!buffer_flags(a[1], flags))
+                return nullptr;
+            return memoryview_of(a[0], flags);
+        }
+
+        // (bytes.__buffer__, bytearray.__buffer__ and memoryview.__buffer__ (self, flags); bytearray.__release_buffer__ and 
+        // memoryview.__release_buffer__ (self, view): of a builtin exporter (or an instance of a subclass))
+        object* builtin_buffer_method(std::vector<object*> const& aArgs, object* aKwargs, bool aRelease)
+        {
+            char const* const name = aRelease ? "__release_buffer__" : "__buffer__";
+            if (!no_keywords(aKwargs, name))
+                return nullptr;
+            if (aArgs.size() != 2u)
+                return error("TypeError", std::string{ "expected 1 argument, got " } + std::to_string(aArgs.empty() ? 0u : aArgs.size() - 1u));
+            return aRelease ? own_release_buffer(aArgs[0], aArgs[1]) : own_buffer(aArgs[0], aArgs[1]);
         }
 
         namespace
@@ -1374,18 +1733,32 @@ namespace neos::python_runtime
                 std::vector<object*> a;
                 if (!arguments(aSelf, "hex", aArgs, aKwargs, { "sep", "bytes_per_sep" }, 0u, 0u, a))
                     return nullptr;
+                // (the separator (_Py_strhex_impl's): its length (len(): its class's __len__), then a str's first character or a bytes' first
+                // byte)
                 std::string separator;
                 if (a[0] != nullptr)
                 {
-                    std::string_view data;
-                    if (kind_of(a[0]) == NEOS_PY_STR)
-                        separator = as<str_object>(a[0])->value;
-                    else if (bytes_like(a[0], data))
-                        separator = std::string{ data };
-                    else
-                        return error("TypeError", std::string{ "object of type '" } + type_name(a[0]) + "' has no len()");
-                    if (code_points_of(separator).size() != 1u)
+                    auto const n = length(a[0]);
+                    if (n < 0)
+                        return nullptr;
+                    if (n != 1)
                         return error("ValueError", "sep must be length 1.");
+                    auto const value = builtin_value(a[0]);
+                    if (kind_of(value) == NEOS_PY_STR)
+                    {
+                        auto const& text = as<str_object>(value)->value;
+                        if (text.empty() || static_cast<unsigned char>(text[0]) >= 0x80u)
+                            return error("ValueError", "sep must be ASCII.");
+                        separator = text.substr(0u, 1u);
+                    }
+                    else if (is_bytes(value))
+                    {
+                        if (data_of(value).empty())
+                            return error("ValueError", "sep must be length 1.");
+                        separator = data_of(value).substr(0u, 1u);
+                    }
+                    else
+                        return error("TypeError", "sep must be str or bytes.");
                     if (static_cast<unsigned char>(separator[0]) >= 0x80u)
                         return error("ValueError", "sep must be ASCII.");
                 }
@@ -1968,6 +2341,8 @@ namespace neos::python_runtime
                 unsigned char b = 0;
                 if (!byte_value(a[0], b))
                     return nullptr;
+                if (!resizable(aSelf, data_of(aSelf).size() + 1u))
+                    return nullptr;
                 data_of(aSelf) += static_cast<char>(b);
                 return none();
             }
@@ -1984,6 +2359,8 @@ namespace neos::python_runtime
                     return nullptr;
                 if (is_int_like(a[0]))
                     return error("TypeError", std::string{ "can't extend bytearray with " } + type_name(a[0]));
+                if (!resizable(aSelf, data_of(aSelf).size() + data.size()))
+                    return nullptr;
                 data_of(aSelf) += data;
                 return none();
             }
@@ -2002,6 +2379,8 @@ namespace neos::python_runtime
                 if (index < 0)
                     index = std::max(0ll, index + n);
                 index = std::min(index, n);
+                if (!resizable(aSelf, data.size() + 1u))
+                    return nullptr;
                 data.insert(data.begin() + index, static_cast<char>(b));
                 return none();
             }
@@ -2022,6 +2401,8 @@ namespace neos::python_runtime
                     index += n;
                 if (index < 0 || index >= n)
                     return error("IndexError", "pop index out of range");
+                if (!resizable(aSelf, data.size() - 1u))
+                    return nullptr;
                 auto const b = static_cast<unsigned char>(data[static_cast<std::size_t>(index)]);
                 data.erase(data.begin() + index);
                 return make_int(b);
@@ -2039,6 +2420,8 @@ namespace neos::python_runtime
                 auto const i = data.find(static_cast<char>(b));
                 if (i == std::string::npos)
                     return error("ValueError", "value not found in bytearray");
+                if (!resizable(aSelf, data.size() - 1u))
+                    return nullptr;
                 data.erase(i, 1u);
                 return none();
             }
@@ -2052,10 +2435,29 @@ namespace neos::python_runtime
                 return none();
             }
 
+            // (__buffer__(flags) and (a bytearray's) __release_buffer__(view): PEP 688's (wrap_buffer and wrap_releasebuffer))
+            object* m_buffer(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!arguments(aSelf, "__buffer__", aArgs, aKwargs, { "flags" }, 1u, 1u, a))
+                    return nullptr;
+                return own_buffer(aSelf, a[0]);
+            }
+
+            object* m_release_buffer(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!arguments(aSelf, "__release_buffer__", aArgs, aKwargs, { "buffer" }, 1u, 1u, a))
+                    return nullptr;
+                return own_release_buffer(aSelf, a[0]);
+            }
+
             object* m_clear(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs)
             {
                 std::vector<object*> a;
                 if (!arguments(aSelf, "clear", aArgs, aKwargs, {}, 0u, 0u, a))
+                    return nullptr;
+                if (!resizable(aSelf, 0u))
                     return nullptr;
                 data_of(aSelf).clear();
                 return none();
@@ -2075,7 +2477,8 @@ namespace neos::python_runtime
                 { "ljust", false, m_ljust }, { "rjust", false, m_rjust }, { "zfill", false, m_zfill }, { "splitlines", false, m_splitlines },
                 { "expandtabs", false, m_expandtabs }, { "translate", false, m_translate },
                 { "copy", true, m_copy }, { "append", true, m_append }, { "extend", true, m_extend }, { "insert", true, m_insert },
-                { "pop", true, m_pop }, { "remove", true, m_remove }, { "reverse", true, m_reverse }, { "clear", true, m_clear }
+                { "pop", true, m_pop }, { "remove", true, m_remove }, { "reverse", true, m_reverse }, { "clear", true, m_clear },
+                { "__buffer__", false, m_buffer }, { "__release_buffer__", true, m_release_buffer }
             };
 
             object* call_bytes_method(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
@@ -2112,12 +2515,16 @@ namespace neos::python_runtime
                     {
                         if (stop < start)
                             stop = start;
+                        if (!resizable(aSelf, data.size() - static_cast<std::size_t>(stop - start) + values.size()))
+                            return -1;
                         data.replace(static_cast<std::size_t>(start), static_cast<std::size_t>(stop - start), values);
                         return 0;
                     }
                     auto positions = slice_positions(start, stop, step);
                     if (aValue == nullptr)
                     {
+                        if (!resizable(aSelf, data.size() - positions.size()))
+                            return -1;
                         std::sort(positions.begin(), positions.end());
                         for (auto i = positions.rbegin(); i != positions.rend(); ++i)
                             data.erase(*i, 1u);
@@ -2149,6 +2556,8 @@ namespace neos::python_runtime
                 }
                 if (aValue == nullptr)
                 {
+                    if (!resizable(aSelf, data.size() - 1u))
+                        return -1;
                     data.erase(static_cast<std::size_t>(i), 1u);
                     return 0;
                 }
@@ -2218,6 +2627,8 @@ namespace neos::python_runtime
                         if (aInplace != 0 && is_bytearray(aLhs))
                         {
                             std::string const tail{ b };
+                            if (!resizable(aLhs, data_of(aLhs).size() + tail.size()))
+                                return nullptr;
                             data_of(aLhs) += tail;
                             retain(aLhs);
                             return aLhs;
@@ -2264,6 +2675,8 @@ namespace neos::python_runtime
                             result += a;
                         if (aInplace != 0 && is_bytearray(aLhs) && self == aLhs)
                         {
+                            if (!resizable(aLhs, result.size()))
+                                return nullptr;
                             data_of(aLhs) = std::move(result);
                             retain(aLhs);
                             return aLhs;

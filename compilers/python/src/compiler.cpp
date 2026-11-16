@@ -253,7 +253,7 @@ namespace neos::compilers::python
         {
             static std::set<std::string> const sStandard = { "math", "cmath", "sys", "os", "time", "errno", "threading", "_thread", "queue", "_queue",
                 "collections", "itertools", "functools", "operator", "heapq", "bisect", "copy", "re", "string", "struct", "json", "base64", 
-                "binascii", "hashlib", "random", "decimal", "fractions", "datetime", "_strptime", "io", "pathlib", "typing", "types", "abc", "contextlib", 
+                "binascii", "hashlib", "_md5", "_sha1", "_sha2", "_sha3", "_blake2", "_multibytecodec", "_codecs_cn", "_codecs_hk", "_codecs_iso2022", "_codecs_jp", "_codecs_kr", "_codecs_tw", "random", "decimal", "fractions", "datetime", "_strptime", "io", "pathlib", "typing", "types", "abc", "contextlib", 
                 "dataclasses", "enum", "textwrap", "statistics", "numbers", "warnings", "keyword", "platform", "shutil", "tempfile", "glob", 
                 "fnmatch", "atexit", "gc", "weakref", "traceback", "inspect", "pprint", "reprlib", "array", "calendar", "zlib", "secrets", 
                 "uuid", "locale", "codecs", "unicodedata", "signal", "argparse", "csv", "logging", "timeit", "_collections_abc", "posixpath", 
@@ -2056,41 +2056,81 @@ namespace neos::compilers::python
                     comment = line.substr(hash);
                     line.erase(hash);
                 }
-                auto const first = line.find_first_not_of(" \t");
-                if (first != std::string::npos && (line.compare(first, 7u, "import ") == 0 || line.compare(first, 5u, "from ") == 0) &&
-                    line.find_first_of("'\"#;") == std::string::npos)
+                // (each of its simple statements (a line without quotes: its statements are separated by ';', and the statement of a 
+                // compound statement's header (if c: import a, b) follows its colon))
+                if (line.find_first_of("'\"#") == std::string::npos)
                 {
-                    bool const fromImport = line.compare(first, 5u, "from ") == 0;
-                    auto const importAt = fromImport ? line.find(" import ", first) : first;
-                    if (importAt != std::string::npos)
+                    std::string result;
+                    std::size_t segmentStart = 0u;
+                    while (segmentStart <= line.size())
                     {
-                        auto const namesAt = importAt + (fromImport ? 8u : 7u);
-                        auto names = line.substr(namesAt);
-                        auto const trimmedEnd = names.find_last_not_of(" \t\r");
-                        std::string const ending = trimmedEnd == std::string::npos ? std::string{} : names.substr(trimmedEnd + 1u);
-                        names = trimmedEnd == std::string::npos ? std::string{} : names.substr(0u, trimmedEnd + 1u);
-                        if (fromImport)
+                        auto segmentEnd = line.find(';', segmentStart);
+                        if (segmentEnd == std::string::npos)
+                            segmentEnd = line.size();
+                        auto segment = line.substr(segmentStart, segmentEnd - segmentStart);
+                        // (the statement after a header's colon (outside brackets))
+                        std::size_t statementAt = 0u;
                         {
-                            auto const open = names.find_first_not_of(" \t");
-                            if (open != std::string::npos && names[open] == '(' && names.back() == ')')
+                            int depth = 0;
+                            for (std::size_t i = 0u; i < segment.size(); ++i)
                             {
-                                names = names.substr(open + 1u, names.size() - open - 2u);
-                                auto const last = names.find_last_not_of(" \t");
-                                if (last != std::string::npos && names[last] == ',')
-                                    names.erase(last);
-                                line = line.substr(0u, namesAt) + names + ending;
-                                importsChanged = true;
+                                auto const c = segment[i];
+                                if (c == '(' || c == '[' || c == '{')
+                                    ++depth;
+                                else if (c == ')' || c == ']' || c == '}')
+                                    --depth;
+                                else if (c == ':' && depth == 0)
+                                {
+                                    auto const next = segment.find_first_not_of(" \t", i + 1u);
+                                    if (next != std::string::npos && (segment.compare(next, 7u, "import ") == 0 || segment.compare(next, 5u, "from ") == 0))
+                                        statementAt = i + 1u;
+                                    break;
+                                }
                             }
                         }
-                        else if (names.find(',') != std::string::npos)
+                        auto statement = segment.substr(statementAt);
+                        auto const first = statement.find_first_not_of(" \t");
+                        if (first != std::string::npos && (statement.compare(first, 7u, "import ") == 0 || statement.compare(first, 5u, "from ") == 0))
                         {
-                            std::string replaced;
-                            for (char c : names)
-                                replaced += c == ',' ? std::string{ "; import " } : std::string(1u, c);
-                            line = line.substr(0u, namesAt) + replaced + ending;
-                            importsChanged = true;
+                            bool const fromImport = statement.compare(first, 5u, "from ") == 0;
+                            auto const importAt = fromImport ? statement.find(" import ", first) : first;
+                            if (importAt != std::string::npos)
+                            {
+                                auto const namesAt = importAt + (fromImport ? 8u : 7u);
+                                auto names = statement.substr(namesAt);
+                                auto const trimmedEnd = names.find_last_not_of(" \t\r");
+                                std::string const ending = trimmedEnd == std::string::npos ? std::string{} : names.substr(trimmedEnd + 1u);
+                                names = trimmedEnd == std::string::npos ? std::string{} : names.substr(0u, trimmedEnd + 1u);
+                                if (fromImport)
+                                {
+                                    auto const open = names.find_first_not_of(" \t");
+                                    if (open != std::string::npos && names[open] == '(' && names.back() == ')')
+                                    {
+                                        names = names.substr(open + 1u, names.size() - open - 2u);
+                                        auto const last = names.find_last_not_of(" \t");
+                                        if (last != std::string::npos && names[last] == ',')
+                                            names.erase(last);
+                                        statement = statement.substr(0u, namesAt) + names + ending;
+                                        importsChanged = true;
+                                    }
+                                }
+                                else if (names.find(',') != std::string::npos)
+                                {
+                                    std::string replaced;
+                                    for (char c : names)
+                                        replaced += c == ',' ? std::string{ "; import " } : std::string(1u, c);
+                                    statement = statement.substr(0u, namesAt) + replaced + ending;
+                                    importsChanged = true;
+                                }
+                            }
+                            segment = segment.substr(0u, statementAt) + statement;
                         }
+                        result += segment;
+                        if (segmentEnd < line.size())
+                            result += ';';
+                        segmentStart = segmentEnd + 1u;
                     }
+                    line = std::move(result);
                 }
                 rewritten += line + comment;
                 if (lineEnd < text.size())
@@ -6011,31 +6051,25 @@ namespace neos::compilers::python
                     {
                         for (auto const& argument : ordered)
                             push_operand(operand_type{ argument });
-                        // (a builtin that no host function (or function of the program) matches is called as an object (below): that 
-                        // is known without emit_call throwing (for every call of one that no function matches))
-                        if (!builtin_names().contains(name) || generator().can_call(neolib::string_view{ neolib::string{ name } }, aSource))
+                        generator().emit_call(neolib::string_view{ neolib::string{ name } }, aSource);
+                        operand_type result{ operands().back() };
+                        if (result.holds_alternative<i_fragment>())
                         {
-                            generator().emit_call(neolib::string_view{ neolib::string{ name } }, aSource);
-                            operand_type result{ operands().back() };
-                            if (result.holds_alternative<i_fragment>())
-                            {
-                                fragment called{ result.get<i_fragment>() };
-                                mark_position(called, py_position(aSource));
-                                operands().set_back(operand_type{ called });
-                                result = operand_type{ called };
-                            }
-                            if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Object)
-                                operands().set_back(operand_type{ py_owned(fragment{ result.get<i_fragment>() }) }); // (a function returns a new reference)
-                            else if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Integer)
-                            {
-                                result = operand_type{ py_park_integer(fragment{ result.get<i_fragment>() }) };
-                                if (!py_big_integers())
-                                    result = operand_type{ materialize(result, type::I64) }; // (64-bit ints: a runtime plugin's int is one)
-                                operands().set_back(result);
-                            }
-                            return;
+                            fragment called{ result.get<i_fragment>() };
+                            mark_position(called, py_position(aSource));
+                            operands().set_back(operand_type{ called });
+                            result = operand_type{ called };
                         }
-                        operands().resize(base);
+                        if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Object)
+                            operands().set_back(operand_type{ py_owned(fragment{ result.get<i_fragment>() }) }); // (a function returns a new reference)
+                        else if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Integer)
+                        {
+                            result = operand_type{ py_park_integer(fragment{ result.get<i_fragment>() }) };
+                            if (!py_big_integers())
+                                result = operand_type{ materialize(result, type::I64) }; // (64-bit ints: a runtime plugin's int is one)
+                            operands().set_back(result);
+                        }
+                        return;
                     }
                     catch (std::runtime_error const&)
                     {
@@ -6757,8 +6791,9 @@ namespace neos::compilers::python
                 break;
             if (aLoop && (kind == indented_construct::While || kind == indented_construct::For))
                 break;
+            // (a finally body's exits end its handling of the exception it runs for (if any): see py_try)
             if (kind == indented_construct::Try || kind == indented_construct::Except || (kind == indented_construct::Else && generator().indented_try_else(i)) ||
-                kind == indented_construct::With)
+                kind == indented_construct::Finally || kind == indented_construct::With)
                 ++count;
         }
         return count;
@@ -10710,6 +10745,24 @@ namespace neos::compilers::python
         auto const error = py_error_global();
         bool const finally = aConstruct.finallyArm.has_value();
         std::uint32_t const outer = finally ? 1u : 0u;
+        // (finally: an exception that propagates is being handled while the finally body runs (sys.exception() is it; an exception raised
+        // there has it as its context; a bare raise raises it again), as CPython's; the finally body's returns, breaks and continues end its
+        // handling (it is not raised again))
+        std::optional<std::uint32_t> finallyHandling;
+        if (finally)
+        {
+            finallyHandling = temporary(type::I32);
+            put_i32(aStatement, 0);
+            put_local(aStatement, opcode::LocalSet, *finallyHandling);
+            fragment leave;
+            put_local(leave, opcode::LocalGet, *finallyHandling);
+            put_block(leave, opcode::If, std::nullopt);
+            put_i32(leave, 0);
+            put_local(leave, opcode::LocalSet, *finallyHandling);
+            append(leave, py_runtime_call("python::handled", {}, type::Void, {}));
+            put(leave, opcode::End);
+            aConstruct.finallyArm = apply_finally(*aConstruct.finallyArm, leave);
+        }
         // (returns, breaks and continues that leave the try run its finally body first (and those that leave a handler end its
         // handling of the exception before that))
         for (std::size_t i = 0u; i < aConstruct.arms.size(); ++i)
@@ -10837,15 +10890,55 @@ namespace neos::compilers::python
         if (finally)
         {
             put(aStatement, opcode::End);
-            // (finally: an exception is kept while its body runs, then propagates)
+            // (finally: an exception is kept (and handled) while its body runs, then propagates (unless the body raises another, or leaves))
             auto const pending = temporary(type::I32);
             put_local(aStatement, opcode::GlobalGet, error);
             put_local(aStatement, opcode::LocalSet, pending);
             put_i32(aStatement, 0);
             put_local(aStatement, opcode::GlobalSet, error);
-            append(aStatement, *aConstruct.finallyArm);
             put_local(aStatement, opcode::LocalGet, pending);
             put_block(aStatement, opcode::If, std::nullopt);
+            {
+                fragment message;
+                put_local(message, opcode::LocalGet, pending);
+                message.valueType = type::String;
+                append(aStatement, py_runtime_call("python::finally_handling", { type::String }, type::Void, { message }));
+                put_i32(aStatement, 1);
+                put_local(aStatement, opcode::LocalSet, *finallyHandling);
+            }
+            put(aStatement, opcode::End);
+            put_block(aStatement, opcode::Block, std::nullopt);
+            put_marker(aStatement, HandlerMarker);
+            append_nested(aStatement, *aConstruct.finallyArm, 1u);
+            put(aStatement, opcode::End);
+            // (its handling ends; an exception the body raised propagates, else the exception kept)
+            auto const raised = temporary(type::I32);
+            put_local(aStatement, opcode::GlobalGet, error);
+            put_local(aStatement, opcode::LocalSet, raised);
+            put_i32(aStatement, 0);
+            put_local(aStatement, opcode::GlobalSet, error);
+            put_local(aStatement, opcode::LocalGet, *finallyHandling);
+            put_block(aStatement, opcode::If, std::nullopt);
+            put_i32(aStatement, 0);
+            put_local(aStatement, opcode::LocalSet, *finallyHandling);
+            put_local(aStatement, opcode::LocalGet, raised);
+            put_block(aStatement, opcode::If, std::nullopt);
+            append(aStatement, py_runtime_call("python::handled", {}, type::Void, {}));
+            put(aStatement, opcode::Else);
+            {
+                // (the exception kept propagates: its text finds it again)
+                fragment message;
+                put_local(message, opcode::LocalGet, pending);
+                message.valueType = type::String;
+                append(aStatement, py_runtime_call("python::finally_handled", { type::String }, type::Void, { message }));
+            }
+            put(aStatement, opcode::End);
+            put(aStatement, opcode::End);
+            put_local(aStatement, opcode::LocalGet, raised);
+            put_block(aStatement, opcode::If, std::nullopt);
+            put_local(aStatement, opcode::LocalGet, raised);
+            put_local(aStatement, opcode::GlobalSet, error);
+            put(aStatement, opcode::Else);
             put_local(aStatement, opcode::LocalGet, pending);
             put_local(aStatement, opcode::GlobalSet, error);
             put(aStatement, opcode::End);

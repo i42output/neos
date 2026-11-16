@@ -36,18 +36,20 @@
   its object model (see runtime/python/NOTICE).
 */
 
-// The queue module (CPython 3.13's Lib/queue.py): Queue, LifoQueue, PriorityQueue and SimpleQueue (synchronized: their
-// blocking operations release the GIL), and the exceptions Empty and Full
+// The queue module (CPython 3.13's Lib/queue.py): Queue, LifoQueue and PriorityQueue (Lib/queue.py's classes: their _init, _qsize, _put and
+// _get can be overridden, and their mutex and conditions are the threading module's), SimpleQueue (the C one: synchronized, its blocking get
+// releases the GIL), and the exceptions Empty, Full and ShutDown
 
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
-#include <algorithm>
 #include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
 #include "objects.hpp"
+#include "values.hpp"
+#include "pyclass.hpp"
 
 namespace neos::python_runtime
 {
@@ -55,91 +57,20 @@ namespace neos::python_runtime
     {
         namespace
         {
+            // (a SimpleQueue (CPython's Modules/_queuemodule.c))
             struct queue_object
             {
                 header h;
-                enum kind_t { Fifo, Lifo, Priority, Simple } kind = Fifo;
                 std::mutex mutex;
                 std::condition_variable notEmpty;
-                std::condition_variable notFull;
-                std::condition_variable allTasksDone;
-                std::deque<object*> items;      ///< (a PriorityQueue's: a heap)
-                long long maxsize = 0;
-                long long unfinished = 0;
-                bool shutdown = false;          ///< (is_shutdown: shutdown() was called)
+                std::deque<object*> items;
                 ~queue_object() { for (auto i : items) release(i); }
             };
 
             neos_py_type make_queue_type(char const* aQualifiedName, char const* aName);
-            neos_py_type sQueueType = make_queue_type("queue.Queue", "Queue");
-            neos_py_type sLifoQueueType = make_queue_type("queue.LifoQueue", "LifoQueue");
-            neos_py_type sPriorityQueueType = make_queue_type("queue.PriorityQueue", "PriorityQueue");
             neos_py_type sSimpleQueueType = make_queue_type("_queue.SimpleQueue", "SimpleQueue");
 
             queue_object& as_queue(object* aObject) { return *reinterpret_cast<queue_object*>(aObject); }
-
-            // (a < b: -1 if the comparison raised)
-            int less(object* aLhs, object* aRhs)
-            {
-                ref const r{ compare(NEOS_PY_LT, aLhs, aRhs) };
-                if (!r)
-                    return -1;
-                return truth(r.get());
-            }
-
-            // (heapq's push and pop on the queue's items (with its mutex locked; comparisons may raise))
-            bool heap_push(std::deque<object*>& aHeap, object* aItem)
-            {
-                aHeap.push_back(aItem);
-                auto pos = aHeap.size() - 1u;
-                while (pos > 0u)
-                {
-                    auto const parent = (pos - 1u) / 2u;
-                    auto const l = less(aHeap[pos], aHeap[parent]);
-                    if (l < 0)
-                        return false;
-                    if (l == 0)
-                        break;
-                    std::swap(aHeap[pos], aHeap[parent]);
-                    pos = parent;
-                }
-                return true;
-            }
-
-            object* heap_pop(std::deque<object*>& aHeap)
-            {
-                auto const last = aHeap.back();
-                aHeap.pop_back();
-                if (aHeap.empty())
-                    return last;
-                auto const result = aHeap.front();
-                aHeap.front() = last;
-                // (heapq's _siftup: the smaller child up to a leaf, then _siftdown)
-                std::size_t pos = 0u;
-                auto const end = aHeap.size();
-                auto const item = aHeap[pos];
-                auto child = 2u * pos + 1u;
-                while (child < end)
-                {
-                    auto const right = child + 1u;
-                    if (right < end && less(aHeap[child], aHeap[right]) != 1)
-                        child = right;
-                    aHeap[pos] = aHeap[child];
-                    pos = child;
-                    child = 2u * pos + 1u;
-                }
-                aHeap[pos] = item;
-                while (pos > 0u)
-                {
-                    auto const parent = (pos - 1u) / 2u;
-                    if (less(item, aHeap[parent]) != 1)
-                        break;
-                    aHeap[pos] = aHeap[parent];
-                    pos = parent;
-                }
-                aHeap[pos] = item;
-                return result;
-            }
 
             bool timeout_of(object* aValue, double& aResult)
             {
@@ -157,8 +88,6 @@ namespace neos::python_runtime
             }
 
             object* empty_error() { return error("_queue.Empty", ""); }
-            object* full_error() { return error("queue.Full", ""); }
-            object* shut_down_error() { return error("queue.ShutDown", ""); }
 
             // (wait with the GIL released: false if it timed out)
             template <typename Predicate>
@@ -180,45 +109,15 @@ namespace neos::python_runtime
                 return result && aPredicate();
             }
 
-            object* put(object* aSelf, object* aItem, bool aBlock, double aTimeout)
+            // (the block and timeout arguments are ignored: it never blocks)
+            object* put(object* aSelf, object* aItem)
             {
                 auto& q = as_queue(aSelf);
-                std::unique_lock<std::mutex> lock{ q.mutex };
-                // (a queue that is shut down: ShutDown, also for a put waiting for room when it is shut down)
-                if (q.shutdown)
-                    return (lock.unlock(), shut_down_error());
-                if (q.maxsize > 0)
-                {
-                    auto const room = [&]() { return static_cast<long long>(q.items.size()) < q.maxsize; };
-                    if (!aBlock)
-                    {
-                        if (!room())
-                            return (lock.unlock(), full_error());
-                    }
-                    else
-                    {
-                        wait(lock, q.notFull, aTimeout, [&]() { return room() || q.shutdown; });
-                        if (q.shutdown)
-                            return (lock.unlock(), shut_down_error());
-                        if (!room())
-                            return (lock.unlock(), full_error());
-                    }
-                }
                 retain(aItem);
-                if (q.kind == queue_object::Priority)
                 {
-                    if (!heap_push(q.items, aItem))
-                    {
-                        q.items.erase(std::find(q.items.begin(), q.items.end(), aItem));
-                        lock.unlock();
-                        release(aItem);
-                        return nullptr;
-                    }
-                }
-                else
+                    std::lock_guard<std::mutex> lock{ q.mutex };
                     q.items.push_back(aItem);
-                ++q.unfinished;
-                lock.unlock();
+                }
                 q.notEmpty.notify_one();
                 return none();
             }
@@ -228,9 +127,6 @@ namespace neos::python_runtime
                 auto& q = as_queue(aSelf);
                 std::unique_lock<std::mutex> lock{ q.mutex };
                 auto const available = [&]() { return !q.items.empty(); };
-                // (a queue that is shut down: its items, then ShutDown, also for a get waiting for one)
-                if (q.shutdown && !available())
-                    return (lock.unlock(), shut_down_error());
                 if (!aBlock)
                 {
                     if (!available())
@@ -238,29 +134,13 @@ namespace neos::python_runtime
                 }
                 else
                 {
-                    wait(lock, q.notEmpty, aTimeout, [&]() { return available() || q.shutdown; });
-                    if (q.shutdown && !available())
-                        return (lock.unlock(), shut_down_error());
+                    wait(lock, q.notEmpty, aTimeout, available);
                     if (!available())
                         return (lock.unlock(), empty_error());
                 }
-                object* item = nullptr;
-                switch (q.kind)
-                {
-                case queue_object::Lifo:
-                    item = q.items.back();
-                    q.items.pop_back();
-                    break;
-                case queue_object::Priority:
-                    item = heap_pop(q.items);
-                    break;
-                default:
-                    item = q.items.front();
-                    q.items.pop_front();
-                    break;
-                }
+                auto const item = q.items.front();
+                q.items.pop_front();
                 lock.unlock();
-                q.notFull.notify_one();
                 if (failed())
                 {
                     release(item);
@@ -272,120 +152,53 @@ namespace neos::python_runtime
             struct queue_method
             {
                 char const* name;
-                bool simple;    ///< (a SimpleQueue's too)
                 object* (*function)(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs);
             };
 
             queue_method const sMethods[] =
             {
-                { "put", true, [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                { "put", [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
                         if (!parse_arguments("put", aArgs, aKwargs, { "item", "block", "timeout" }, 1u, 0u, a))
                             return nullptr;
-                        double timeout = -1.0;
-                        if (!timeout_of(a[2], timeout))
-                            return nullptr;
-                        return put(aSelf, a[0], a[1] == nullptr || truth(a[1]) == 1, timeout);
+                        return put(aSelf, a[0]);
                     } },
-                { "put_nowait", true, [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                { "put_nowait", [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
                         if (!parse_arguments("put_nowait", aArgs, aKwargs, { "item" }, 1u, 0u, a))
                             return nullptr;
-                        return put(aSelf, a[0], false, -1.0);
+                        return put(aSelf, a[0]);
                     } },
-                { "get", true, [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                { "get", [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
                         if (!parse_arguments("get", aArgs, aKwargs, { "block", "timeout" }, 0u, 0u, a))
                             return nullptr;
+                        // (not blocking: the timeout is ignored)
+                        bool const block = a[0] == nullptr || truth(a[0]) == 1;
                         double timeout = -1.0;
-                        if (!timeout_of(a[1], timeout))
+                        if (block && !timeout_of(a[1], timeout))
                             return nullptr;
-                        return get(aSelf, a[0] == nullptr || truth(a[0]) == 1, timeout);
+                        return get(aSelf, block, timeout);
                     } },
-                { "get_nowait", true, [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                { "get_nowait", [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
                         if (!parse_arguments("get_nowait", aArgs, aKwargs, {}, 0u, 0u, a))
                             return nullptr;
                         return get(aSelf, false, -1.0);
                     } },
-                { "qsize", true, [](object* aSelf, std::vector<object*> const&, object*) -> object*
+                { "qsize", [](object* aSelf, std::vector<object*> const&, object*) -> object*
                     {
                         std::lock_guard<std::mutex> lock{ as_queue(aSelf).mutex };
                         return make_int(static_cast<long long>(as_queue(aSelf).items.size()));
                     } },
-                { "empty", true, [](object* aSelf, std::vector<object*> const&, object*) -> object*
+                { "empty", [](object* aSelf, std::vector<object*> const&, object*) -> object*
                     {
                         std::lock_guard<std::mutex> lock{ as_queue(aSelf).mutex };
                         return make_bool(as_queue(aSelf).items.empty());
-                    } },
-                { "full", false, [](object* aSelf, std::vector<object*> const&, object*) -> object*
-                    {
-                        auto& q = as_queue(aSelf);
-                        std::lock_guard<std::mutex> lock{ q.mutex };
-                        return make_bool(q.maxsize > 0 && static_cast<long long>(q.items.size()) >= q.maxsize);
-                    } },
-                { "task_done", false, [](object* aSelf, std::vector<object*> const&, object*) -> object*
-                    {
-                        auto& q = as_queue(aSelf);
-                        {
-                            std::lock_guard<std::mutex> lock{ q.mutex };
-                            if (q.unfinished <= 0)
-                                return error("ValueError", "task_done() called too many times");
-                            if (--q.unfinished != 0)
-                                return none();
-                        }
-                        q.allTasksDone.notify_all();
-                        return none();
-                    } },
-                { "join", false, [](object* aSelf, std::vector<object*> const&, object*) -> object*
-                    {
-                        auto& q = as_queue(aSelf);
-                        std::unique_lock<std::mutex> lock{ q.mutex };
-                        wait(lock, q.allTasksDone, -1.0, [&]() { return q.unfinished == 0; });
-                        return none();
-                    } },
-                // (shutdown(immediate=False): puts raise ShutDown, and gets once the queue is empty; immediate: the queue is emptied
-                // (each item a task done) and join() returns)
-                { "shutdown", false, [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
-                    {
-                        std::vector<object*> a;
-                        if (!parse_arguments("shutdown", aArgs, aKwargs, { "immediate" }, 0u, 0u, a))
-                            return nullptr;
-                        bool immediate = false;
-                        if (a[0] != nullptr)
-                        {
-                            auto const t = truth(a[0]);
-                            if (t < 0)
-                                return nullptr;
-                            immediate = t == 1;
-                        }
-                        auto& q = as_queue(aSelf);
-                        std::deque<object*> removed;
-                        {
-                            std::lock_guard<std::mutex> lock{ q.mutex };
-                            q.shutdown = true;
-                            if (immediate)
-                            {
-                                for (auto i : q.items)
-                                {
-                                    removed.push_back(i);
-                                    if (q.unfinished > 0)
-                                        --q.unfinished;
-                                }
-                                q.items.clear();
-                            }
-                        }
-                        if (immediate)
-                            q.allTasksDone.notify_all();
-                        q.notEmpty.notify_all();
-                        q.notFull.notify_all();
-                        for (auto i : removed)
-                            release(i);
-                        return none();
                     } }
             };
 
@@ -406,88 +219,377 @@ namespace neos::python_runtime
                 };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
-                    auto& q = as_queue(aSelf);
-                    bool const simple = q.kind == queue_object::Simple;
                     for (auto const& m : sMethods)
-                        if (std::strcmp(m.name, aName) == 0 && (m.simple || !simple))
+                        if (std::strcmp(m.name, aName) == 0)
                             return make_function(m.name, call_method, const_cast<queue_method*>(&m), aSelf);
-                    if (!simple && std::strcmp(aName, "maxsize") == 0)
-                        return make_int(q.maxsize);
-                    if (!simple && std::strcmp(aName, "is_shutdown") == 0)
-                    {
-                        std::lock_guard<std::mutex> lock{ q.mutex };
-                        return make_bool(q.shutdown);
-                    }
-                    if (!simple && std::strcmp(aName, "unfinished_tasks") == 0)
-                    {
-                        std::lock_guard<std::mutex> lock{ q.mutex };
-                        return make_int(q.unfinished);
-                    }
-                    if (!simple && std::strcmp(aName, "queue") == 0)
-                    {
-                        std::lock_guard<std::mutex> lock{ q.mutex };
-                        std::vector<object*> items{ q.items.begin(), q.items.end() };
-                        for (auto i : items)
-                            retain(i);
-                        return make_list(std::move(items));
-                    }
                     return error("AttributeError", std::string{ "'" } + python_type(aSelf)->name + "' object has no attribute '" + aName + "'");
+                };
+                type.setattr = [](neos_py_context*, object* aSelf, char const* aName, object*) -> int
+                {
+                    error("AttributeError", std::string{ "'" } + python_type(aSelf)->name + "' object attribute '" + aName + "' is read-only");
+                    return -1;
                 };
                 return type;
             }
 
-            object* construct(neos_py_type& aType, queue_object::kind_t aKind, char const* aName, std::vector<object*> const& aArgs, object* aKwargs)
+            object* new_simple_queue(neos_py_context*, void*, object* aArgs, object* aKwargs)
             {
                 std::vector<object*> a;
-                if (aKind == queue_object::Simple ? !parse_arguments(aName, aArgs, aKwargs, {}, 0u, 0u, a) :
-                    !parse_arguments(aName, aArgs, aKwargs, { "maxsize" }, 0u, 0u, a))
+                if (!parse_arguments("SimpleQueue", as<tuple_object>(aArgs)->items, aKwargs, {}, 0u, 0u, a))
                     return nullptr;
-                long long maxsize = 0;
-                if (aKind != queue_object::Simple && a[0] != nullptr && !to_index(a[0], maxsize))
-                    return nullptr;
-                auto const q = new queue_object{ { { &aType.base } } };
-                q->kind = aKind;
-                q->maxsize = maxsize;
+                auto const q = new queue_object{ { { &sSimpleQueueType.base } } };
                 return &q->h.base;
             }
 
-            object* new_queue(void* aData, std::vector<object*> const& aArgs, object* aKwargs)
+            int instance_of(neos_py_context*, void*, object* aObject)
             {
-                auto const kind = static_cast<queue_object::kind_t>(reinterpret_cast<std::uintptr_t>(aData));
-                switch (kind)
-                {
-                case queue_object::Lifo: return construct(sLifoQueueType, kind, "LifoQueue", aArgs, aKwargs);
-                case queue_object::Priority: return construct(sPriorityQueueType, kind, "PriorityQueue", aArgs, aKwargs);
-                case queue_object::Simple: return construct(sSimpleQueueType, kind, "SimpleQueue", aArgs, aKwargs);
-                default: return construct(sQueueType, kind, "Queue", aArgs, aKwargs);
-                }
+                return aObject->type == &sSimpleQueueType.base ? 1 : 0;
             }
 
-            int instance_of(neos_py_context*, void* aData, object* aObject)
+            // (Queue, LifoQueue and PriorityQueue: Lib/queue.py's, as they are (the methods of a queue that waits: with its mutex held))
+            std::vector<py> py_queue_classes()
             {
-                auto const kind = static_cast<queue_object::kind_t>(reinterpret_cast<std::uintptr_t>(aData));
-                auto const type = aObject->type;
-                if (type != &sQueueType.base && type != &sLifoQueueType.base && type != &sPriorityQueueType.base && type != &sSimpleQueueType.base)
-                    return 0;
-                // (LifoQueue and PriorityQueue are Queues)
-                return as_queue(aObject).kind == kind || (kind == queue_object::Fifo && as_queue(aObject).kind != queue_object::Simple) ? 1 : 0;
+                using namespace pyclass;
+                static module_writer const w{ "queue", nullptr };
+                auto const shut_down = []() { py_raise(M("queue", "ShutDown")()); };
+                py queue = w.make_class("Queue", {}, {
+                    { "__doc__", S("Create a queue object with a given maximum size.\n\n    If maxsize is <= 0, the queue size is infinite.\n    ") },
+                    { "__init__", w.method("Queue", "__init__", { py_positional("maxsize", I<0>()) }, [](arguments a) -> py
+                        {
+                            py self = a[0];
+                            py maxsize = a[1];
+                            self.set_attr("maxsize", maxsize);
+                            self.method("_init", { maxsize });
+                            // mutex must be held whenever the queue is mutating.  All methods
+                            // that acquire mutex must release it before returning.  mutex
+                            // is shared between the three conditions, so acquiring and
+                            // releasing the conditions also acquires and releases mutex.
+                            self.set_attr("mutex", (Mod<"threading">().attr("Lock"))());
+                            // Notify not_empty whenever an item is added to the queue; a
+                            // thread waiting to get is notified then.
+                            self.set_attr("not_empty", (Mod<"threading">().attr("Condition"))(self.attr("mutex")));
+                            // Notify not_full whenever an item is removed from the queue;
+                            // a thread waiting to put is notified then.
+                            self.set_attr("not_full", (Mod<"threading">().attr("Condition"))(self.attr("mutex")));
+                            // Notify all_tasks_done whenever the number of unfinished tasks
+                            // drops to zero; thread waiting to join() is notified to resume
+                            self.set_attr("all_tasks_done", (Mod<"threading">().attr("Condition"))(self.attr("mutex")));
+                            self.set_attr("unfinished_tasks", I<0>());
+                            // Queue shutdown state
+                            self.set_attr("is_shutdown", boolean(false));
+                            return py::none();
+                        }) },
+                    { "task_done", w.method("Queue", "task_done", {}, [](arguments a) -> py
+                        {
+                            py self = a[0];
+                            with_(self.attr("all_tasks_done"), [&](py const&)
+                            {
+                                py const unfinished = self.attr("unfinished_tasks") - I<1>();
+                                if (unfinished <= I<0>())
+                                {
+                                    if (unfinished < I<0>())
+                                        py_raise("ValueError", std::string{ "task_done() called too many times" });
+                                    self.attr("all_tasks_done").method("notify_all");
+                                }
+                                self.set_attr("unfinished_tasks", unfinished);
+                            });
+                            return py::none();
+                        }) },
+                    { "join", w.method("Queue", "join", {}, [](arguments a) -> py
+                        {
+                            py self = a[0];
+                            with_(self.attr("all_tasks_done"), [&](py const&)
+                            {
+                                while (self.attr("unfinished_tasks").truthy())
+                                    self.attr("all_tasks_done").method("wait");
+                            });
+                            return py::none();
+                        }) },
+                    { "qsize", w.method("Queue", "qsize", {}, [](arguments a) -> py
+                        {
+                            py self = a[0];
+                            py result;
+                            with_(self.attr("mutex"), [&](py const&) { result = self.method("_qsize"); });
+                            return result;
+                        }) },
+                    { "empty", w.method("Queue", "empty", {}, [](arguments a) -> py
+                        {
+                            py self = a[0];
+                            py result;
+                            with_(self.attr("mutex"), [&](py const&) { result = boolean(!self.method("_qsize").truthy()); });
+                            return result;
+                        }) },
+                    { "full", w.method("Queue", "full", {}, [](arguments a) -> py
+                        {
+                            py self = a[0];
+                            py result;
+                            with_(self.attr("mutex"), [&](py const&)
+                            {
+                                py const maxsize = self.attr("maxsize");
+                                result = boolean(I<0>() < maxsize && maxsize <= self.method("_qsize"));
+                            });
+                            return result;
+                        }) },
+                    { "put", w.method("Queue", "put", { py_positional("item"), py_positional("block", boolean(true)), py_positional("timeout", py::none()) },
+                        [shut_down](arguments a) -> py
+                        {
+                            py self = a[0];
+                            py item = a[1];
+                            py block = a[2];
+                            py timeout = a[3];
+                            with_(self.attr("not_full"), [&](py const&)
+                            {
+                                if (self.attr("is_shutdown").truthy())
+                                    shut_down();
+                                if (self.attr("maxsize") > I<0>())
+                                {
+                                    if (!block.truthy())
+                                    {
+                                        if (self.method("_qsize") >= self.attr("maxsize"))
+                                            py_raise(M("queue", "Full")());
+                                    }
+                                    else if (timeout.is_none())
+                                    {
+                                        while (self.method("_qsize") >= self.attr("maxsize"))
+                                        {
+                                            self.attr("not_full").method("wait");
+                                            if (self.attr("is_shutdown").truthy())
+                                                shut_down();
+                                        }
+                                    }
+                                    else if (timeout < I<0>())
+                                        py_raise("ValueError", std::string{ "'timeout' must be a non-negative number" });
+                                    else
+                                    {
+                                        py const endtime = (Mod<"time">().attr("monotonic"))() + timeout;
+                                        while (self.method("_qsize") >= self.attr("maxsize"))
+                                        {
+                                            py const remaining = endtime - (Mod<"time">().attr("monotonic"))();
+                                            if (remaining <= py{ 0.0 })
+                                                py_raise(M("queue", "Full")());
+                                            self.attr("not_full").method("wait", { remaining });
+                                            if (self.attr("is_shutdown").truthy())
+                                                shut_down();
+                                        }
+                                    }
+                                }
+                                self.method("_put", { item });
+                                self.set_attr("unfinished_tasks", self.attr("unfinished_tasks") + I<1>());
+                                self.attr("not_empty").method("notify");
+                            });
+                            return py::none();
+                        }) },
+                    { "get", w.method("Queue", "get", { py_positional("block", boolean(true)), py_positional("timeout", py::none()) },
+                        [shut_down](arguments a) -> py
+                        {
+                            py self = a[0];
+                            py block = a[1];
+                            py timeout = a[2];
+                            py item;
+                            with_(self.attr("not_empty"), [&](py const&)
+                            {
+                                if (self.attr("is_shutdown").truthy() && !self.method("_qsize").truthy())
+                                    shut_down();
+                                if (!block.truthy())
+                                {
+                                    if (!self.method("_qsize").truthy())
+                                        py_raise(M("queue", "Empty")());
+                                }
+                                else if (timeout.is_none())
+                                {
+                                    while (!self.method("_qsize").truthy())
+                                    {
+                                        self.attr("not_empty").method("wait");
+                                        if (self.attr("is_shutdown").truthy() && !self.method("_qsize").truthy())
+                                            shut_down();
+                                    }
+                                }
+                                else if (timeout < I<0>())
+                                    py_raise("ValueError", std::string{ "'timeout' must be a non-negative number" });
+                                else
+                                {
+                                    py const endtime = (Mod<"time">().attr("monotonic"))() + timeout;
+                                    while (!self.method("_qsize").truthy())
+                                    {
+                                        py const remaining = endtime - (Mod<"time">().attr("monotonic"))();
+                                        if (remaining <= py{ 0.0 })
+                                            py_raise(M("queue", "Empty")());
+                                        self.attr("not_empty").method("wait", { remaining });
+                                        if (self.attr("is_shutdown").truthy() && !self.method("_qsize").truthy())
+                                            shut_down();
+                                    }
+                                }
+                                item = self.method("_get");
+                                self.attr("not_full").method("notify");
+                            });
+                            return item;
+                        }) },
+                    { "put_nowait", w.method("Queue", "put_nowait", { py_positional("item") }, [](arguments a) -> py
+                        {
+                            return a[0].method("put", { a[1] }, { { "block", boolean(false) } });
+                        }) },
+                    { "get_nowait", w.method("Queue", "get_nowait", {}, [](arguments a) -> py
+                        {
+                            return a[0].method("get", {}, { { "block", boolean(false) } });
+                        }) },
+                    { "shutdown", w.method("Queue", "shutdown", { py_positional("immediate", boolean(false)) }, [](arguments a) -> py
+                        {
+                            py self = a[0];
+                            py immediate = a[1];
+                            with_(self.attr("mutex"), [&](py const&)
+                            {
+                                self.set_attr("is_shutdown", boolean(true));
+                                if (immediate.truthy())
+                                {
+                                    while (self.method("_qsize").truthy())
+                                    {
+                                        self.method("_get");
+                                        if (self.attr("unfinished_tasks") > I<0>())
+                                            self.set_attr("unfinished_tasks", self.attr("unfinished_tasks") - I<1>());
+                                    }
+                                    // release all blocked threads in `join()`
+                                    self.attr("all_tasks_done").method("notify_all");
+                                }
+                                // All getters need to re-check queue-empty to raise ShutDown
+                                self.attr("not_empty").method("notify_all");
+                                self.attr("not_full").method("notify_all");
+                            });
+                            return py::none();
+                        }) },
+                    // Override these methods to implement other queue organizations
+                    // (e.g. stack or priority queue).
+                    // These will only be called with appropriate locks held
+
+                    // Initialize the queue representation
+                    { "_init", w.method("Queue", "_init", { py_positional("maxsize") }, [](arguments a) -> py
+                        {
+                            a[0].set_attr("queue", (Mod<"collections">().attr("deque"))());
+                            return py::none();
+                        }) },
+                    { "_qsize", w.method("Queue", "_qsize", {}, [](arguments a) -> py
+                        {
+                            return py{ a[0].attr("queue").size() };
+                        }) },
+                    // Put a new item in the queue
+                    { "_put", w.method("Queue", "_put", { py_positional("item") }, [](arguments a) -> py
+                        {
+                            a[0].attr("queue").method("append", { a[1] });
+                            return py::none();
+                        }) },
+                    // Get an item from the queue
+                    { "_get", w.method("Queue", "_get", {}, [](arguments a) -> py
+                        {
+                            return a[0].attr("queue").method("popleft");
+                        }) },
+                    { "__class_getitem__", B<"classmethod">()(M("types", "GenericAlias")) } });
+                py priorityQueue = w.make_class("PriorityQueue", { queue }, {
+                    { "__doc__", S("Variant of Queue that retrieves open entries in priority order (lowest first).\n\n    Entries are typically tuples of the form:  (priority number, data).\n    ") },
+                    { "_init", w.method("PriorityQueue", "_init", { py_positional("maxsize") }, [](arguments a) -> py
+                        {
+                            a[0].set_attr("queue", py_list({}));
+                            return py::none();
+                        }) },
+                    { "_qsize", w.method("PriorityQueue", "_qsize", {}, [](arguments a) -> py
+                        {
+                            return py{ a[0].attr("queue").size() };
+                        }) },
+                    { "_put", w.method("PriorityQueue", "_put", { py_positional("item") }, [](arguments a) -> py
+                        {
+                            (Mod<"heapq">().attr("heappush"))(a[0].attr("queue"), a[1]);
+                            return py::none();
+                        }) },
+                    { "_get", w.method("PriorityQueue", "_get", {}, [](arguments a) -> py
+                        {
+                            return (Mod<"heapq">().attr("heappop"))(a[0].attr("queue"));
+                        }) } });
+                py lifoQueue = w.make_class("LifoQueue", { queue }, {
+                    { "__doc__", S("Variant of Queue that retrieves most recently added entries first.") },
+                    { "_init", w.method("LifoQueue", "_init", { py_positional("maxsize") }, [](arguments a) -> py
+                        {
+                            a[0].set_attr("queue", py_list({}));
+                            return py::none();
+                        }) },
+                    { "_qsize", w.method("LifoQueue", "_qsize", {}, [](arguments a) -> py
+                        {
+                            return py{ a[0].attr("queue").size() };
+                        }) },
+                    { "_put", w.method("LifoQueue", "_put", { py_positional("item") }, [](arguments a) -> py
+                        {
+                            a[0].attr("queue").method("append", { a[1] });
+                            return py::none();
+                        }) },
+                    { "_get", w.method("LifoQueue", "_get", {}, [](arguments a) -> py
+                        {
+                            return a[0].attr("queue").method("pop");
+                        }) } });
+                return { queue, priorityQueue, lifoQueue };
+            }
+
+            // (_PySimpleQueue: Lib/queue.py's pure Python SimpleQueue (a deque and a threading.Semaphore), as it is (it is not reentrant))
+            object* py_simple_queue_class()
+            {
+                using namespace pyclass;
+                static module_writer const w{ "queue", nullptr };
+                py cls = w.make_class("_PySimpleQueue", {}, {
+                    { "__doc__", S("Simple, unbounded FIFO queue.\n\n    This pure Python implementation is not reentrant.\n    ") },
+                    { "__init__", w.method("_PySimpleQueue", "__init__", {}, [](arguments a) -> py
+                        {
+                            a[0].set_attr("_queue", (Mod<"collections">().attr("deque"))());
+                            a[0].set_attr("_count", (Mod<"threading">().attr("Semaphore"))(I<0>()));
+                            return py::none();
+                        }) },
+                    { "put", w.method("_PySimpleQueue", "put", { py_positional("item"), py_positional("block", boolean(true)), py_positional("timeout", py::none()) }, 
+                        [](arguments a) -> py
+                        {
+                            a[0].attr("_queue").method("append", { a[1] });
+                            a[0].attr("_count").method("release");
+                            return py::none();
+                        }) },
+                    { "get", w.method("_PySimpleQueue", "get", { py_positional("block", boolean(true)), py_positional("timeout", py::none()) }, [](arguments a) -> py
+                        {
+                            py timeout = a[2];
+                            if (!a[1].truthy())
+                                timeout = py::none();
+                            else if (!timeout.is_none() && timeout < I<0>())
+                                py_raise("ValueError", "'timeout' must be a non-negative number");
+                            if (!a[0].attr("_count").method("acquire", { a[1], timeout }).truthy())
+                                py_raise(M("queue", "Empty")());
+                            return a[0].attr("_queue").method("popleft");
+                        }) },
+                    { "put_nowait", w.method("_PySimpleQueue", "put_nowait", { py_positional("item") }, [](arguments a) -> py
+                        {
+                            return a[0].method("put", { a[1] }, { { "block", boolean(false) } });
+                        }) },
+                    { "get_nowait", w.method("_PySimpleQueue", "get_nowait", {}, [](arguments a) -> py
+                        {
+                            return a[0].method("get", {}, { { "block", boolean(false) } });
+                        }) },
+                    { "empty", w.method("_PySimpleQueue", "empty", {}, [](arguments a) -> py
+                        {
+                            return boolean(a[0].attr("_queue").size() == 0);
+                        }) },
+                    { "qsize", w.method("_PySimpleQueue", "qsize", {}, [](arguments a) -> py
+                        {
+                            return py{ a[0].attr("_queue").size() };
+                        }) },
+                    { "__class_getitem__", B<"classmethod">()(M("types", "GenericAlias")) } });
+                return cls.release();
             }
 
             bool queue_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
-                struct entry { char const* name; char const* qualified; queue_object::kind_t kind; };
-                static entry const sClasses[] = { { "Queue", "queue.Queue", queue_object::Fifo }, { "LifoQueue", "queue.LifoQueue", queue_object::Lifo },
-                    { "PriorityQueue", "queue.PriorityQueue", queue_object::Priority }, { "SimpleQueue", "_queue.SimpleQueue", queue_object::Simple } };
-                for (auto const& c : sClasses)
-                    aAttributes.emplace_back(c.name, context()->type_new(context(), c.name, c.qualified,
-                        [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object* { return new_queue(aData, as<tuple_object>(aArgs)->items, aKwargs); },
-                        reinterpret_cast<void*>(static_cast<std::uintptr_t>(c.kind)), instance_of));
                 for (auto const& e : { std::pair{ "Empty", "_queue.Empty" }, std::pair{ "Full", "queue.Full" }, std::pair{ "ShutDown", "queue.ShutDown" } })
                 {
                     if (!is_exception_class(e.second))
                         user_exception_bases()[e.second] = { "Exception" };
                     aAttributes.emplace_back(e.first, exception_class(e.second));
                 }
+                auto classes = py_queue_classes();
+                aAttributes.emplace_back("Queue", classes[0].release());
+                aAttributes.emplace_back("PriorityQueue", classes[1].release());
+                aAttributes.emplace_back("LifoQueue", classes[2].release());
+                aAttributes.emplace_back("_PySimpleQueue", py_simple_queue_class());
+                aAttributes.emplace_back("SimpleQueue", context()->type_new(context(), "SimpleQueue", "_queue.SimpleQueue", new_simple_queue, nullptr, instance_of));
                 return true;
             }
 

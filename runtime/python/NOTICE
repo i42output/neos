@@ -30,13 +30,23 @@ names the CPython sources it is derived from.
                        Python-to-C++ translator (py2neos) (see uvloop below)
   asyncio_*_docs.hpp   Lib/asyncio and Modules/_asynciomodule.c (their
                        docstrings, generated)
-  bytes.cpp            Objects/bytesobject.c, Objects/bytearrayobject.c and
-                       Objects/bytes_methods.c
+  bytes.cpp            Objects/bytesobject.c, Objects/bytearrayobject.c,
+                       Objects/bytes_methods.c, Objects/memoryobject.c and
+                       Objects/typeobject.c (the buffer protocol of Python
+                       classes: PEP 688)
   calendar.cpp         Lib/calendar.py
   codec_tables.hpp     Lib/encodings: its aliases and its codecs' tables
   codecs.cpp           Objects/unicodeobject.c, Python/codecs.c and
                        Lib/encodings
   collections_abc.cpp  Lib/_collections_abc.py and Lib/collections/abc.py
+  cjkcodecs/           Modules/cjkcodecs (by Hye-Shik Chang): the CJK codec
+                       modules (_codecs_cn.c, _codecs_hk.c, _codecs_iso2022.c,
+                       _codecs_jp.c, _codecs_kr.c and _codecs_tw.c), their
+                       mapping tables (mappings_*.h), alg_jisx0201.h,
+                       emu_jisx0213_2000.h and README, as they are (compiled
+                       as C); cjkcodecs.h and multibytecodec.h are
+                       Modules/cjkcodecs's, adapted (the codecs' interface
+                       without CPython's objects)
   cmd.cpp              Lib/cmd.py
   code.cpp             Lib/code.py
   codeop.cpp           Lib/codeop.py
@@ -81,6 +91,11 @@ names the CPython sources it is derived from.
   getopt.cpp           Lib/getopt.py
   graphlib.cpp         Lib/graphlib.py
   gzip.cpp             Lib/gzip.py
+  hashlib.cpp          Modules/_blake2 (BLAKE2's parameters), Modules/md5module.c,
+                       sha1module.c, sha2module.c and sha3module.c (the
+                       modules _md5, _sha1, _sha2, _sha3 and _blake2) and
+                       Lib/hashlib.py (its algorithms are the reference
+                       implementations: see BLAKE2 below)
   hmac.cpp             Lib/hmac.py
   http.cpp, http_client.cpp, http_cookiejar.cpp and http_server.cpp
                        Lib/http/__init__.py, Lib/http/client.py,
@@ -95,7 +110,9 @@ names the CPython sources it is derived from.
   gettext.cpp          Lib/gettext.py
   ftplib.cpp           Lib/ftplib.py
   generators.cpp       Objects/genobject.c (the asynchronous generators' hooks and
-                       finalization, the warning of a coroutine never awaited)
+                       finalization, the warning of a coroutine never awaited,
+                       the delegation of throw() and close(), asend/athrow
+                       close())
   imaplib.cpp          Lib/imaplib.py (by Piers Lauder and its contributors)
   importlib.cpp        Lib/importlib/__init__.py, Lib/importlib/util.py,
                        Lib/importlib/_bootstrap.py (import_module and its
@@ -125,6 +142,9 @@ names the CPython sources it is derived from.
   markupbase.cpp       Lib/_markupbase.py
   mailbox.cpp          Lib/mailbox.py
   mimetypes.cpp        Lib/mimetypes.py
+  multibytecodec.cpp   Modules/cjkcodecs/multibytecodec.c (by Hye-Shik Chang;
+                       the module _multibytecodec) and Lib/encodings's CJK
+                       codec modules (big5.py etc.: their codecs' CodecInfo)
   netrc.cpp            Lib/netrc.py
   nturl2path.cpp       Lib/nturl2path.py
   optparse.cpp         Lib/optparse.py (Copyright (c) 2001-2006 Gregory P. Ward;
@@ -240,7 +260,8 @@ names the CPython sources it is derived from.
   subprocess_docs.hpp  Lib/subprocess.py (its docstrings, generated)
   *_docs.hpp of the modules above
                        their docstrings, generated
-  support.cpp          Objects/genericaliasobject.c and Lib/__future__.py
+  support.cpp          Objects/genericaliasobject.c, Lib/__future__.py and
+                       Objects/frameobject.c (frame.clear()'s checks)
   sys.cpp              Python/stdlib_module_names.h (sys.stdlib_module_names),
                        Python/sysmodule.c (the asynchronous generators' hooks)
                        and Python/errors.c (the default unraisable hook)
@@ -249,8 +270,9 @@ names the CPython sources it is derived from.
   text.cpp             Lib/textwrap.py
   textmodules.cpp      Lib/string.py (Template's pattern) and Modules/binascii.c
                        (a2b_qp, b2a_qp, a2b_uu and b2a_uu)
-  threads.cpp          Lib/threading.py, Lib/_threading_local.py and
-                       Modules/_threadmodule.c
+  threads.cpp          Lib/threading.py, Lib/_threading_local.py,
+                       Modules/_threadmodule.c, Python/thread_pthread.h and
+                       Python/thread_nt.h (the stack size's validation)
   time.cpp             Modules/timemodule.c and Lib/_strptime.py (the
                        warning of a day of month without a year)
   tomllib.cpp, tomllib_parser.cpp, tomllib_re.cpp and tomllib_types.cpp

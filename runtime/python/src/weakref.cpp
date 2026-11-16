@@ -57,6 +57,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        bool process_exited();      // (objects.cpp: the process is exiting: no code of the program runs)
+
         std::atomic<std::size_t> gWeaklyReferenced{ 0u };
 
         namespace
@@ -1883,13 +1885,16 @@ namespace neos::python_runtime
                 ref const ownedCallback{ callback };
                 auto const owner = as_weakref(w).owner;
                 ref const ownedOwner{ owner };
+                // (the process exiting: not called (see process_exited))
+                if (process_exited())
+                    continue;
                 ref const args{ make_tuple({ new_reference(owner != nullptr ? owner : w) }) };
                 ref const result{ call(callback, args.get(), nullptr) };
                 if (!result)
                     write_unraisable(callback);
             }
             if (pending)
-                fn_raise(pending.get());
+                reraise_exception(pending.get());
         }
     }
 }

@@ -30,7 +30,8 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Objects/genericaliasobject.c and Lib/__future__.py), Copyright
+  Portions of this file are derived from CPython 3.13 (Objects/genericaliasobject.c, Lib/__future__.py and
+  Objects/frameobject.c (frame.clear()'s checks)), Copyright
   (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation
   License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from C and Python to C++ for the neos Python
   runtime plugin and adapted to its object model (see runtime/python/NOTICE).
@@ -64,6 +65,11 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        int generator_state(object* aGenerator);    // (generators.cpp: 0 not started, 1 running, 2 suspended, 3 finished)
+        void generator_frame_made(object* aGenerator, object* aFrame);      // (generators.cpp: a frame of the generator's (not a reference))
+        void generator_frame_released(object* aGenerator, object* aFrame);
+        void generator_frame_clear(object* aGenerator);     // (generators.cpp: frame.clear() of a frame of a generator that is not running or suspended)
+
         namespace
         {
             struct with_items_object
@@ -382,7 +388,14 @@ namespace neos::python_runtime
                 std::size_t index = 0u;
                 object* back = nullptr;     ///< (once made)
                 object* code = nullptr;     ///< (once made)
-                ~frame_object() { release(back); release(code); }
+                object* generator = nullptr;    ///< (a generator's (gi_frame's): the generator (not a reference: null once it is destroyed))
+                ~frame_object()
+                {
+                    if (generator != nullptr)
+                        generator_frame_released(generator, &h.base);
+                    release(back);
+                    release(code);
+                }
             };
 
             frame_object& as_frame(object* aObject) { return *reinterpret_cast<frame_object*>(aObject); }
@@ -461,7 +474,31 @@ namespace neos::python_runtime
                 return frame_line(aFrame);
             }
 
-            builtin_entry const sFrameClear{ "clear", [](std::vector<object*> const&, object*) -> object* { return (retain(none()), none()); } };
+            // (frame.clear(): not of a frame that is executing or of a generator that is suspended (frame_clear's RuntimeErrors); its locals are 
+            // not the frame's to clear (compiled code's))
+            builtin_entry const sFrameClear{ "clear", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                {
+                    if (!no_keywords(aKwargs, "clear"))
+                        return nullptr;
+                    if (aArgs.size() != 1u)
+                        return error("TypeError", "frame.clear() takes no arguments (" + std::to_string(aArgs.empty() ? 0u : aArgs.size() - 1u) + " given)");
+                    auto const& self = as_frame(aArgs[0]);
+                    if (self.generator != nullptr)
+                    {
+                        auto const state = generator_state(self.generator);
+                        if (state == 1)
+                            return error("RuntimeError", "cannot clear an executing frame");
+                        if (state == 2)
+                            return error("RuntimeError", "cannot clear a suspended frame");
+                        generator_frame_clear(self.generator);
+                        return failed() ? nullptr : (retain(none()), none());
+                    }
+                    auto const current = capture_frames();
+                    for (auto const& c : *current)
+                        if (same_frame(c, frame_of(self)))
+                            return error("RuntimeError", "cannot clear an executing frame");
+                    return (retain(none()), none());
+                } };
 
             neos_py_type make_frame_type()
             {
@@ -629,6 +666,21 @@ namespace neos::python_runtime
         object* make_frame(frame_stack const& aStack, std::size_t aIndex)
         {
             return &(new frame_object{ { { &sFrameType.base } }, aStack, aIndex })->h.base;
+        }
+
+        // (a generator's frame (its gi_frame, cr_frame or ag_frame))
+        object* make_generator_frame(frame_stack const& aStack, std::size_t aIndex, object* aGenerator)
+        {
+            auto const frame = new frame_object{ { { &sFrameType.base } }, aStack, aIndex };
+            frame->generator = aGenerator;
+            generator_frame_made(aGenerator, &frame->h.base);
+            return &frame->h.base;
+        }
+
+        // (the generator of a frame of its has been destroyed)
+        void frame_generator_gone(object* aFrame)
+        {
+            as_frame(aFrame).generator = nullptr;
         }
 
         void explicit_raise()

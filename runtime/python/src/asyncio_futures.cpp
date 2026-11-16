@@ -964,8 +964,9 @@ namespace neos::python_runtime::detail::asyncio
         {
             if (delay <= py{ 0 })
             {
-                // (__sleep0: a bare yield (the task's step knows how to handle it): an iteration of the loop skipped)
-                py_yield(none());
+                // (await __sleep0(): a bare yield (the task's step knows how to handle it): an iteration of the loop skipped (awaited, not 
+                // yielded: an asynchronous generator's await of it is not a yield of its own))
+                py_await(object_of("tasks.__sleep0")());
                 return result;
             }
             if (M("math", "isnan")(delay).truthy())

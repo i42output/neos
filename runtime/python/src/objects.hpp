@@ -316,7 +316,8 @@ namespace neos::python_runtime
         inline neos_py_type sSliceType = make_type("python.slice", "slice", retain_object, release_object<slice_object>);
         inline neos_py_type sRangeType = make_type("python.range", "range", retain_object, release_object<range_object>);
         inline neos_py_type sIteratorType = make_type("python.iterator", "iterator", retain_object, release_object<iterator_object>);
-        inline neos_py_type sFunctionType = make_type("python.builtin_function_or_method", "builtin_function_or_method", retain_object, release_object<function_object>);
+        // (a builtin function can be bound to another (e.g. f.__call__.__call__...): its release is a container's (a deep chain's destruction deferred))
+        inline neos_py_type sFunctionType = make_type("python.builtin_function_or_method", "builtin_function_or_method", retain_object, release_container<function_object>);
 
         inline singleton sNone{ { &sNoneType.base } };
         inline singleton sNotImplemented{ { &sNotImplementedType.base } };
@@ -624,7 +625,7 @@ namespace neos::python_runtime
             int (*setattr)(object* aOwner, char const* aName, object* aValue) = nullptr;
         };
         std::map<std::string, native_base_hooks, std::less<>>& native_bases();
-        void write_unraisable(object* aObject);         // (the pending exception: "Exception ignored in: <aObject>" and its report)
+        void write_unraisable(object* aObject, object* aMessage = nullptr); // (the pending exception: "Exception ignored in: <aObject>" (aMessage (a str): "<aMessage>: <aObject>", its err_msg) and its report)
         void unraisable_report(object* aException, object* aMessage, object* aObject);  // (sys.__unraisablehook__'s report of an exception (aMessage: err_msg (a str, or null: none)))
         object* fn_tuple_of(object* aIterable);
         object* class_of(object* aObject);
@@ -832,6 +833,11 @@ namespace neos::python_runtime
         object* imported_modules();                     // (sys.modules: a new reference)
         bool modules_imported(char const* aName);
         object* handled_exception();                    // (the exception being handled (borrowed), or null)
+        // (the exceptions being handled: a generator's (handled where it suspended) are its own, taken when it suspends and restored when it
+        // is resumed, as CPython's gi_exc_state (generators.cpp))
+        std::size_t handling_depth();
+        std::vector<object*> handling_take(std::size_t aDepth);     // (those handled since the depth was aDepth: their references)
+        void handling_restore(std::vector<object*>& aHandling);   // (steals them)
         void extend_sys(std::vector<std::pair<std::string, object*>>& aAttributes);  // (sys.cpp)
 
         // --- helpers of the modules of the standard library

@@ -32,11 +32,19 @@
 
   Its BLAKE2b and BLAKE2s implementation is derived from Markku-Juhani O. Saarinen's BLAKE2 reference implementation
   (RFC 7693, Appendix C; https://github.com/mjosaarinen/blake2_mjosref), dedicated to the public domain under CC0 1.0
-  Universal. Changes: translated to C++ (a template for both variants), with BLAKE2's salt and personalization added
-  (see runtime/python/NOTICE).
+  Universal. Changes: translated to C++ (a template for both variants), with BLAKE2's salt, personalization and tree
+  parameters added (see runtime/python/NOTICE).
+
+  Portions of this file are derived from CPython 3.13 (Modules/_blake2/blake2b_impl.c and blake2module.c (BLAKE2's
+  parameters, their checks and messages), Modules/md5module.c, sha1module.c, sha2module.c and sha3module.c (the modules
+  _md5, _sha1, _sha2, _sha3 and _blake2: their types and constructors) and Lib/hashlib.py), Copyright (c) 2001-2024 Python
+  Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
+  runtime/python/LICENSE.PSF). Changes: translated from C and Python to C++ for the neos Python runtime plugin and adapted
+  to its object model (see runtime/python/NOTICE).
 */
 
-// The module hashlib: MD5, SHA-1, SHA-2, SHA-3 (and SHAKE), BLAKE2b and BLAKE2s (their reference algorithms), and pbkdf2_hmac
+// The module hashlib: MD5, SHA-1, SHA-2, SHA-3 (and SHAKE), BLAKE2b and BLAKE2s (their reference algorithms), and pbkdf2_hmac; and
+// the modules of each algorithm (_md5, _sha1, _sha2, _sha3 and _blake2), whose constructors hashlib's are (there is no _hashlib)
 
 #include <algorithm>
 #include <array>
@@ -52,6 +60,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        bool is_big(object* aObject);   // (objects.cpp: an int beyond 64 bits)
+
         namespace
         {
             std::uint32_t rotl32(std::uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
@@ -426,6 +436,8 @@ namespace neos::python_runtime
                 Word t0 = 0u, t1 = 0u;
                 std::size_t size;
                 std::string key;
+                bool lastNode;              ///< (the tree's last node at its depth (the last_node parameter): its final block flagged as such)
+                using parameter_block = std::array<unsigned char, 8u * sizeof(Word)>;
                 static constexpr std::array<Word, 8> iv()
                 {
                     if constexpr (sizeof(Word) == 8u)
@@ -434,17 +446,33 @@ namespace neos::python_runtime
                     else
                         return { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au, 0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
                 }
-                blake2(std::size_t aSize, std::string const& aKey, std::string const& aSalt, std::string const& aPerson) : size{ aSize }, key{ aKey }
+                // (the parameter block (RFC 7693 2.5; BLAKE2's tree parameters: blake2b's node offset 64 bits, blake2s's 48) but for its
+                // digest and key lengths (the constructor's))
+                static parameter_block parameters(std::string const& aSalt, std::string const& aPerson, unsigned aFanout = 1u, unsigned aDepth = 1u,
+                    std::uint32_t aLeafSize = 0u, std::uint64_t aNodeOffset = 0u, unsigned aNodeDepth = 0u, unsigned aInnerSize = 0u)
+                {
+                    parameter_block result{};
+                    result[2] = static_cast<unsigned char>(aFanout);
+                    result[3] = static_cast<unsigned char>(aDepth);
+                    for (std::size_t i = 0u; i < 4u; ++i)
+                        result[4u + i] = static_cast<unsigned char>(aLeafSize >> (8u * i));
+                    constexpr std::size_t offsetBytes = sizeof(Word) == 8u ? 8u : 6u;
+                    for (std::size_t i = 0u; i < offsetBytes; ++i)
+                        result[8u + i] = static_cast<unsigned char>(aNodeOffset >> (8u * i));
+                    result[8u + offsetBytes] = static_cast<unsigned char>(aNodeDepth);
+                    result[9u + offsetBytes] = static_cast<unsigned char>(aInnerSize);
+                    std::copy(aSalt.begin(), aSalt.end(), result.begin() + static_cast<std::ptrdiff_t>(4u * sizeof(Word)));
+                    std::copy(aPerson.begin(), aPerson.end(), result.begin() + static_cast<std::ptrdiff_t>(6u * sizeof(Word)));
+                    return result;
+                }
+                blake2(std::size_t aSize, std::string const& aKey, parameter_block aParameters, bool aLastNode = false) : size{ aSize }, key{ aKey }, 
+                    lastNode{ aLastNode }
                 {
                     h = iv();
-                    h[0] ^= static_cast<Word>(0x01010000u ^ (aKey.size() << 8) ^ aSize);
-                    auto const mix = [&](std::size_t aWord, std::string const& aBytes)
-                    {
-                        for (std::size_t i = 0u; i < aBytes.size(); ++i)
-                            h[aWord + i / sizeof(Word)] ^= static_cast<Word>(static_cast<unsigned char>(aBytes[i])) << (8u * (i % sizeof(Word)));
-                    };
-                    mix(4u, aSalt);
-                    mix(6u, aPerson);
+                    aParameters[0] = static_cast<unsigned char>(aSize);
+                    aParameters[1] = static_cast<unsigned char>(aKey.size());
+                    for (std::size_t i = 0u; i < aParameters.size(); ++i)
+                        h[i / sizeof(Word)] ^= static_cast<Word>(aParameters[i]) << (8u * (i % sizeof(Word)));
                     if (!aKey.empty())
                     {
                         std::string block = aKey;
@@ -480,7 +508,11 @@ namespace neos::python_runtime
                     v[12] ^= t0;
                     v[13] ^= t1;
                     if (aLast)
+                    {
                         v[14] = static_cast<Word>(~v[14]);
+                        if (lastNode)
+                            v[15] = static_cast<Word>(~v[15]);
+                    }
                     auto const g = [&](int a, int b, int c, int d, Word x, Word y)
                     {
                         v[a] = v[a] + v[b] + x; v[d] = rotr(v[d] ^ v[a], r1);
@@ -554,8 +586,8 @@ namespace neos::python_runtime
                 if (aName == "sha3_512") return std::make_unique<sha3>(72u, 64u, 0x06u);
                 if (aName == "shake_128") return std::make_unique<sha3>(168u, 0u, 0x1Fu);
                 if (aName == "shake_256") return std::make_unique<sha3>(136u, 0u, 0x1Fu);
-                if (aName == "blake2b") return std::make_unique<blake2b>(64u, "", "", "");
-                if (aName == "blake2s") return std::make_unique<blake2s>(32u, "", "", "");
+                if (aName == "blake2b") return std::make_unique<blake2b>(64u, "", blake2b::parameters("", ""));
+                if (aName == "blake2s") return std::make_unique<blake2s>(32u, "", blake2s::parameters("", ""));
                 return nullptr;
             }
 
@@ -568,8 +600,19 @@ namespace neos::python_runtime
                 std::unique_ptr<hasher> state;
             };
 
-            neos_py_type make_hash_type();
-            neos_py_type sHashType = make_hash_type();
+            // (the types of the hash objects of the modules of each algorithm (_md5, _sha1, _sha2, _sha3, _blake2: CPython's C extension modules,
+            // their objects of types of their own), which hashlib's constructors are (as Lib/hashlib.py's without OpenSSL (_hashlib): there is 
+            // no _hashlib module))
+            neos_py_type make_hash_type(char const* aQualifiedName, char const* aName);
+            neos_py_type sMd5Type = make_hash_type("_md5.md5", "md5");
+            neos_py_type sSha1Type = make_hash_type("_sha1.sha1", "sha1");
+            neos_py_type sSha2Types[] = { make_hash_type("_sha2.SHA224Type", "SHA224Type"), make_hash_type("_sha2.SHA256Type", "SHA256Type"),
+                make_hash_type("_sha2.SHA384Type", "SHA384Type"), make_hash_type("_sha2.SHA512Type", "SHA512Type") };
+            neos_py_type sSha3Types[] = { make_hash_type("_sha3.sha3_224", "sha3_224"), make_hash_type("_sha3.sha3_256", "sha3_256"),
+                make_hash_type("_sha3.sha3_384", "sha3_384"), make_hash_type("_sha3.sha3_512", "sha3_512"), make_hash_type("_sha3.shake_128", "shake_128"),
+                make_hash_type("_sha3.shake_256", "shake_256") };
+            neos_py_type sBlake2bType = make_hash_type("_blake2.blake2b", "blake2b");
+            neos_py_type sBlake2sType = make_hash_type("_blake2.blake2s", "blake2s");
             hash_object& as_hash(object* aObject) { return *reinterpret_cast<hash_object*>(aObject); }
 
             std::string hex_of(std::string const& aBytes)
@@ -601,12 +644,13 @@ namespace neos::python_runtime
 
             bool is_shake(hash_object const& aHash) { return aHash.name.starts_with("shake_"); }
 
-            neos_py_type make_hash_type()
+            neos_py_type make_hash_type(char const* aQualifiedName, char const* aName)
             {
-                auto type = make_type("_hashlib.HASH", "HASH", retain_object, release_object<hash_object>);
+                auto type = make_type(aQualifiedName, aName, retain_object, release_object<hash_object>);
                 type.repr = [](neos_py_context*, object* aSelf) -> object*
                 {
-                    return make_str("<" + as_hash(aSelf).name + " _hashlib.HASH object @ " + object_address(aSelf) + ">");
+                    // (object's)
+                    return make_str(std::string{ "<" } + aSelf->type->name + " object at " + object_address(aSelf) + ">");
                 };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
@@ -618,6 +662,17 @@ namespace neos::python_runtime
                         return make_int(static_cast<long long>(hash.state->digest_size()));
                     if (name == "block_size")
                         return make_int(static_cast<long long>(hash.state->block_size()));
+                    // (_sha3's objects: their Keccak parameters (sha3module.c's SHA3_getseters))
+                    if (std::string_view{ aSelf->type->name }.starts_with("_sha3."))
+                    {
+                        auto const& keccak = static_cast<sha3 const&>(*hash.state);
+                        if (name == "_capacity_bits")
+                            return make_int(static_cast<long long>(1600u - 8u * keccak.rate));
+                        if (name == "_rate_bits")
+                            return make_int(static_cast<long long>(8u * keccak.rate));
+                        if (name == "_suffix")
+                            return make_bytes(std::string(1u, static_cast<char>(keccak.suffix)));
+                    }
                     static char const* const sMethods[] = { "update", "digest", "hexdigest", "copy" };
                     for (std::size_t i = 0u; i < std::size(sMethods); ++i)
                         if (name == sMethods[i])
@@ -665,19 +720,19 @@ namespace neos::python_runtime
                                     }
                                 default:
                                     {
-                                        auto const copy = new hash_object{ { { &sHashType.base } }, hash.name, hash.state->clone() };
+                                        auto const copy = new hash_object{ { { args[0]->type } }, hash.name, hash.state->clone() };
                                         return &copy->h.base;
                                     }
                                 }
                             }, reinterpret_cast<void*>(i), aSelf);
-                    return error("AttributeError", std::string{ "'_hashlib.HASH' object has no attribute '" } + aName + "'");
+                    return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
                 };
                 return type;
             }
 
-            object* new_hash(std::string const& aName, std::unique_ptr<hasher> aState, object* aData)
+            object* new_hash(std::string const& aName, std::unique_ptr<hasher> aState, object* aData, neos_py_type const& aType)
             {
-                ref result{ &(new hash_object{ { { &sHashType.base } }, aName, std::move(aState) })->h.base };
+                ref result{ &(new hash_object{ { { &aType.base } }, aName, std::move(aState) })->h.base };
                 if (aData != nullptr)
                 {
                     std::string_view data;
@@ -701,57 +756,153 @@ namespace neos::python_runtime
                 return true;
             }
 
-            struct constructor_entry { char const* name; };
-            constructor_entry const sConstructors[] = { { "md5" }, { "sha1" }, { "sha224" }, { "sha256" }, { "sha384" }, { "sha512" }, { "sha3_224" }, { "sha3_256" },
-                { "sha3_384" }, { "sha3_512" }, { "shake_128" }, { "shake_256" } };
+            // (a hash's constructor (data=b'', *, usedforsecurity=True, string=None): as md5module.c's _md5_md5_impl, sha3module.c's py_sha3_new_impl)
+            struct module_constructor 
+            { 
+                char const* name; 
+                neos_py_type const* type; 
+            };
+            module_constructor const sModuleConstructors[] = { { "md5", &sMd5Type }, { "sha1", &sSha1Type }, { "sha224", &sSha2Types[0] }, { "sha256", &sSha2Types[1] },
+                { "sha384", &sSha2Types[2] }, { "sha512", &sSha2Types[3] }, { "sha3_224", &sSha3Types[0] }, { "sha3_256", &sSha3Types[1] }, { "sha3_384", &sSha3Types[2] },
+                { "sha3_512", &sSha3Types[3] }, { "shake_128", &sSha3Types[4] }, { "shake_256", &sSha3Types[5] } };
 
-            object* call_constructor(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
+            object* call_module_constructor(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
             {
-                auto const& entry = *static_cast<constructor_entry const*>(aData);
+                auto const& entry = *static_cast<module_constructor const*>(aData);
                 std::vector<object*> a;
                 if (!parse_arguments(entry.name, as<tuple_object>(aArgs)->items, aKwargs, { "data", "usedforsecurity", "string" }, 0u, 0u, a))
                     return nullptr;
                 object* data = nullptr;
                 if (!data_or_string(a[0], a[2], data))
                     return nullptr;
-                return new_hash(entry.name, make_hasher(entry.name), data);
+                return new_hash(entry.name, make_hasher(entry.name), data, *entry.type);
             }
 
+            // (the constructors of md5 ... sha512 (functions) and sha3_224 ... shake_256 (_sha3's types): one object each (hashlib's are _md5's
+            // etc.))
+            object* module_constructor_object(std::size_t aIndex)
+            {
+                static object* sObjects[std::size(sModuleConstructors)] = {};
+                auto& o = sObjects[aIndex];
+                if (o == nullptr)
+                {
+                    auto const& c = sModuleConstructors[aIndex];
+                    if (std::string_view{ c.type->base.name }.starts_with("_sha3."))
+                        o = context()->type_new(context(), c.type->name, c.type->base.name, call_module_constructor,
+                            const_cast<module_constructor*>(&c), [](neos_py_context*, void* aData, object* aObject) -> int
+                            {
+                                return aObject != nullptr && aObject->type == &static_cast<module_constructor const*>(aData)->type->base ? 1 : 0;
+                            });
+                    else
+                        o = make_function(c.name, call_module_constructor, const_cast<module_constructor*>(&c));
+                }
+                return new_reference(o);
+            }
+
+
+            // (an unsigned C integer argument of at most aBits bits (Argument Clinic's unsigned_long and unsigned_long_long converters, as 
+            // _PyLong_UnsignedLong_Converter's): a negative int a ValueError, one too large an OverflowError (aTooLarge: PyLong_AsUnsignedLong's or
+            // PyLong_AsUnsignedLongLong's message))
+            bool unsigned_argument(object* aValue, unsigned aBits, char const* aTooLarge, std::uint64_t& aResult)
+            {
+                if (is_big(aValue))
+                {
+                    auto const value = big_value(aValue);
+                    if (big_negative(value))
+                    {
+                        error("ValueError", "value must be positive");
+                        return false;
+                    }
+                    if (big_bit_length(value) > aBits)
+                    {
+                        error("OverflowError", aTooLarge);
+                        return false;
+                    }
+                    aResult = std::stoull(big_digits(value, 16), nullptr, 16);
+                    return true;
+                }
+                long long value = 0;
+                if (!to_index(aValue, value))
+                    return false;
+                if (value < 0)
+                {
+                    error("ValueError", "value must be positive");
+                    return false;
+                }
+                if (aBits < 64u && static_cast<std::uint64_t>(value) >> aBits != 0u)
+                {
+                    error("OverflowError", aTooLarge);
+                    return false;
+                }
+                aResult = static_cast<std::uint64_t>(value);
+                return true;
+            }
+
+            // (_blake2.blake2b/blake2s(data=b'', *, digest_size, key, salt, person, fanout, depth, leaf_size, node_offset, node_depth, inner_size,
+            // last_node, usedforsecurity, string): as blake2b_impl.c's py_blake2b_new_impl (its checks and messages))
             object* blake(std::vector<object*> const& aArgs, object* aKwargs, bool aB)
             {
+                char const* const name = aB ? "blake2b" : "blake2s";
                 std::vector<object*> a;
-                if (!parse_arguments(aB ? "blake2b" : "blake2s", aArgs, aKwargs, { "data", "digest_size", "key", "salt", "person", "fanout", "depth", "leaf_size",
+                if (!parse_arguments(name, aArgs, aKwargs, { "data", "digest_size", "key", "salt", "person", "fanout", "depth", "leaf_size",
                     "node_offset", "node_depth", "inner_size", "last_node", "usedforsecurity", "string" }, 0u, 0u, a))
                     return nullptr;
                 if (!data_or_string(a[0], a[13], a[0]))
                     return nullptr;
                 std::size_t const maxSize = aB ? 64u : 32u;
-                long long size = static_cast<long long>(maxSize);
-                if (a[1] != nullptr && !to_index(a[1], size))
-                    return nullptr;
-                if (size < 1 || size > static_cast<long long>(maxSize))
+                long long values[] = { static_cast<long long>(maxSize), 1, 1, 0, 0 };   // (digest_size, fanout, depth, node_depth, inner_size)
+                std::size_t const indices[] = { 1u, 5u, 6u, 9u, 10u };
+                for (std::size_t i = 0u; i < std::size(indices); ++i)
+                    if (a[indices[i]] != nullptr && !to_index(a[indices[i]], values[i]))
+                        return nullptr;
+                if (values[0] <= 0 || values[0] > static_cast<long long>(maxSize))
                     return error("ValueError", "digest_size must be between 1 and " + std::to_string(maxSize) + " bytes");
                 std::string parts[3];
                 for (int i = 0; i < 3; ++i)
                     if (a[2 + i] != nullptr)
                     {
                         std::string_view b;
-                        if (!bytes_like(a[2 + i], b))
-                            return error("TypeError", "a bytes-like object is required");
+                        if (kind_of(a[2 + i]) == NEOS_PY_STR || !bytes_like(a[2 + i], b))
+                            return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(a[2 + i]) + "'");
                         parts[i] = std::string{ b };
                     }
-                if (parts[0].size() > maxSize)
-                    return error("ValueError", "maximum key length is " + std::to_string(maxSize) + " bytes");
                 if (parts[1].size() > maxSize / 4u)
                     return error("ValueError", "maximum salt length is " + std::to_string(maxSize / 4u) + " bytes");
                 if (parts[2].size() > maxSize / 4u)
                     return error("ValueError", "maximum person length is " + std::to_string(maxSize / 4u) + " bytes");
+                if (values[1] < 0 || values[1] > 255)
+                    return error("ValueError", "fanout must be between 0 and 255");
+                if (values[2] <= 0 || values[2] > 255)
+                    return error("ValueError", "depth must be between 1 and 255");
+                std::uint64_t leafSize = 0u, nodeOffset = 0u;
+                if (a[7] != nullptr && !unsigned_argument(a[7], 8u * sizeof(unsigned long), "Python int too large to convert to C unsigned long", leafSize))
+                    return nullptr;
+                if (leafSize > 0xFFFFFFFFu)
+                    return error("OverflowError", "leaf_size is too large");
+                if (a[8] != nullptr && !unsigned_argument(a[8], 64u, "int too big to convert", nodeOffset))
+                    return nullptr;
+                if (!aB && nodeOffset > 0xFFFFFFFFFFFFull)
+                    return error("OverflowError", "node_offset is too large");
+                if (values[3] < 0 || values[3] > 255)
+                    return error("ValueError", "node_depth must be between 0 and 255");
+                if (values[4] < 0 || values[4] > static_cast<long long>(maxSize))
+                    return error("ValueError", "inner_size must be between 0 and is " + std::to_string(maxSize));
+                if (parts[0].size() > maxSize)
+                    return error("ValueError", "maximum key length is " + std::to_string(maxSize) + " bytes");
+                int lastNode = 0;
+                if (a[11] != nullptr && (lastNode = truth(a[11])) < 0)
+                    return nullptr;
+                auto const size = static_cast<std::size_t>(values[0]);
+                auto const fanout = static_cast<unsigned>(values[1]), depth = static_cast<unsigned>(values[2]);
+                auto const nodeDepth = static_cast<unsigned>(values[3]), innerSize = static_cast<unsigned>(values[4]);
                 std::unique_ptr<hasher> state;
                 if (aB)
-                    state = std::make_unique<blake2b>(static_cast<std::size_t>(size), parts[0], parts[1], parts[2]);
+                    state = std::make_unique<blake2b>(size, parts[0], blake2b::parameters(parts[1], parts[2], fanout, depth, static_cast<std::uint32_t>(leafSize),
+                        nodeOffset, nodeDepth, innerSize), lastNode != 0);
                 else
-                    state = std::make_unique<blake2s>(static_cast<std::size_t>(size), parts[0], parts[1], parts[2]);
-                return new_hash(aB ? "blake2b" : "blake2s", std::move(state), a[0]);
+                    state = std::make_unique<blake2s>(size, parts[0], blake2s::parameters(parts[1], parts[2], fanout, depth, static_cast<std::uint32_t>(leafSize),
+                        nodeOffset, nodeDepth, innerSize), lastNode != 0);
+                return new_hash(name, std::move(state), a[0], aB ? sBlake2bType : sBlake2sType);
             }
 
             std::string hmac(std::string const& aName, std::string aKey, std::string const& aMessage)
@@ -814,10 +965,10 @@ namespace neos::python_runtime
                 object* data = nullptr;
                 if (!data_or_string(a[0], a[2], data))
                     return nullptr;
-                auto state = make_hasher(name);
-                if (!state)
-                    return error("ValueError", "unsupported hash type " + name);
-                return new_hash(name, std::move(state), data);
+                for (auto const& c : sModuleConstructors)
+                    if (name == c.name)
+                        return new_hash(name, make_hasher(name), data, *c.type);
+                return error("ValueError", "unsupported hash type " + name);
             }
 
             // (file_digest(fileobj, digest, /, *, _bufsize=2**18): the hash of a file object's data (Lib/hashlib.py's))
@@ -911,7 +1062,9 @@ namespace neos::python_runtime
                                 // (no extension module (ImportError): the hash is not supported)
                                 bool const imported = [&]()
                                 {
-                                    ref const m{ fn_import(module) };
+                                    // (the import statement's (__import__: sys.modules's None halts it))
+                                    ref const moduleName{ make_str(module) };
+                                    ref const m{ b_import({ moduleName.get() }, nullptr) };
                                     if (!m)
                                         return false;
                                     for (auto const& n : names)
@@ -944,8 +1097,6 @@ namespace neos::python_runtime
                             }
                         return error("ValueError", "unsupported hash type " + name);
                     } },
-                { "blake2b", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return blake(aArgs, aKwargs, true); } },
-                { "blake2s", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return blake(aArgs, aKwargs, false); } },
                 { "pbkdf2_hmac", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
@@ -987,15 +1138,100 @@ namespace neos::python_runtime
                     } }
             };
 
+            // --- the modules of each algorithm (CPython's C extension modules _md5, _sha1, _sha2, _sha3 and _blake2)
+
+            int hash_instancecheck(neos_py_context*, void* aData, object* aObject)
+            {
+                return aObject != nullptr && aObject->type == &static_cast<neos_py_type const*>(aData)->base ? 1 : 0;
+            }
+
+            // (a type that cannot be instantiated (_md5.md5, _sha1.sha1, _sha2's: Py_TPFLAGS_DISALLOW_INSTANTIATION); its objects are made by 
+            // the module's functions)
+            object* hash_type(neos_py_type const& aType)
+            {
+                return context()->type_new(context(), aType.name, aType.base.name, [](neos_py_context*, void* aData, object*, object*) -> object*
+                    {
+                        return error("TypeError", std::string{ "cannot create '" } + static_cast<neos_py_type const*>(aData)->base.name + "' instances");
+                    }, const_cast<neos_py_type*>(&aType), hash_instancecheck);
+            }
+
+            // (_blake2's types: their constructors; their class attributes as blake2module.c's blake2_exec)
+            object* blake_type(bool aB)
+            {
+                static bool const sAttributes = [] 
+                {
+                    for (bool b : { true, false })
+                        register_type_attributes(b ? "_blake2.blake2b" : "_blake2.blake2s", b ? 
+                            [](char const* aName) -> object* 
+                            {
+                                std::string_view const name{ aName };
+                                return name == "SALT_SIZE" || name == "PERSON_SIZE" ? make_int(16) : name == "MAX_KEY_SIZE" || name == "MAX_DIGEST_SIZE" ? make_int(64) : nullptr;
+                            } :
+                            [](char const* aName) -> object* 
+                            {
+                                std::string_view const name{ aName };
+                                return name == "SALT_SIZE" || name == "PERSON_SIZE" ? make_int(8) : name == "MAX_KEY_SIZE" || name == "MAX_DIGEST_SIZE" ? make_int(32) : nullptr;
+                            });
+                    return true;
+                }();
+                (void)sAttributes;
+                auto const& type = aB ? sBlake2bType : sBlake2sType;
+                return context()->type_new(context(), type.name, type.base.name, [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
+                    {
+                        return blake(as<tuple_object>(aArgs)->items, aKwargs, aData == &sBlake2bType);
+                    }, const_cast<neos_py_type*>(&type), hash_instancecheck);
+            }
+
+            // (_md5: md5, MD5Type; _sha1: sha1, SHA1Type; _sha2: sha224 ... sha512, SHA224Type ... SHA512Type: functions and their objects' types)
+            bool add_module_functions(std::vector<std::pair<std::string, object*>>& aAttributes, std::size_t aFirst, std::size_t aLast)
+            {
+                for (auto i = aFirst; i <= aLast; ++i)
+                {
+                    auto const& c = sModuleConstructors[i];
+                    aAttributes.emplace_back(c.name, module_constructor_object(i));
+                    std::string typeName = c.type->name;
+                    if (typeName == "md5" || typeName == "sha1")
+                        for (auto& ch : typeName)
+                            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                    aAttributes.emplace_back(typeName.ends_with("Type") ? typeName : typeName + "Type", hash_type(*c.type));
+                }
+                return true;
+            }
+
+            inline bool const sMd5 = register_module("_md5", [](std::vector<std::pair<std::string, object*>>& aAttributes) { return add_module_functions(aAttributes, 0u, 0u); });
+            inline bool const sSha1 = register_module("_sha1", [](std::vector<std::pair<std::string, object*>>& aAttributes) { return add_module_functions(aAttributes, 1u, 1u); });
+            inline bool const sSha2 = register_module("_sha2", [](std::vector<std::pair<std::string, object*>>& aAttributes) { return add_module_functions(aAttributes, 2u, 5u); });
+            // (_sha3: its types (sha3_224 ... shake_256) are their constructors, as sha3module.c's)
+            inline bool const sSha3 = register_module("_sha3", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                {
+                    for (std::size_t i = 6u; i < std::size(sModuleConstructors); ++i)
+                        aAttributes.emplace_back(sModuleConstructors[i].name, module_constructor_object(i));
+                    return true;
+                });
+            // (_blake2: blake2b and blake2s, and their sizes)
+            inline bool const sBlake2 = register_module("_blake2", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                {
+                    aAttributes.emplace_back("blake2b", blake_type(true));
+                    aAttributes.emplace_back("blake2s", blake_type(false));
+                    for (auto const& [name, value] : { std::pair{ "BLAKE2B_SALT_SIZE", 16 }, { "BLAKE2B_PERSON_SIZE", 16 }, { "BLAKE2B_MAX_KEY_SIZE", 64 },
+                        { "BLAKE2B_MAX_DIGEST_SIZE", 64 }, { "BLAKE2S_SALT_SIZE", 8 }, { "BLAKE2S_PERSON_SIZE", 8 }, { "BLAKE2S_MAX_KEY_SIZE", 32 },
+                        { "BLAKE2S_MAX_DIGEST_SIZE", 32 } })
+                        aAttributes.emplace_back(name, make_int(value));
+                    return true;
+                });
+
             bool hashlib_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
-                for (auto const& c : sConstructors)
-                    aAttributes.emplace_back(c.name, make_function(std::string{ "openssl_" } + c.name, call_constructor, const_cast<constructor_entry*>(&c)));
+                for (std::size_t i = 0u; i < std::size(sModuleConstructors); ++i)
+                    aAttributes.emplace_back(sModuleConstructors[i].name, module_constructor_object(i));
                 for (auto const& f : sHashlibFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
                 if (sBuiltinConstructorCache == nullptr)
                     sBuiltinConstructorCache = make_dict();
                 aAttributes.emplace_back("__builtin_constructor_cache", new_reference(sBuiltinConstructorCache));
+                // (blake2b and blake2s: _blake2's types (Lib/hashlib.py's: OpenSSL's are not used))
+                aAttributes.emplace_back("blake2b", blake_type(true));
+                aAttributes.emplace_back("blake2s", blake_type(false));
                 std::vector<object*> names;
                 for (auto n : { "blake2b", "blake2s", "md5", "sha1", "sha224", "sha256", "sha384", "sha3_224", "sha3_256", "sha3_384", "sha3_512", "sha512",
                     "shake_128", "shake_256" })

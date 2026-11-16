@@ -31,7 +31,8 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Objects/genobject.c (the asynchronous generators' hooks and
-  finalization, and the warning of a coroutine that was never awaited)), Copyright (c) 2001-2024 Python Software
+  finalization, the warning of a coroutine that was never awaited, the delegation of throw() and close(), and the close()
+  of asend and athrow)), Copyright (c) 2001-2024 Python Software
   Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
   runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
   object model (see runtime/python/NOTICE).
@@ -48,6 +49,7 @@
 // __async_with(manager) are the iterator and context manager of async for and async with: their __next__, __enter__ and
 // __exit__ await __anext__, __aenter__ and __aexit__.
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -62,6 +64,12 @@ namespace neos::python_runtime
 {
     namespace detail
     {
+        bool process_exited();      // (objects.cpp: the process is exiting: no code of the program runs)
+        object* make_generator_frame(frame_stack const& aStack, std::size_t aIndex, object* aGenerator);    // (support.cpp)
+        void frame_generator_gone(object* aFrame);
+
+        ref exception_instance(object* aException);     // (objects.cpp: an exception, or an exception class's instance)
+
         namespace
         {
             struct generator_object
@@ -89,10 +97,28 @@ namespace neos::python_runtime
                                                         ///< CO_ITERABLE_COROUTINE))
                 neos_rt_frame suspendedAt{};            ///< (suspended: its body's frame where it suspended (its line); source null: not known)
                 void* execState = nullptr;              ///< (suspended: the program that its body runs and its exec namespaces (exec_suspend's))
+                std::vector<object*> handling;          ///< (suspended: the exceptions its body was handling (handling_take's))
+                std::size_t resumerHandling = 0u;       ///< (running: how many exceptions its resumer was handling (handling_depth): those 
+                                                        ///< above are its own)
+                std::vector<object*> frames;            ///< (its frame objects (gi_frame's; not references): told when it is destroyed)
                 ~generator_object();
             };
 
             thread_local generator_object* tCurrent = nullptr;
+
+            // (an exception thrown into a generator (aThrown: an exception or an exception class), raised where it suspended: as CPython's
+            // gen_send_ex2 (_PyErr_ChainStackItem), its context is the exception that the generator is handling, if it is handling one of 
+            // its own (aGenerator null: it is not running), not one that the code that resumed it is handling)
+            void raise_thrown(object* aThrown, generator_object const* aGenerator)
+            {
+                if (aGenerator != nullptr && handling_depth() > aGenerator->resumerHandling)
+                {
+                    fn_raise(aThrown);
+                    return;
+                }
+                if (ref const e{ exception_instance(aThrown) })
+                    reraise_exception(e.get());
+            }
 
             // (a coroutine that suspends (awaiting): its body's frame (the innermost) remembered, for its frame's line (cr_frame.f_lineno, e.g. 
             // in a task's repr); a body that is native has none (a generator's yield does not: it costs a host call each time))
@@ -115,6 +141,18 @@ namespace neos::python_runtime
             bool is_generator(object* aObject) { return aObject != nullptr && aObject->type == &sGeneratorType.base; }
             bool is_coroutine_object(object* aObject) { return aObject != nullptr && aObject->type == &sCoroutineType.base; }
             bool is_async_generator(object* aObject) { return aObject != nullptr && aObject->type == &sAsyncGeneratorType.base; }
+            // (a RuntimeError raised from an exception (_PyErr_FormatFromCause: it is its cause and its context))
+            std::nullptr_t runtime_error_from(object* aCause, std::string const& aMessage)
+            {
+                ref const e{ make_exception("RuntimeError", { make_str(aMessage) }) };
+                if (!e)
+                    return nullptr;
+                if (setattr(e.get(), "__context__", aCause) != 0 || setattr(e.get(), "__cause__", aCause) != 0)
+                    return nullptr;
+                raise_exception(e.get());
+                return nullptr;
+            }
+
             char const* kind_name(generator_object const& g)
             {
                 return g.kind == generator_object::Coroutine ? "coroutine" : g.kind == generator_object::AsyncGenerator ? "async generator" : "generator";
@@ -135,9 +173,12 @@ namespace neos::python_runtime
                     return error("ValueError", std::string{ kind_name(g) } + " already executing");
                 if (g.state == generator_object::Finished)
                 {
+                    // (its return value was the StopIteration of the resumption that finished it: an exhausted generator's has none)
+                    release(g.result);
+                    g.result = nullptr;
                     if (aThrown != nullptr)
                     {
-                        fn_raise(aThrown);
+                        raise_thrown(aThrown, nullptr);
                         return nullptr;
                     }
                     return nullptr;
@@ -147,7 +188,7 @@ namespace neos::python_runtime
                     if (aThrown != nullptr)
                     {
                         g.state = generator_object::Finished;
-                        fn_raise(aThrown);
+                        raise_thrown(aThrown, nullptr);
                         return nullptr;
                     }
                     if (aValue != nullptr && kind_of(aValue) != NEOS_PY_NONE)
@@ -174,11 +215,23 @@ namespace neos::python_runtime
                 auto const depth = exec_depth();
                 if (g.execState != nullptr)
                     exec_resume(std::exchange(g.execState, nullptr));
+                // (the exceptions that its body was handling where it suspended: its own again (sys.exception()); its resumer's again when
+                // it suspends (or finishes))
+                auto const handlingDepth = handling_depth();
+                g.resumerHandling = handlingDepth;
+                handling_restore(g.handling);
                 auto const finished = host()->coroutine_resume(g.coroutine);
                 if (finished == 0)
                     g.execState = exec_suspend(depth, resumerProgram);
                 else
                     exec_discard(exec_suspend(depth, resumerProgram));
+                g.handling = handling_take(handlingDepth);
+                if (finished != 0)
+                {
+                    for (auto e : g.handling)
+                        release(e);
+                    g.handling.clear();
+                }
                 tCurrent = g.resumer;
                 ref const self{ g.dying ? nullptr : &g.h.base };
                 if (finished != 0)
@@ -190,17 +243,14 @@ namespace neos::python_runtime
                     g.transfer = nullptr;
                     if (failed())
                     {
-                        // (PEP 479: StopIteration raised in a generator is a RuntimeError)
-                        if (std::string_view{ error_text() }.starts_with("StopIteration"))
-                        {
-                            clear_error();
-                            return error("RuntimeError", std::string{ kind_name(g) } + " raised StopIteration");
-                        }
-                        if (g.kind == generator_object::AsyncGenerator && std::string_view{ error_text() }.starts_with("StopAsyncIteration"))
-                        {
-                            clear_error();
-                            return error("RuntimeError", "async generator raised StopAsyncIteration");
-                        }
+                        // (PEP 479: StopIteration (or a subclass) raised in a generator is a RuntimeError, of which it is the cause 
+                        // (gen_send_ex2's _PyErr_FormatFromCause))
+                        ref const e{ take_exception() };
+                        if (exception_is(e.get(), "StopIteration"))
+                            return runtime_error_from(e.get(), std::string{ kind_name(g) } + " raised StopIteration");
+                        if (g.kind == generator_object::AsyncGenerator && exception_is(e.get(), "StopAsyncIteration"))
+                            return runtime_error_from(e.get(), "async generator raised StopAsyncIteration");
+                        reraise_exception(e.get());
                     }
                     return nullptr;
                 }
@@ -240,7 +290,7 @@ namespace neos::python_runtime
                 ref const cls{ fn_builtin("GeneratorExit") };
                 ref const yielded{ resume(g, nullptr, cls.get()) };
                 if (yielded)
-                    return error("RuntimeError", "generator ignored GeneratorExit");
+                    return error("RuntimeError", std::string{ kind_name(g) } + " ignored GeneratorExit");
                 if (failed())
                 {
                     std::string_view const text{ error_text() };
@@ -285,7 +335,7 @@ namespace neos::python_runtime
                 auto& g = *reinterpret_cast<generator_object*>(aObject);
                 if (remove_reference(g.h) != 0)
                     return;
-                if (g.finalizer != nullptr && !g.finalized && g.state != generator_object::Finished && !sProgramEnded)
+                if (g.finalizer != nullptr && !g.finalized && g.state != generator_object::Finished && !sProgramEnded && !process_exited())
                 {
                     g.finalized = true;
                     g.h.references.store(1, std::memory_order_relaxed);
@@ -295,7 +345,7 @@ namespace neos::python_runtime
                         if (!r)
                             write_unraisable(g.finalizer);
                         if (pending)
-                            fn_raise(pending.get());
+                            reraise_exception(pending.get());
                     }
                     if (remove_reference(g.h) != 0)
                         return;
@@ -305,33 +355,37 @@ namespace neos::python_runtime
                 delete &g;
             }
 
-            // (a coroutine that is destroyed before it has started: RuntimeWarning (as CPython's _PyErr_WarnUnawaitedCoroutine: its source the
+            // (a coroutine that has not started and is finalized: RuntimeWarning (as CPython's _PyErr_WarnUnawaitedCoroutine: its source the
             // coroutine))
+            void warn_unawaited(generator_object const& g, object* aObject)
+            {
+                ref const pending{ failed() ? take_exception() : ref{} };
+                ref const warn{ module_attribute("warnings", "warn") };
+                ref r;
+                if (warn)
+                {
+                    ref const kwargs{ make_dict() };
+                    ref const key{ make_str("source") };
+                    dict_set(kwargs.get(), key.get(), aObject);
+                    r = ref{ invoke(warn.get(), { make_str("coroutine '" + g.qualname + "' was never awaited"), exception_class("RuntimeWarning") },
+                        kwargs.get()) };
+                }
+                if (!r)
+                    write_unraisable(aObject);
+                if (pending)
+                    reraise_exception(pending.get());
+            }
+
+            // (a coroutine that is destroyed before it has started: warn_unawaited)
             void release_coroutine(neos_rt_object* aObject)
             {
                 auto& g = *reinterpret_cast<generator_object*>(aObject);
                 if (remove_reference(g.h) != 0)
                     return;
-                if (g.state == generator_object::Created && !sProgramEnded)
+                if (g.state == generator_object::Created && !sProgramEnded && !process_exited())
                 {
                     g.h.references.store(1, std::memory_order_relaxed);
-                    {
-                        ref const pending{ failed() ? take_exception() : ref{} };
-                        ref const warn{ module_attribute("warnings", "warn") };
-                        ref r;
-                        if (warn)
-                        {
-                            ref const kwargs{ make_dict() };
-                            ref const key{ make_str("source") };
-                            dict_set(kwargs.get(), key.get(), aObject);
-                            r = ref{ invoke(warn.get(), { make_str("coroutine '" + g.qualname + "' was never awaited"), exception_class("RuntimeWarning") },
-                                kwargs.get()) };
-                        }
-                        if (!r)
-                            write_unraisable(aObject);
-                        if (pending)
-                            fn_raise(pending.get());
-                    }
+                    warn_unawaited(g, aObject);
                     if (remove_reference(g.h) != 0)
                         return;
                 }
@@ -343,7 +397,7 @@ namespace neos::python_runtime
             generator_object::~generator_object()
             {
                 // (a suspended generator is closed: its finally clauses run)
-                if (state == Suspended && !sProgramEnded && !failed())
+                if (state == Suspended && !sProgramEnded && !process_exited() && !failed())
                 {
                     dying = true;
                     ref const r{ close(*this) };
@@ -354,6 +408,10 @@ namespace neos::python_runtime
                     host()->coroutine_delete(coroutine);
                 if (execState != nullptr)
                     exec_discard(execState);
+                for (auto e : handling)
+                    release(e);
+                for (auto f : frames)
+                    frame_generator_gone(f);
                 release(finalizer);
                 release(function);
                 release(arguments);
@@ -497,7 +555,7 @@ namespace neos::python_runtime
                             neos_rt_frame frame{ name.c_str(), "", 0u, 0u, nullptr, 0u };
                             // (suspended: where its body suspended)
                             if (g.state == generator_object::Suspended && g.suspendedAt.source != nullptr)
-                                return make_frame(std::make_shared<std::vector<neos_rt_frame> const>(1u, g.suspendedAt), 0u);
+                                return make_generator_frame(std::make_shared<std::vector<neos_rt_frame> const>(1u, g.suspendedAt), 0u, aSelf);
                             // (not started: its function's first line)
                             if (g.state == generator_object::Created)
                                 if (ref const code{ getattr(g.function, "__code__") })
@@ -513,7 +571,7 @@ namespace neos::python_runtime
                                     }
                                 }
                             clear_error();
-                            return make_frame(std::make_shared<std::vector<neos_rt_frame> const>(1u, frame), 0u);
+                            return make_generator_frame(std::make_shared<std::vector<neos_rt_frame> const>(1u, frame), 0u, aSelf);
                         }
                         // (its code: its body's)
                         if (rest == "code")
@@ -641,6 +699,8 @@ namespace neos::python_runtime
                 {
                     if (g.asyncRunning)
                     {
+                        // (it cannot be awaited again (as CPython's: AWAITABLE_STATE_CLOSED))
+                        a.state = asend_object::Done;
                         error("RuntimeError", a.mode == asend_object::Send ? "anext(): asynchronous generator is already running" :
                             a.mode == asend_object::Throw ? "athrow(): asynchronous generator is already running" : "aclose(): asynchronous generator is already running");
                         return -1;
@@ -752,7 +812,7 @@ namespace neos::python_runtime
                     if (!method)
                     {
                         clear_error();
-                        fn_raise(aThrown);
+                        raise_thrown(aThrown, tCurrent);
                         return -1;
                     }
                     ref const args{ make_tuple({ (retain(aThrown), aThrown) }) };
@@ -853,10 +913,12 @@ namespace neos::python_runtime
                         inner.state = generator_object::Finished;
                         if (!result)
                         {
-                            if (failed() && std::string_view{ error_text() }.starts_with("StopIteration"))
+                            if (failed())
                             {
-                                clear_error();
-                                return error("RuntimeError", "coroutine raised StopIteration");
+                                ref const e{ take_exception() };
+                                if (exception_is(e.get(), "StopIteration"))
+                                    return runtime_error_from(e.get(), "coroutine raised StopIteration");
+                                reraise_exception(e.get());
                             }
                             return nullptr;
                         }
@@ -906,7 +968,7 @@ namespace neos::python_runtime
                             }
                             else
                                 clear_error();
-                            fn_raise(thrown.get());
+                            raise_thrown(thrown.get(), g);
                             return nullptr;
                         }
                         continue;
@@ -994,9 +1056,25 @@ namespace neos::python_runtime
                         return error("TypeError", "throw expected at least 1 argument, got 0");
                     return asend_send(a, nullptr, items[1]);
                 }
+                // (as CPython's async_gen_asend_close and async_gen_athrow_close: GeneratorExit thrown in; its awaitable yielding: 
+                // RuntimeError)
                 if (name == "close")
                 {
-                    a.state = asend_object::Done;
+                    if (a.state == asend_object::Done)
+                        return (retain(none()), none());
+                    ref const exit{ fn_builtin("GeneratorExit") };
+                    ref const result{ asend_send(a, nullptr, exit.get()) };
+                    if (result)
+                        return error("RuntimeError", "coroutine ignored GeneratorExit");
+                    if (failed())
+                    {
+                        ref const e{ take_exception() };
+                        if (!exception_is(e.get(), "StopIteration") && !exception_is(e.get(), "StopAsyncIteration") && !exception_is(e.get(), "GeneratorExit"))
+                        {
+                            reraise_exception(e.get());
+                            return nullptr;
+                        }
+                    }
                     return (retain(none()), none());
                 }
                 return nullptr;
@@ -1046,8 +1124,13 @@ namespace neos::python_runtime
                 {
                     auto const iterator = reinterpret_cast<async_iter_object*>(aSelf)->iterator;
                     ref awaitable;
+                    // (an asynchronous generator's __anext__: its first iteration calls the firstiter hook (async_gen_init_hooks))
                     if (is_async_generator(iterator))
+                    {
+                        if (!async_gen_init_hooks(iterator))
+                            return nullptr;
                         awaitable = ref{ make_asend(iterator, asend_object::Send, nullptr, nullptr) };
+                    }
                     else
                     {
                         ref const anext{ getattr(iterator, "__anext__") };
@@ -1249,7 +1332,12 @@ namespace neos::python_runtime
                 return nullptr;
             ref awaitable;
             if (is_async_generator(aArgs[0]))
+            {
+                // (its __anext__: its first iteration calls the firstiter hook (async_gen_init_hooks))
+                if (!async_gen_init_hooks(aArgs[0]))
+                    return nullptr;
                 awaitable = ref{ make_asend(aArgs[0], asend_object::Send, nullptr, nullptr) };
+            }
             else
             {
                 ref const anext{ getattr(aArgs[0], "__anext__") };
@@ -1354,7 +1442,7 @@ namespace neos::python_runtime
             {
                 auto const thrown = g->thrown;
                 g->thrown = nullptr;
-                fn_raise(thrown);
+                raise_thrown(thrown, g);
                 release(thrown);
                 return nullptr;
             }
@@ -1403,11 +1491,12 @@ namespace neos::python_runtime
                 ref value;
                 if (aThrown != nullptr)
                 {
-                    ref const method{ getattr(it.get(), "throw") };
+                    // (no throw method: raised here; getattr's other exceptions: raised (as CPython's _gen_throw))
+                    ref const method{ optional_attribute(it.get(), "throw") };
                     if (!method)
                     {
-                        clear_error();
-                        fn_raise(aThrown);
+                        if (!failed())
+                            raise_thrown(aThrown, tCurrent);
                         return {};
                     }
                     ref const args{ make_tuple({ new_reference(aThrown) }) };
@@ -1466,19 +1555,54 @@ namespace neos::python_runtime
                         if (failed())
                             return nullptr;
                     }
-                    else if (ref const method{ getattr(it.get(), "close") })
+                    else if (ref const method{ optional_attribute(it.get(), "close") })
                     {
                         ref const noArgs{ make_tuple() };
                         ref const closed{ call(method.get(), noArgs.get(), nullptr) };
                         if (!closed)
                             return nullptr;
                     }
-                    else
-                        clear_error();
-                    fn_raise(e.get());
+                    else if (failed())
+                        write_unraisable(it.get());     // (getattr's exception (not AttributeError), as CPython's gen_close_iter)
+                    raise_thrown(e.get(), tCurrent);
                     return nullptr;
                 }
                 value = step(nullptr, e.get());
+            }
+        }
+
+        // (frame.clear() of a generator's frame that is not running or suspended (_PyGen_Finalize's): one that has not started is finished (a 
+        // coroutine's warn_unawaited))
+        void generator_frame_clear(object* aGenerator)
+        {
+            auto& g = as_generator(aGenerator);
+            if (g.state != generator_object::Created)
+                return;
+            g.state = generator_object::Finished;
+            if (g.kind == generator_object::Coroutine)
+                warn_unawaited(g, aGenerator);
+        }
+
+        void generator_frame_made(object* aGenerator, object* aFrame)
+        {
+            as_generator(aGenerator).frames.push_back(aFrame);
+        }
+
+        void generator_frame_released(object* aGenerator, object* aFrame)
+        {
+            auto& frames = as_generator(aGenerator).frames;
+            frames.erase(std::remove(frames.begin(), frames.end(), aFrame), frames.end());
+        }
+
+        // (a generator's (or coroutine's) state: 0 not started, 1 running, 2 suspended, 3 finished (its frame's: see frame.clear))
+        int generator_state(object* aGenerator)
+        {
+            switch (as_generator(aGenerator).state)
+            {
+            case generator_object::Created: return 0;
+            case generator_object::Running: return 1;
+            case generator_object::Suspended: return 2;
+            default: return 3;
             }
         }
 

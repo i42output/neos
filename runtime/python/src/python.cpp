@@ -55,6 +55,7 @@
 namespace neos::python_runtime::detail
 {
     void resolve_raised_text(std::string& aText);
+    void process_exiting();     // (objects.cpp: the process exits)
 }
 
 bool neos_python_debugger_catching();
@@ -344,6 +345,9 @@ NEOS_RUNTIME_PLUGIN_END
     neos::python_runtime::detail::threads_end();
     neos::python_runtime::detail::generators_end();
     neos::python_runtime::detail::signals_end();
+    // (the process's exit, if it exits now: noted before the static objects that the program's run made are destroyed (an exit handler 
+    // registered after them runs first))
+    std::atexit([]() { neos::python_runtime::detail::process_exiting(); });
 }
 
 NEOS_RUNTIME_PLUGIN_ENTRY

@@ -3139,7 +3139,7 @@ namespace neos::python_runtime
                 double ar = 0.0, ai = 0.0, br = 0.0, bi = 0.0;
                 if (lk == NEOS_PY_COMPLEX) { ar = as<complex_object>(aLhs)->real; ai = as<complex_object>(aLhs)->imag; } else to_double(aLhs, ar);
                 if (rk == NEOS_PY_COMPLEX) { br = as<complex_object>(aRhs)->real; bi = as<complex_object>(aRhs)->imag; } else to_double(aRhs, br);
-                return ar == br && ai == bi ? 0 : 4; // (4: not equal, unorderable)
+                return ar == br && ai == bi && aEquality ? 0 : 4; // (4: not equal, unorderable (equal complex numbers too: no ordering))
             }
             if (lk == NEOS_PY_STR && rk == NEOS_PY_STR)
             {
@@ -3150,13 +3150,14 @@ namespace neos::python_runtime
                 return sequence_order(as<list_object>(aLhs)->items, as<list_object>(aRhs)->items, aError, aEquality);
             if (lk == NEOS_PY_TUPLE && rk == NEOS_PY_TUPLE)
                 return sequence_order(as<tuple_object>(aLhs)->items, as<tuple_object>(aRhs)->items, aError, aEquality);
+            // (None, dicts and other objects (by identity): == and != only (no ordering, as CPython's: equal ones are not ordered either))
             if (lk == NEOS_PY_NONE && rk == NEOS_PY_NONE)
-                return 0;
+                return aEquality ? 0 : 3;
             if (lk == NEOS_PY_DICT && rk == NEOS_PY_DICT)
             {
                 auto const& a = as<dict_object>(aLhs)->items;
                 auto const& b = as<dict_object>(aRhs)->items;
-                if (a.size() != b.size())
+                if (a.size() != b.size() || !aEquality)
                     return 4;
                 for (std::size_t i = 0u; i < a.size(); ++i)
                 {
@@ -3192,7 +3193,7 @@ namespace neos::python_runtime
                     aError = 1;
                 return equal == 1 ? 0 : 4;
             }
-            return aLhs == aRhs ? 0 : 3;
+            return aLhs == aRhs && aEquality ? 0 : 3;
         }
 
         object* compare(int aOperation, object* aLhs, object* aRhs)
@@ -5058,6 +5059,13 @@ namespace neos::python_runtime
         object* object_attribute(object* aSelf, std::string_view aName);
         object* number_rounding_method(char const* aName, object* aSelf);
         object* class_function(std::string const& aClass, char const* aName);
+        object* type_object_for(std::string const& aName, std::string const& aQualifiedName);
+        // (the builtin types' unbound methods (class_function's): their types (__objclass__))
+        std::map<object const*, std::string>& function_objclasses()
+        {
+            static std::map<object const*, std::string> sTypes;
+            return sTypes;
+        }
 
         bool is_instance(object* aObject);
         object* instance_attribute_cached(object* aObject, char const* aName);
@@ -5571,6 +5579,30 @@ namespace neos::python_runtime
                 }
                 if (std::strcmp(aName, "__isabstractmethod__") == 0 && abstract_builtins().contains(aObject))
                     return make_bool(true);
+                // (a builtin type's method: the type (its value's type, if it is bound to an instance of a subclass; a method descriptor's 
+                // __objclass__))
+                if (std::strcmp(aName, "__objclass__") == 0)
+                {
+                    if (f.self == nullptr)
+                        if (auto const c = function_objclasses().find(aObject); c != function_objclasses().end())
+                            return type_object_for(c->second.substr(c->second.rfind('.') + 1u), c->second);
+                    // (bound: a special method's (a method-wrapper's; a builtin method has none))
+                    if (f.self != nullptr && !is_class(f.self) && !is_type_object(f.self) && f.name.size() > 4u && f.name.starts_with("__") && f.name.ends_with("__") &&
+                        !(python_type(f.self) != nullptr && std::string_view{ python_type(f.self)->base.name } == "python.module"))
+                        return class_of(builtin_value(f.self));
+                }
+                // (calling it: __call__ (a method-wrapper's))
+                if (std::strcmp(aName, "__call__") == 0)
+                    return make_function("__call__", [](neos_py_context*, void*, object* aArgs, object* aKwargs) -> object*
+                        {
+                            auto const& args = tuple_items(aArgs);
+                            ref const rest{ make_tuple(std::vector<object*>{}) };
+                            std::vector<object*> items;
+                            for (std::size_t i = 1u; i < args.size(); ++i)
+                                items.push_back(new_reference(args[i]));
+                            ref const callArgs{ make_tuple(std::move(items)) };
+                            return call(args.at(0u), callArgs.get(), aKwargs);
+                        }, nullptr, aObject);
                 if (std::strcmp(aName, "__module__") == 0)
                     return f.self == nullptr ? make_str(f.module != nullptr ? f.module : "builtins") : new_reference(none());
                 // (pickling: its name (a module's function), or getattr(self, name) (a method))
@@ -10893,6 +10925,12 @@ namespace neos::python_runtime
             fn_raise_from(aException, aCause);
         }
 
+        // (an exception that no except clause of a try statement matched: raised again (its context is unchanged, as CPython's RERAISE))
+        void fn_propagate(object* aException)
+        {
+            reraise_exception(aException);
+        }
+
         // raise (the exception being handled)
         void fn_reraise()
         {
@@ -11032,6 +11070,33 @@ namespace neos::python_runtime
             return tCaught;
         }
 
+        std::size_t handling_depth()
+        {
+            return tHandling.size();
+        }
+
+        std::vector<object*> handling_take(std::size_t aDepth)
+        {
+            std::vector<object*> result;
+            if (tHandling.size() <= aDepth)
+                return result;
+            result.assign(tHandling.begin() + static_cast<std::ptrdiff_t>(aDepth) + 1, tHandling.end());
+            result.push_back(tCaught);
+            tCaught = tHandling[aDepth];
+            tHandling.resize(aDepth);
+            return result;
+        }
+
+        void handling_restore(std::vector<object*>& aHandling)
+        {
+            for (auto e : aHandling)
+            {
+                tHandling.push_back(tCaught);
+                tCaught = e;
+            }
+            aHandling.clear();
+        }
+
         // except class (or tuple of classes)
         bool fn_exception_matches(object* aException, object* aClass)
         {
@@ -11093,6 +11158,8 @@ namespace neos::python_runtime
         {
             ref const r{ call_method_named(aManager, "__exit__", { none(), none(), none() }) };
         }
+        void keep_propagating(object* aException, char const* aText);
+
         bool fn_with_exit_exception(object* aManager, char const* aText)
         {
             tPropagating = true;
@@ -11115,7 +11182,16 @@ namespace neos::python_runtime
             // (not suppressed: it propagates, as the program's pending error (aText), so that text finds it again, though __exit__ raised it 
             // or others with texts of their own (e.g. contextlib's __exit__ throws it into its generator: it is raised there with a new 
             // token, and the one that aText is is no longer kept))
-            if (!suppressed && exception && !(tRaised == exception.get() && tRaisedText == aText) &&
+            if (!suppressed)
+                keep_propagating(exception.get(), aText);
+            return suppressed;
+        }
+
+        // (an exception that propagates again (the program's pending error is aText) after code that its propagation ran (a with statement's 
+        // __exit__, a finally body) handled it: aText finds it again, though that code raised others)
+        void keep_propagating(object* aException, char const* aText)
+        {
+            if (aException != nullptr && !(tRaised == aException && tRaisedText == aText) &&
                 std::none_of(tRaisedBefore.begin(), tRaisedBefore.end(), [&](raised_exception const& b) { return b.text == aText; }))
             {
                 if (tRaised != nullptr && !tRaisedCaught && tRaisedText.find('\x01') != std::string::npos)
@@ -11129,11 +11205,28 @@ namespace neos::python_runtime
                 }
                 else
                     release(tRaised);
-                tRaised = new_reference(exception.get());
+                tRaised = new_reference(aException);
                 tRaisedText = aText != nullptr ? aText : "";
-                tRaisedCaught = true;
             }
-            return suppressed;
+            // (it propagates: it is not caught (an exception raised after it, e.g. by code that its propagation runs (a generator's close as
+            // it is released), keeps it, so that aText finds it))
+            if (tRaised == aException)
+                tRaisedCaught = false;
+        }
+
+        // python::finally_handling(text): the exception that propagates through a finally body (the pending error, aText) is being handled 
+        // while the body runs; python::finally_handled(text): the body has finished, and the exception propagates again
+        void fn_finally_handling(char const* aText)
+        {
+            tPropagating = true;
+            ref const exception{ fn_caught(aText) };
+            tPropagating = false;
+        }
+        void fn_finally_handled(char const* aText)
+        {
+            ref const exception{ tCaught != nullptr ? new_reference(tCaught) : nullptr };
+            fn_handled();
+            keep_propagating(exception.get(), aText);
         }
 
         // (an exception as CPython reports it when the program does not handle it: its chain (causes and contexts), then 
@@ -13423,6 +13516,69 @@ namespace neos::python_runtime
             return false;
         }
 
+        // (an attribute of an instance of a subclass of a builtin type or of a type of a module that its base type has (of its value, or of the
+        // instance for the type's methods that are the instance's): the attribute as the base type's, whether the subclass overrides it or not 
+        // (user_getattr's after the class's attributes; the unbound method of the type, e.g. io.BytesIO.readline(self) in a subclass's 
+        // readline); null if none (an exception if one was raised))
+        object* call_missing_getitem(neos_py_context* aContext, void*, object* aArgs, object* aKwargs);
+
+        object* native_base_attribute(object* aSelf, object* cls, char const* aName)
+        {
+            std::string_view const name{ aName };
+            // (a type of a module whose methods are of the instance rather than its value (e.g. datetime.date.replace: its result of the
+            // instance's class))
+            if (builtin_value(aSelf) != aSelf)
+                if (auto const hooks = native_hooks(cls); hooks != nullptr && hooks->attribute != nullptr)
+                {
+                    if (auto const a = hooks->attribute(aSelf, aName))
+                        return a;
+                    if (failed())
+                        return nullptr;
+                }
+            // (a type of a module's own pickling method (e.g. array.array.__reduce_ex__): bound to the instance (as CPython's method descriptor))
+            if (auto const value = builtin_value(aSelf); value != aSelf && (name == "__reduce_ex__" || name == "__reduce__" || name == "__getstate__" ||
+                name == "__setstate__"))
+                if (auto const type = python_type(value); type != nullptr)
+                    if (auto const provider = type_attribute_providers().find(std::string_view{ type->base.name }); provider != type_attribute_providers().end())
+                        if (ref const method{ provider->second(aName) })
+                            return bind_attribute(method.get(), aSelf, cls);
+            // (the builtin type's methods: of the value (object's pickling methods are the instance's))
+            if (auto const value = builtin_value(aSelf); value != aSelf && name != "__reduce_ex__" && name != "__reduce__" && name != "__getstate__")
+            {
+                // (a subclass of dict's __getitem__: its __missing__ too (as dict_subscript calls it))
+                if (name == "__getitem__" && kind_of(value) == NEOS_PY_DICT && class_lookup(cls, "__missing__") != nullptr)
+                    return make_function("__getitem__", call_missing_getitem, nullptr, aSelf);
+                if (auto const method = protocol_method(value, kind_of(value), aName))
+                    return method;
+                // (a subclass of property's getter(f), setter(f) and deleter(f): a copy that is of the subclass: type(self)(fget, fset, fdel, 
+                // doc), as CPython's property_copy makes it)
+                if (value->type == &sWrapperType.base && as<wrapper_object>(value)->kind == Property && (name == "getter" || name == "setter" || name == "deleter"))
+                {
+                    static int const sWhich[] = { 0, 1, 2 };
+                    int const* which = aName[0] == 'g' ? &sWhich[0] : aName[0] == 's' ? &sWhich[1] : &sWhich[2];
+                    return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
+                    {
+                        auto const& args = tuple_items(aArgs);
+                        if (args.size() != 2u)
+                            return error("TypeError", "expected one argument");
+                        auto const& p = *as<wrapper_object>(builtin_value(args[0]));
+                        auto const which = *static_cast<int const*>(aData);
+                        object* const functions[] = { which == 0 ? args[1] : p.function, which == 1 ? args[1] : p.setter, which == 2 ? args[1] : p.deleter, p.doc };
+                        std::vector<object*> items;
+                        for (auto f : functions)
+                            items.push_back(new_reference(f != nullptr ? f : none()));
+                        ref const callArgs{ make_tuple(std::move(items)) };
+                        ref const type{ class_of(args[0]) };
+                        return call(type.get(), callArgs.get(), nullptr);
+                    }, const_cast<int*>(which), aSelf);
+                }
+                if (ref r{ getattr(value, aName) })
+                    return r.release_ownership();
+                clear_error();
+            }
+            return nullptr;
+        }
+
         object* user_getattr(object* aSelf, attribute_dict& aAttributes, char const* aName)
         {
             auto const cls = user_class_of(aSelf);
@@ -13490,57 +13646,11 @@ namespace neos::python_runtime
             }
             if (attribute != nullptr)
                 return bind_attribute(attribute, aSelf, cls);
-            // (a type of a module whose methods are of the instance rather than its value (e.g. datetime.date.replace: its result of the
-            // instance's class))
-            if (builtin_value(aSelf) != aSelf)
-                if (auto const hooks = native_hooks(cls); hooks != nullptr && hooks->attribute != nullptr)
-                {
-                    if (auto const a = hooks->attribute(aSelf, aName))
-                        return a;
-                    if (failed())
-                        return nullptr;
-                }
-            // (a type of a module's own pickling method (e.g. array.array.__reduce_ex__): bound to the instance (as CPython's method descriptor))
-            if (auto const value = builtin_value(aSelf); value != aSelf && (name == "__reduce_ex__" || name == "__reduce__" || name == "__getstate__" ||
-                name == "__setstate__"))
-                if (auto const type = python_type(value); type != nullptr)
-                    if (auto const provider = type_attribute_providers().find(std::string_view{ type->base.name }); provider != type_attribute_providers().end())
-                        if (ref const method{ provider->second(aName) })
-                            return bind_attribute(method.get(), aSelf, cls);
-            // (the builtin type's methods: of the value (object's pickling methods are the instance's))
-            if (auto const value = builtin_value(aSelf); value != aSelf && name != "__reduce_ex__" && name != "__reduce__" && name != "__getstate__")
-            {
-                // (a subclass of dict's __getitem__: its __missing__ too (as dict_subscript calls it))
-                if (name == "__getitem__" && kind_of(value) == NEOS_PY_DICT && class_lookup(cls, "__missing__") != nullptr)
-                    return make_function("__getitem__", call_missing_getitem, nullptr, aSelf);
-                if (auto const method = protocol_method(value, kind_of(value), aName))
-                    return method;
-                // (a subclass of property's getter(f), setter(f) and deleter(f): a copy that is of the subclass: type(self)(fget, fset, fdel, 
-                // doc), as CPython's property_copy makes it)
-                if (value->type == &sWrapperType.base && as<wrapper_object>(value)->kind == Property && (name == "getter" || name == "setter" || name == "deleter"))
-                {
-                    static int const sWhich[] = { 0, 1, 2 };
-                    int const* which = aName[0] == 'g' ? &sWhich[0] : aName[0] == 's' ? &sWhich[1] : &sWhich[2];
-                    return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
-                    {
-                        auto const& args = tuple_items(aArgs);
-                        if (args.size() != 2u)
-                            return error("TypeError", "expected one argument");
-                        auto const& p = *as<wrapper_object>(builtin_value(args[0]));
-                        auto const which = *static_cast<int const*>(aData);
-                        object* const functions[] = { which == 0 ? args[1] : p.function, which == 1 ? args[1] : p.setter, which == 2 ? args[1] : p.deleter, p.doc };
-                        std::vector<object*> items;
-                        for (auto f : functions)
-                            items.push_back(new_reference(f != nullptr ? f : none()));
-                        ref const callArgs{ make_tuple(std::move(items)) };
-                        ref const type{ class_of(args[0]) };
-                        return call(type.get(), callArgs.get(), nullptr);
-                    }, const_cast<int*>(which), aSelf);
-                }
-                if (ref r{ getattr(value, aName) })
-                    return r.release_ownership();
-                clear_error();
-            }
+            // (an attribute of an instance's builtin (or a module's) base type: its own (native_base_attribute))
+            if (auto const a = native_base_attribute(aSelf, cls, aName))
+                return a;
+            if (failed())
+                return nullptr;
             // (object's attributes)
             if (auto const a = object_attribute(aSelf, name))
                 return a;
@@ -14821,8 +14931,9 @@ namespace neos::python_runtime
 
         void native_disown(object* aClass, object* aValue);
 
-        // (an exception that cannot be raised (e.g. a __del__'s): "Exception ignored in: <aObject>" and its report (sys.unraisablehook's))
-        void write_unraisable(object* aObject)
+        // (an exception that cannot be raised (e.g. a __del__'s): "Exception ignored in: <aObject>" (aMessage: "<aMessage>: <aObject>" (as 
+        // CPython's PyErr_FormatUnraisable)) and its report (sys.unraisablehook's))
+        void write_unraisable(object* aObject, object* aMessage)
         {
             ref const e{ take_exception() };
             if (ref const out{ sys_stdout() })
@@ -14873,7 +14984,7 @@ namespace neos::python_runtime
                     traceback = ref{ (retain(none()), none()) };
                 }
                 ref const args{ make_structseq(sDescriptor, { new_reference(type.get()), new_reference(e ? e.get() : none()), new_reference(traceback.get()),
-                    new_reference(none()), new_reference(aObject != nullptr ? aObject : none()) }) };
+                    new_reference(aMessage != nullptr ? aMessage : none()), new_reference(aObject != nullptr ? aObject : none()) }) };
                 ref const r{ invoke(hook.get(), { new_reference(args.get()) }) };
                 if (r)
                     return;
@@ -14883,7 +14994,7 @@ namespace neos::python_runtime
                 unraisable_report(hookError.get(), message.get(), hook.get());
                 return;
             }
-            unraisable_report(e.get(), nullptr, aObject);
+            unraisable_report(e.get(), aMessage, aObject);
         }
 
         void unraisable_report(object* aException, object* aMessage, object* aObject)
@@ -14907,13 +15018,31 @@ namespace neos::python_runtime
             write_standard(2, head + report);
         }
 
+        namespace
+        {
+            std::atomic<bool> sExiting{ false };
+        }
+
+        // (the process is exiting (its exit handlers run): objects released from then on (e.g. as the host destroys a program's state, after 
+        // the plugin's static objects have been) run no code of the program (__del__, weak references' callbacks, __release_buffer__): what 
+        // it would use is gone)
+        void process_exiting()
+        {
+            sExiting.store(true, std::memory_order_relaxed);
+        }
+
+        bool process_exited()
+        {
+            return sExiting.load(std::memory_order_relaxed);
+        }
+
         // (an instance is destroyed: its class's __del__ is called (once: it can resurrect it); its weak references are cleared)
         void release_instance(neos_rt_object* aObject)
         {
             auto& instance = *reinterpret_cast<instance_object*>(aObject);
             if (remove_reference(instance.h) != 0)
                 return;
-            if (!instance.finalized)
+            if (!instance.finalized && !process_exited())
                 if (auto const del = class_hook(instance.cls, DelHook))
                 {
                     instance.finalized = true;
@@ -16841,7 +16970,13 @@ namespace neos::python_runtime
                     ref const r{ call_method_named(w.dict, "__delitem__", { new_reference(key.get()) }) };
                     return r ? 0 : -1;
                 }
-                error("AttributeError", "'property' object attribute '" + std::string{ aName } + "' is read-only");
+                // (fget, fset and fdel: its members (readonly); it has no __dict__)
+                if (std::strcmp(aName, "fget") == 0 || std::strcmp(aName, "fset") == 0 || std::strcmp(aName, "fdel") == 0)
+                    error("AttributeError", "readonly attribute");
+                else if (aValue != nullptr)
+                    error("AttributeError", "'property' object has no attribute '" + std::string{ aName } + "' and no __dict__ for setting new attributes");
+                else
+                    error("AttributeError", "'property' object has no attribute '" + std::string{ aName } + "'");
                 return -1;
             };
             type.call = [](neos_py_context*, object* aSelf, object* aArgs, object* aKwargs) -> object*
@@ -17811,9 +17946,19 @@ namespace neos::python_runtime
             { "enumerate", b_enumerate }, { "filter", b_filter }, { "map", b_map }, { "reversed", b_reversed }, { "zip", b_zip }
         };
 
+        object* memoryview_from_flags(std::vector<object*> const& aArgs, object* aKwargs);     // (bytes.cpp)
+        object* builtin_buffer_method(std::vector<object*> const& aArgs, object* aKwargs, bool aRelease);
+
         // (the functions of the builtin classes (e.g. bytes.fromhex): "class.name")
         builtin_entry const sClassFunctions[] =
         {
+            // (PEP 688: the builtin exporters' __buffer__ and __release_buffer__ (bytes has no __release_buffer__), memoryview._from_flags)
+            { "bytes.__buffer__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return builtin_buffer_method(aArgs, aKwargs, false); } },
+            { "bytearray.__buffer__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return builtin_buffer_method(aArgs, aKwargs, false); } },
+            { "bytearray.__release_buffer__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return builtin_buffer_method(aArgs, aKwargs, true); } },
+            { "memoryview.__buffer__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return builtin_buffer_method(aArgs, aKwargs, false); } },
+            { "memoryview.__release_buffer__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return builtin_buffer_method(aArgs, aKwargs, true); } },
+            { "memoryview._from_flags", memoryview_from_flags },
             { "bytes.fromhex", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                 { std::vector<object*> a; return parse_arguments("bytes.fromhex", aArgs, aKwargs, { "string" }, 1u, 1u, a) ? bytes_fromhex(a[0], false) : nullptr; } },
             { "bytearray.fromhex", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -18136,11 +18281,16 @@ namespace neos::python_runtime
             auto const result = class_function_of(aClass, aName);
             // (the builtin types' class and static methods (e.g. dict.fromkeys, int.from_bytes, str.maketrans): not methods of a class whose 
             // attribute they are (CPython's are builtin methods of their types, or builtin functions: not descriptors))
-            static std::set<std::string_view> const sNotMethods = { "maketrans", "fromhex", "fromkeys", "from_bytes" };
+            static std::set<std::string_view> const sNotMethods = { "maketrans", "fromhex", "fromkeys", "from_bytes", "_from_flags" };
             if (result != nullptr && kind_of(result) == NEOS_PY_FUNCTION && as<function_object>(result)->self == nullptr && sNotMethods.contains(aName))
                 as<function_object>(result)->binds = false;
             if (result != nullptr)
+            {
                 sFunctions.emplace(std::move(key), new_reference(result));
+                // (an unbound method of the type: its __objclass__ (it is kept: its address is the type's))
+                if (kind_of(result) == NEOS_PY_FUNCTION && as<function_object>(result)->self == nullptr)
+                    function_objclasses().try_emplace(result, aClass);
+            }
             return result;
         }
 
@@ -18201,6 +18351,8 @@ namespace neos::python_runtime
 
         // (a method that a builtin type's instances have, unbound (as CPython's method descriptor): its first argument an instance of the
         // type (the type's own, or a subclass's: isinstance), the method called of it)
+        object* native_base_attribute(object* aSelf, object* cls, char const* aName);
+
         object* unbound_method(std::string const& aType, char const* aName)
         {
             struct unbound
@@ -18236,7 +18388,17 @@ namespace neos::python_runtime
                         return error("TypeError", "descriptor '" + u.name + "' for '" + u.type + "' objects doesn't apply to a '" + given + "' object");
                     }
                 }
-                ref const method{ getattr(args[0], u.name.c_str()) };
+                // (an instance of a subclass: the type's method, not the subclass's (which can be the caller, e.g. a subclass's readline calling 
+                // io.BytesIO.readline(self)))
+                ref method;
+                if (value != args[0] && is_instance(args[0]))
+                {
+                    method = ref{ native_base_attribute(args[0], as<instance_object>(args[0])->cls, u.name.c_str()) };
+                    if (!method && failed())
+                        return nullptr;
+                }
+                if (!method)
+                    method = ref{ getattr(args[0], u.name.c_str()) };
                 if (!method)
                     return nullptr;
                 std::vector<object*> rest;
@@ -21117,14 +21279,25 @@ namespace neos::python_runtime
             return sModules;
         }
 
-        object* imported_modules()
+        // (sys.modules: the dict (borrowed))
+        object* modules_dict()
         {
             static object* sDict = make_dict();
+            return sDict;
+        }
+
+        object* imported_modules()
+        {
+            // (each module the runtime has made is put there once: then sys.modules is the program's (a module it removed or replaced (e.g. 
+            // with None: its import is blocked) stays so))
+            auto const sDict = modules_dict();
+            static std::set<std::string, std::less<>> sPublished;
             for (auto const& m : imported())
-                if (m.second != nullptr)
+                if (m.second != nullptr && sPublished.insert(m.first).second)
                 {
                     ref const key{ make_str(m.first) };
-                    dict_set(sDict, key.get(), m.second);
+                    if (dict_find(sDict, key.get()) == -1)
+                        dict_set(sDict, key.get(), m.second);
                 }
             retain(sDict);
             return sDict;
@@ -21266,6 +21439,14 @@ namespace neos::python_runtime
         {
             if (auto const existing = imported().find(aName); existing != imported().end() && existing->second != nullptr)
             {
+                // (made before, and no longer in sys.modules (e.g. test.support's import_fresh_module removed it): there again, as fn_import 
+                // puts it (not if sys.modules has None for it))
+                {
+                    ref const key{ make_str(aName) };
+                    auto const position = dict_find(modules_dict(), key.get());
+                    if (position == -2 || (position == -1 && dict_set(modules_dict(), key.get(), existing->second) != 0))
+                        return nullptr;
+                }
                 retain(existing->second);
                 return existing->second;
             }
@@ -22036,7 +22217,7 @@ namespace neos::python_runtime
             { "list_tuple", NEOS_RT_FUNCTION(fn_list_tuple), OBJ, 1u, { OBJ }, 0u },
             { "raise", NEOS_RT_FUNCTION(fn_raise_statement), VOID, 1u, { OBJ }, 0u },
             { "raise_from", NEOS_RT_FUNCTION(fn_raise_from_statement), VOID, 2u, { OBJ, OBJ }, 0u },
-            { "propagate", NEOS_RT_FUNCTION(fn_raise), VOID, 1u, { OBJ }, 0u },
+            { "propagate", NEOS_RT_FUNCTION(fn_propagate), VOID, 1u, { OBJ }, 0u },
             { "unhandled", NEOS_RT_FUNCTION(fn_unhandled), I32, 1u, { STR }, 0u },
             { "finish", NEOS_RT_FUNCTION(fn_finish), VOID, 0u, {}, 0u },
             { "depth_check", NEOS_RT_FUNCTION(fn_depth_check), I32, 1u, { I32 }, 0u },
@@ -22062,6 +22243,8 @@ namespace neos::python_runtime
             { "with_exit", NEOS_RT_FUNCTION(fn_with_exit), VOID, 1u, { OBJ }, 0u },
             { "with_exit_exception", NEOS_RT_FUNCTION(fn_with_exit_exception), BOOL, 2u, { OBJ, STR }, 0u },
             { "caught", NEOS_RT_FUNCTION(fn_caught), OBJ, 1u, { STR }, 0u },
+            { "finally_handling", NEOS_RT_FUNCTION(fn_finally_handling), VOID, 1u, { STR }, 0u },
+            { "finally_handled", NEOS_RT_FUNCTION(fn_finally_handled), VOID, 1u, { STR }, 0u },
             { "exception_matches", NEOS_RT_FUNCTION(fn_exception_matches), BOOL, 2u, { OBJ, OBJ }, 0u },
             { "assertion", NEOS_RT_FUNCTION(fn_assertion), VOID, 1u, { OBJ }, 0u },
             { "tuple_get", NEOS_RT_FUNCTION(fn_tuple_get), OBJ, 2u, { OBJ, I64 }, 0u },

@@ -30,8 +30,8 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/threading.py, Lib/_threading_local.py and
-  Modules/_threadmodule.c), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under
+  Portions of this file are derived from CPython 3.13 (Lib/threading.py, Lib/_threading_local.py,
+  Modules/_threadmodule.c, Python/thread_pthread.h and Python/thread_nt.h (the stack size's validation)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under
   the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python and C
   to C++ for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
@@ -43,7 +43,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <csignal>
+#include <cstdint>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -54,7 +56,9 @@
 #include <string>
 #include <thread>
 #include <vector>
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <pthread.h>
 #endif
 #include "objects.hpp"
@@ -1170,6 +1174,8 @@ namespace neos::python_runtime
                 bool daemon = false;
                 object* thread = nullptr;   ///< (the Thread (borrowed: the running thread holds a reference))
                 void* mainContext = nullptr;    ///< (the main program's context: the thread runs it (its run's program is switched to))
+                object* function = nullptr;     ///< (_thread.start_new_thread's or start_joinable_thread's function (a reference): its exception is unraisable)
+                ~thread_state() { if (function != nullptr) release(function); }
             };
 
             neos_py_type sThreadStateType = make_type("threading._state", "_state", retain_object, release_object<thread_state>);
@@ -1288,6 +1294,28 @@ namespace neos::python_runtime
 
             builtin_entry const sExceptHook{ "_excepthook", thread_excepthook };
 
+            // (an exception that a function that _thread.start_new_thread or start_joinable_thread started does not handle (CPython's 
+            // thread_run): "Exception ignored in thread started by <the function>" (SystemExit: nothing))
+            void report_unraisable(object* aFunction)
+            {
+                ref const exception{ take_exception() };
+                if (!exception)
+                    return;
+                ref const systemExit{ exception_class("SystemExit") };
+                if (systemExit && fn_exception_matches(exception.get(), systemExit.get()))
+                    return;
+                clear_error();
+                std::string name;
+                if (!repr_of(aFunction, name))
+                {
+                    clear_error();
+                    name = "<object repr() failed>";
+                }
+                reraise_exception(exception.get());
+                ref const message{ make_str("Exception ignored in thread started by " + name) };
+                write_unraisable(nullptr, message.get());
+            }
+
             // (an exception that a thread's run does not handle: Thread._invoke_excepthook: threading.excepthook (its original if it is 
             // None) of ExceptHookArgs([type, value, traceback, thread]); if that raises: "Exception in threading.excepthook:" and 
             // sys.excepthook (its original if it is None) of its exception)
@@ -1381,7 +1409,12 @@ namespace neos::python_runtime
                         ref const empty{ make_tuple() };
                         ref const r{ call(run.get(), empty.get(), nullptr) };
                         if (!r && failed())
-                            report_exception(aThread);    // (SystemExit too: the default hook ignores it)
+                        {
+                            if (aState->function != nullptr)
+                                report_unraisable(aState->function);
+                            else
+                                report_exception(aThread);    // (SystemExit too: the default hook ignores it)
+                        }
                     }
                     else if (failed())
                         report_exception(aThread);
@@ -1400,6 +1433,101 @@ namespace neos::python_runtime
                 release(aThread);
                 gil_release();
                 host()->thread_attach(nullptr);
+            }
+
+            // (_thread.stack_size's: the stack size of the threads that are started (0: the platform's default))
+            std::atomic<std::size_t> sStackSize{ 0u };
+
+            // (a thread that runs run_thread (its stack: _thread.stack_size's, if it is set): false if it could not be started)
+            bool spawn_thread(object* aThread, thread_state* aState)
+            {
+                auto const size = sStackSize.load();
+                if (size == 0u)
+                {
+                    std::thread{ run_thread, aThread, aState }.detach();
+                    return true;
+                }
+                struct start_info { object* thread; thread_state* state; };
+                auto const info = new start_info{ aThread, aState };
+#if defined(_WIN32)
+                // (as CPython's (_beginthreadex's stack size): the program's own calls run on a fiber of their own (see jit.cpp))
+                auto const handle = ::_beginthread([](void* aInfo)
+                    {
+                        auto const i = *static_cast<start_info*>(aInfo);
+                        delete static_cast<start_info*>(aInfo);
+                        run_thread(i.thread, i.state);
+                    }, static_cast<unsigned>(size), info);
+                if (handle == static_cast<std::uintptr_t>(-1))
+                {
+                    delete info;
+                    return false;
+                }
+                return true;
+#else
+                // (the stack that generated code leaves for host functions (jit.cpp's stack_limit's headroom) as well as the size)
+                constexpr std::size_t Headroom = 256u * 1024u;
+                pthread_attr_t attributes;
+                if (::pthread_attr_init(&attributes) != 0)
+                {
+                    delete info;
+                    return false;
+                }
+                pthread_t thread;
+                bool const started = ::pthread_attr_setstacksize(&attributes, size + Headroom) == 0 &&
+                    ::pthread_create(&thread, &attributes, [](void* aInfo) -> void*
+                    {
+                        auto const i = *static_cast<start_info*>(aInfo);
+                        delete static_cast<start_info*>(aInfo);
+                        run_thread(i.thread, i.state);
+                        return nullptr;
+                    }, info) == 0;
+                ::pthread_attr_destroy(&attributes);
+                if (!started)
+                {
+                    delete info;
+                    return false;
+                }
+                ::pthread_detach(thread);
+                return true;
+#endif
+            }
+
+            // (_thread.stack_size([size]) (CPython's thread_stack_size): the stack size of threads that are started (0: the platform's
+            // default; otherwise at least 32 KiB (and what the platform allows)), the one it was)
+            object* stack_size(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                if (!no_keywords(aKwargs, "stack_size"))
+                    return nullptr;
+                if (aArgs.size() > 1u)
+                    return error("TypeError", "stack_size expected at most 1 argument, got " + std::to_string(aArgs.size()));
+                long long size = 0;
+                if (!aArgs.empty() && !to_index(aArgs[0], size))
+                    return nullptr;
+                if (size < 0)
+                    return error("ValueError", "size must be 0 or a positive value");
+                auto const old = sStackSize.load();
+                if (size != 0)
+                {
+                    constexpr std::size_t Minimum = 0x8000u;
+#if defined(_WIN32)
+                    bool const valid = static_cast<unsigned long long>(size) >= Minimum && static_cast<unsigned long long>(size) < 0x10000000ull;
+#else
+                    bool valid = false;
+                    if (static_cast<unsigned long long>(size) >= std::max<std::size_t>(PTHREAD_STACK_MIN, Minimum))
+                    {
+                        pthread_attr_t attributes;
+                        if (::pthread_attr_init(&attributes) == 0)
+                        {
+                            valid = ::pthread_attr_setstacksize(&attributes, static_cast<std::size_t>(size)) == 0;
+                            ::pthread_attr_destroy(&attributes);
+                        }
+                    }
+#endif
+                    if (!valid)
+                        return error("ValueError", "size not valid: " + std::to_string(size) + " bytes");
+                }
+                sStackSize.store(static_cast<std::size_t>(size));
+                return make_int(static_cast<long long>(old));
             }
 
             bool start_thread(object* aThread)
@@ -1426,16 +1554,41 @@ namespace neos::python_runtime
                     std::lock_guard<std::mutex> lock{ sThreadsMutex };
                     sThreads.push_back(aThread);
                 }
+                bool started = false;
                 try
                 {
-                    std::thread{ run_thread, aThread, state }.detach();
+                    started = spawn_thread(aThread, state);
                 }
                 catch (...)
                 {
+                }
+                if (!started)
+                {
+                    {
+                        std::lock_guard<std::mutex> lock{ sThreadsMutex };
+                        sThreads.erase(std::remove(sThreads.begin(), sThreads.end(), aThread), sThreads.end());
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock{ state->mutex };
+                        state->state = thread_state::Initial;
+                    }
+                    release(&state->h.base);
+                    release(aThread);
                     error("RuntimeError", "can't start new thread");
                     return false;
                 }
                 return true;
+            }
+
+            // (_thread.start_new_thread's and start_joinable_thread's: a Thread that runs aFunction (its exception: unraisable))
+            bool start_function_thread(object* aThread, object* aFunction)
+            {
+                auto* const state = state_of(aThread);
+                if (state == nullptr)
+                    return false;
+                if (state->function == nullptr)
+                    state->function = new_reference(aFunction);
+                return start_thread(aThread);
             }
 
             bool join_thread(thread_state& aState, double aTimeout)
@@ -1953,7 +2106,7 @@ namespace neos::python_runtime
                 { "setprofile", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_hook(sProfileHook, "setprofile", aArgs, aKwargs); } },
                 { "gettrace", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return get_hook(sTraceHook, "gettrace", aArgs, aKwargs); } },
                 { "getprofile", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return get_hook(sProfileHook, "getprofile", aArgs, aKwargs); } },
-                { "stack_size", [](std::vector<object*> const&, object*) -> object* { return make_int(0); } }
+                { "stack_size", stack_size }
             };
 
             // --- threading._RLock (_PyRLock): ported from CPython 3.13.18's Lib/threading.py (class _RLock: a reentrant lock made of a lock,
@@ -2312,7 +2465,7 @@ namespace neos::python_runtime
                             dict_set(kwargs.get(), kwargsKey.get(), a[2]);
                         dict_set(kwargs.get(), daemonKey.get(), make_bool(true));
                         ref const thread{ call(cls.get(), empty.get(), kwargs.get()) };
-                        if (!thread || !start_thread(thread.get()))
+                        if (!thread || !start_function_thread(thread.get(), a[0]))
                             return nullptr;
                         auto* const state = state_of(thread.get());
                         // (its identity once it has started)
@@ -2333,11 +2486,152 @@ namespace neos::python_runtime
                         return signal_interrupt_main(signal) ? none() : nullptr;
                     } },
                 { "exit", [](std::vector<object*> const&, object*) -> object* { return error("SystemExit", ""); } },
-                { "stack_size", [](std::vector<object*> const&, object*) -> object* { return make_int(0); } }
+                { "stack_size", stack_size }
             };
+
+            // --- _thread._ThreadHandle and start_joinable_thread (CPython 3.13's Modules/_threadmodule.c: a handle of a thread that can be
+            // joined (its Thread's state))
+
+            struct thread_handle_object
+            {
+                header h;
+                object* thread = nullptr;   ///< (its Thread, once started)
+                bool done = false;          ///< (_set_done)
+                ~thread_handle_object() { release(thread); }
+            };
+
+            neos_py_type make_thread_handle_type();
+            neos_py_type sThreadHandleType = make_thread_handle_type();
+
+            bool is_thread_handle(object* aObject) { return aObject != nullptr && aObject->type == &sThreadHandleType.base; }
+            thread_handle_object& as_thread_handle(object* aObject) { return *reinterpret_cast<thread_handle_object*>(aObject); }
+
+            object* thread_handle_method(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
+            {
+                auto const& items = as<tuple_object>(aArgs)->items;
+                auto& handle = as_thread_handle(items.at(0u));
+                std::vector<object*> const rest{ items.begin() + 1, items.end() };
+                std::string_view const name{ static_cast<char const*>(aData) };
+                std::vector<object*> a;
+                auto* const state = handle.thread != nullptr ? state_of(handle.thread) : nullptr;
+                if (name == "join")
+                {
+                    if (!parse_arguments("join", rest, aKwargs, { "timeout" }, 0u, 0u, a))
+                        return nullptr;
+                    double timeout = -1.0;
+                    if (a[0] != nullptr && kind_of(a[0]) != NEOS_PY_NONE && !to_double(a[0], timeout))
+                        return nullptr;
+                    if (state == nullptr)
+                        return error("RuntimeError", "thread not started");
+                    if (handle.done)
+                        return new_reference(none());
+                    if (state->ident == thread_ident() && state->state == thread_state::Started)
+                        return error("RuntimeError", "Cannot join current thread");
+                    if (!join_thread(*state, timeout < 0.0 ? -1.0 : timeout))
+                        return nullptr;
+                    return new_reference(none());
+                }
+                if (!parse_arguments(name == "is_done" ? "is_done" : "_set_done", rest, aKwargs, {}, 0u, 0u, a))
+                    return nullptr;
+                if (name == "is_done")
+                {
+                    if (handle.done)
+                        return make_bool(true);
+                    if (state == nullptr)
+                        return make_bool(false);
+                    std::lock_guard<std::mutex> lock{ state->mutex };
+                    return make_bool(state->state == thread_state::Finished);
+                }
+                // (_set_done)
+                if (state == nullptr)
+                    return error("RuntimeError", "thread not started");
+                handle.done = true;
+                return new_reference(none());
+            }
+
+            neos_py_type make_thread_handle_type()
+            {
+                auto type = make_type("_thread._ThreadHandle", "_ThreadHandle", retain_object, release_object<thread_handle_object>);
+                type.repr = [](neos_py_context*, object* aSelf) -> object*
+                {
+                    auto const* const state = as_thread_handle(aSelf).thread != nullptr ? state_of(as_thread_handle(aSelf).thread) : nullptr;
+                    return make_str("<_thread._ThreadHandle object: ident=" + std::to_string(state != nullptr ? state->ident : 0ll) + ">");
+                };
+                type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
+                {
+                    static char const* const sMethods[] = { "join", "is_done", "_set_done" };
+                    for (auto m : sMethods)
+                        if (std::strcmp(aName, m) == 0)
+                            return make_function(m, thread_handle_method, const_cast<char*>(m), aSelf);
+                    if (std::strcmp(aName, "ident") == 0)
+                    {
+                        auto const* const state = as_thread_handle(aSelf).thread != nullptr ? state_of(as_thread_handle(aSelf).thread) : nullptr;
+                        return make_int(state != nullptr ? state->ident : 0);
+                    }
+                    return error("AttributeError", std::string{ "'_thread._ThreadHandle' object has no attribute '" } + aName + "'");
+                };
+                return type;
+            }
+
+            // (start_joinable_thread(function, handle=None, daemon=True): the thread started (a Thread without a name of its own, as 
+            // start_new_thread's), its handle)
+            object* start_joinable_thread(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!parse_arguments("start_joinable_thread", aArgs, aKwargs, { "function", "handle", "daemon" }, 1u, 0u, a))
+                    return nullptr;
+                ref const callable{ fn_builtin("callable") };
+                ref const isCallable{ callable ? invoke(callable.get(), { new_reference(a[0]) }) : nullptr };
+                if (!isCallable)
+                    return nullptr;
+                if (truth(isCallable.get()) != 1)
+                    return error("TypeError", "thread function must be callable");
+                ref handle;
+                if (a[1] != nullptr && kind_of(a[1]) != NEOS_PY_NONE)
+                {
+                    if (!is_thread_handle(a[1]))
+                        return error("TypeError", std::string{ "'handle' must be a _ThreadHandle" });
+                    handle = ref::borrowed(a[1]);
+                }
+                else
+                    handle = ref{ &(new thread_handle_object{ { { &sThreadHandleType.base } } })->h.base };
+                if (as_thread_handle(handle.get()).thread != nullptr)
+                    return error("RuntimeError", "thread already started");
+                int daemon = 1;
+                if (a[2] != nullptr && (daemon = truth(a[2])) < 0)
+                    return nullptr;
+                ref const cls{ thread_class() };
+                if (!cls)
+                    return nullptr;
+                ref const empty{ make_tuple() };
+                ref const kwargs{ keywords({ { "target", a[0] }, { "daemon", make_bool(daemon != 0) } }) };
+                ref const thread{ call(cls.get(), empty.get(), kwargs.get()) };
+                if (!thread || !start_function_thread(thread.get(), a[0]))
+                    return nullptr;
+                as_thread_handle(handle.get()).thread = new_reference(thread.get());
+                auto* const state = state_of(thread.get());
+                // (its identity once it has started)
+                gil_release();
+                {
+                    std::unique_lock<std::mutex> lock{ state->mutex };
+                    state->condition.wait_for(lock, std::chrono::milliseconds{ 100 }, [&]() { return state->ident != 0; });
+                }
+                gil_acquire();
+                return handle.release_ownership();
+            }
 
             bool thread_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
+                static builtin_entry const sStartJoinable{ "start_joinable_thread", start_joinable_thread };
+                aAttributes.emplace_back("start_joinable_thread", make_builtin(sStartJoinable));
+                aAttributes.emplace_back("_ThreadHandle", context()->type_new(context(), "_ThreadHandle", "_thread._ThreadHandle", 
+                    [](neos_py_context*, void*, object* aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("_ThreadHandle", as<tuple_object>(aArgs)->items, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        return &(new thread_handle_object{ { { &sThreadHandleType.base } } })->h.base;
+                    }, nullptr, [](neos_py_context*, void*, object* aObject) -> int { return is_thread_handle(aObject) ? 1 : 0; }));
                 for (auto const& f : sThreadFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
                 aAttributes.emplace_back("_local", local_class());

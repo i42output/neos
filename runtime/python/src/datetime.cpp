@@ -2447,10 +2447,18 @@ namespace neos::python_runtime
                     return nullptr;
                 if (r == 0)
                 {
-                    // (naive: local time)
+                    // (naive: local time (local_timezone_from_local's: in a gap, the time on the side that its fold selects, as timestamp()'s))
+                    auto const f = fields_of(aSelf);
                     long long seconds = 0;
-                    if (!local_to_seconds(fields_of(aSelf), seconds))
+                    if (!local_to_seconds(f, seconds))
                         return nullptr;
+                    auto other = f;
+                    other.fold = f.fold != 0 ? 0 : 1;
+                    long long seconds2 = 0;
+                    if (!local_to_seconds(other, seconds2))
+                        return nullptr;
+                    if (seconds2 != seconds && (seconds2 > seconds) == (f.fold != 0))
+                        seconds = seconds2;
                     ref const local{ local_timezone(seconds - sEpoch) };
                     if (!local)
                         return nullptr;
