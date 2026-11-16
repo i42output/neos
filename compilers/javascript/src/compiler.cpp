@@ -698,6 +698,20 @@ namespace neos::compilers::javascript
             auto* operand = iStack[first];
             result->source = std::string_view{ operand->source.data(), static_cast<std::size_t>(aSource.data() + aSource.size() - operand->source.data()) };
         }
+        if (aKind == construct::ArrowIdentifier)
+        {
+            // (an arrow function whose parameter is an identifier (a => b): the schema parses the identifier as an expression's operand;
+            // the node is an arrow function's, whose parameters are the identifier (a binding))
+            auto* operand = iStack[first];
+            if (!operand->is(construct::Identifier))
+                error(operand->source, "Malformed arrow function parameter list");
+            auto* parameters = make_node(construct::Parameters, operand->source);
+            auto* binding = make_node(construct::Binding, operand->source);
+            parameters->children.push_back(binding);
+            binding->parent = parameters;
+            iStack[first] = parameters;
+            result->kind = construct::Arrow;
+        }
         result->children.assign(iStack.begin() + static_cast<std::ptrdiff_t>(first), iStack.end());
         for (auto* child : result->children)
             child->parent = result;

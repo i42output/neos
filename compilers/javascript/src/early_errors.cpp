@@ -1132,6 +1132,30 @@ namespace neos::compilers::javascript
                 case construct::Assign:
                     assignment(aNode, c);
                     break;
+                case construct::Exponent:
+                    // (the grammar takes any unary expression as the operand of **: one that begins with its operator is an error)
+                    switch (aNode->size() > 0u ? aNode->child(0u)->kind : construct::Script)
+                    {
+                    case construct::Delete:
+                    case construct::Void:
+                    case construct::TypeOf:
+                    case construct::Plus:
+                    case construct::Negate:
+                    case construct::BitNot:
+                    case construct::Not:
+                    case construct::Await:
+                        error(aNode, "Unary operator used immediately before exponentiation expression. Parenthesis must be used to disambiguate operator precedence");
+                        break;
+                    default:
+                        break;
+                    }
+                    break;
+                case construct::And:
+                case construct::Or:
+                    // (the grammar takes && and || after ??: an error without parentheses)
+                    if (aNode->size() > 0u && aNode->child(0u)->is(construct::Coalesce))
+                        error(aNode, "Cannot mix ?? with && or || without parentheses");
+                    break;
                 case construct::PreIncrement:
                 case construct::PreDecrement:
                 case construct::PostIncrement:

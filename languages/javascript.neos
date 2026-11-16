@@ -304,12 +304,16 @@
     rest parameter $ javascript.pattern.rest ::= "..." , WS , binding target ;
     function body $ javascript.body ::= '{' , WS , { statement list item , WS } , '}' ;
 
-    arrow function $ javascript.arrow ::= arrow parameters , S , "=>" , WS , concise body ;
+    (* (an arrow function with one parameter that is an identifier (a => b) is the identifier (parsed as any expression's operand) and an
+       arrow tail (see assignment): it is not tried at every expression) *)
+    arrow function $ javascript.arrow ::= formal parameters , S , "=>" , WS , concise body ;
+    arrow tail $ javascript.arrow.identifier ::= "=>" , WS , concise body ;
     async arrow function $ javascript.arrow.async ::= async , S , arrow parameters , S , "=>" , WS , concise body ;
     arrow parameters ::= single arrow parameter | formal parameters ;
     single arrow parameter $ javascript.parameters ::= binding identifier ;
     concise body ::= function body / assignment expression ;
-    arrow function no in $ javascript.arrow ::= arrow parameters , S , "=>" , WS , concise body no in ;
+    arrow function no in $ javascript.arrow ::= formal parameters , S , "=>" , WS , concise body no in ;
+    arrow no in tail $ javascript.arrow.identifier ::= "=>" , WS , concise body no in ;
     async arrow function no in $ javascript.arrow.async ::= async , S , arrow parameters , S , "=>" , WS , concise body no in ;
     concise body no in ::= function body / assignment no in expression ;
 
@@ -353,14 +357,13 @@
     arguments ::= '(' , WS , [ argument list ] , WS , ')' ;
     argument list ::= ( spread element | assignment expression ) , { WS , ',' , WS , ( spread element | assignment expression ) } , [ WS , ',' ] ;
 
-    call expression ::= call head , { WS , call suffix } ;
-    call head ::= ( member expression , WS , call arguments ) / ( super call | import call ) ; (* (super( and import( are not member expressions) *)
     call suffix ::= call arguments | dot access | index access | private access | tagged template ;
     call arguments $ javascript.call ::= arguments ;
     super call $ javascript.super.call ::= super , WS , arguments ;
     import call $ javascript.import.call ::= import , WS , '(' , WS , assignment expression , [ WS , ',' , WS , assignment expression ] , [ WS , ',' ] , WS , ')' ;
 
-    optional expression $ javascript.optional ::= ( call expression | member expression ) , WS , optional chain , { WS , optional chain } ;
+    (* (an optional expression: the expression before its chains is its too (as a binary operator's left operand is)) *)
+    optional chains $ javascript.optional ::= optional chain , { WS , optional chain } ;
     optional chain ::= optional head , { WS , ( call arguments | dot access | index access | private access | tagged template ) } ;
     optional head ::= optional call | optional index | optional private | optional dot ;
     optional call $ javascript.optional.call ::= "?." , WS , arguments ;
@@ -368,7 +371,17 @@
     optional dot $ javascript.optional.dot ::= "?." , WS , identifier name ;
     optional private $ javascript.optional.private ::= "?." , WS , private identifier ;
 
-    left hand side expression ::= optional expression | call expression | new expression ;
+    (* (a member expression or a call expression (a head and its suffixes: a call expression has arguments among them), perhaps with
+       optional chains; or a new expression without arguments (which has neither). The head is parsed once) *)
+    left hand side expression ::= ( left hand side head , { WS , call suffix } , [ WS , optional chains ] ) / new expression without arguments ;
+    left hand side head ::=
+        primary expression /
+        ( super property |
+        new target |
+        import meta |
+        new expression with arguments |
+        super call |
+        import call ) ;
 
     update expression ::= prefix increment | prefix decrement | postfix expression ;
     prefix increment $ javascript.preincrement ::= "++" , WS , unary expression ;
@@ -377,19 +390,24 @@
     postfix increment $ javascript.postincrement ::= "++" ;
     postfix decrement $ javascript.postdecrement ::= "--" ;
 
+    (* (an update expression before an await expression: where both match the same source (await (a), where await may be an identifier),
+       it is the former (the compiler makes it an await expression where await is the operator)) *)
     unary expression ::=
         delete expression | void expression | typeof expression | plus expression | negate expression |
-        bitwise not expression | not expression | await expression | update expression ;
+        bitwise not expression | not expression | update expression | await expression ;
     delete expression $ javascript.delete ::= delete , WS , unary expression ;
     void expression $ javascript.void ::= void , WS , unary expression ;
     typeof expression $ javascript.typeof ::= typeof , WS , unary expression ;
-    plus expression $ javascript.plus ::= '+' , WS , unary expression ;
-    negate expression $ javascript.negate ::= '-' , WS , unary expression ;
+    (* (not the first character of "++" or "--": ++a is a prefix increment, also as an operand (typeof ++a, - --a)) *)
+    plus expression $ javascript.plus ::= single plus , WS , unary expression ;
+    negate expression $ javascript.negate ::= single minus , WS , unary expression ;
     bitwise not expression $ javascript.bitnot ::= '~' , WS , unary expression ;
     not expression $ javascript.not ::= '!' , WS , unary expression ;
     await expression $ javascript.await ::= await , WS , unary expression ;
 
-    exponentiation expression ::= ( update expression , [ WS , exponent tail ] ) | unary expression ;
+    (* (the operand of ** is not a unary expression that begins with its operator (-a ** b): the compiler's check, not the grammar's (the
+       operand is then parsed once)) *)
+    exponentiation expression ::= unary expression , [ WS , exponent tail ] ;
     exponent tail $ javascript.exponent ::= "**" , WS , exponentiation expression ;
 
     multiplicative expression ::= exponentiation expression , { WS , ( multiply tail | divide tail | remainder tail ) } ;
@@ -398,10 +416,10 @@
     remainder tail $ javascript.remainder ::= '%' , WS , exponentiation expression ;
 
     additive expression ::= multiplicative expression , { WS , ( add tail | subtract tail ) } ;
-    add tail $ javascript.add ::= binary plus , WS , multiplicative expression ;
-    binary plus ::= ( '+' , [ '+' ] ) - "++" ; (* (not the first character of "++") *)
-    subtract tail $ javascript.subtract ::= binary minus , WS , multiplicative expression ;
-    binary minus ::= ( '-' , [ '-' ] ) - "--" ; (* (not the first character of "--") *)
+    add tail $ javascript.add ::= single plus , WS , multiplicative expression ;
+    single plus ::= ( '+' , [ '+' ] ) - "++" ; (* (not the first character of "++") *)
+    subtract tail $ javascript.subtract ::= single minus , WS , multiplicative expression ;
+    single minus ::= ( '-' , [ '-' ] ) - "--" ; (* (not the first character of "--") *)
 
     shift expression ::= additive expression , { WS , ( shift left tail | shift right unsigned tail | shift right tail ) } ;
     shift left tail $ javascript.shiftleft ::= "<<" , WS , additive expression ;
@@ -442,11 +460,11 @@
     bitwise or tail $ javascript.bitor ::= '|' , WS , bitwise xor expression ;
     logical and expression ::= bitwise or expression , { WS , logical and tail } ;
     logical and tail $ javascript.and ::= "&&" , WS , bitwise or expression ;
-    logical or expression ::= logical and expression , { WS , logical or tail } ;
     logical or tail $ javascript.or ::= "||" , WS , logical and expression ;
-    coalesce expression ::= bitwise or expression , { WS , coalesce tail } + ;
     coalesce tail $ javascript.coalesce ::= "??" , WS , bitwise or expression ;
-    short circuit expression ::= logical or expression | coalesce expression ;
+    (* (a logical or expression, or a coalesce expression: their first operand is parsed once; ?? with && or || after it (which needs
+       parentheses) is the compiler's check, not the grammar's (&& or || with ?? after it does not parse)) *)
+    short circuit expression ::= bitwise or expression , { WS , coalesce tail } , { WS , logical and tail } , { WS , logical or tail } ;
 
     bitwise and no in expression ::= equality no in expression , { WS , bitwise and no in tail } ;
     bitwise and no in tail $ javascript.bitand ::= '&' , WS , equality no in expression ;
@@ -456,21 +474,23 @@
     bitwise or no in tail $ javascript.bitor ::= '|' , WS , bitwise xor no in expression ;
     logical and no in expression ::= bitwise or no in expression , { WS , logical and no in tail } ;
     logical and no in tail $ javascript.and ::= "&&" , WS , bitwise or no in expression ;
-    logical or no in expression ::= logical and no in expression , { WS , logical or no in tail } ;
     logical or no in tail $ javascript.or ::= "||" , WS , logical and no in expression ;
-    coalesce no in expression ::= bitwise or no in expression , { WS , coalesce no in tail } + ;
     coalesce no in tail $ javascript.coalesce ::= "??" , WS , bitwise or no in expression ;
-    short circuit no in expression ::= logical or no in expression | coalesce no in expression ;
+    short circuit no in expression ::= bitwise or no in expression , { WS , coalesce no in tail } , { WS , logical and no in tail } , { WS , logical or no in tail } ;
 
     conditional expression ::= short circuit expression , [ WS , conditional tail ] ;
     conditional tail $ javascript.conditional ::= '?' , WS , assignment expression , WS , ':' , WS , assignment expression ;
     conditional no in expression ::= short circuit no in expression , [ WS , conditional no in tail ] ;
     conditional no in tail $ javascript.conditional ::= '?' , WS , assignment expression , WS , ':' , WS , assignment no in expression ;
 
-    assignment expression ::= arrow function | async arrow function | yield expression | assignment | conditional expression ;
-    assignment no in expression ::= arrow function no in | async arrow function no in | yield no in expression | assignment no in | conditional no in expression ;
-    assignment $ javascript.assign ::= left hand side expression , WS , assignment operator , WS , assignment expression ;
-    assignment no in $ javascript.assign ::= left hand side expression , WS , assignment operator , WS , assignment no in expression ;
+    assignment expression ::= arrow function | async arrow function | yield expression | assignment ;
+    assignment no in expression ::= arrow function no in | async arrow function no in | yield no in expression | assignment no in ;
+    (* (a conditional expression, an assignment to one (its target is parsed once: that it is one is the compiler's check), or an arrow
+       function whose parameter is one (an identifier: the compiler's check too)) *)
+    assignment ::= conditional expression , [ S , arrow tail ] , [ WS , assign tail ] ;
+    assignment no in ::= conditional no in expression , [ S , arrow no in tail ] , [ WS , assign no in tail ] ;
+    assign tail $ javascript.assign ::= assignment operator , WS , assignment expression ;
+    assign no in tail $ javascript.assign ::= assignment operator , WS , assignment no in expression ;
     assignment operator ::=
         "=" | "*=" | "/=" | "%=" | "+=" | "-=" | "<<=" | ">>=" | ">>>=" | "&=" | "^=" | "|=" | "**=" | "&&=" | "||=" | "??=" ;
     yield expression $ javascript.yield ::= yield , [ S , [ '*' , WS ] , assignment expression ] ;

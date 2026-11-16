@@ -83,6 +83,7 @@ namespace neos::language::javascript
     X(Parameters, "javascript.parameters", false) \
     X(Body, "javascript.body", false) \
     X(Arrow, "javascript.arrow", false) \
+    X(ArrowIdentifier, "javascript.arrow.identifier", true) \
     X(AsyncArrow, "javascript.arrow.async", false) \
     X(ClassExpression, "javascript.class.expression", false) \
     X(Extends, "javascript.extends", false) \
@@ -102,7 +103,7 @@ namespace neos::language::javascript
     X(Call, "javascript.call", true) \
     X(SuperCall, "javascript.super.call", false) \
     X(ImportCall, "javascript.import.call", false) \
-    X(Optional, "javascript.optional", false) \
+    X(Optional, "javascript.optional", true) \
     X(OptionalCall, "javascript.optional.call", true) \
     X(OptionalIndex, "javascript.optional.index", true) \
     X(OptionalDot, "javascript.optional.dot", true) \
@@ -146,7 +147,7 @@ namespace neos::language::javascript
     X(Or, "javascript.or", true) \
     X(Coalesce, "javascript.coalesce", true) \
     X(Conditional, "javascript.conditional", true) \
-    X(Assign, "javascript.assign", false) \
+    X(Assign, "javascript.assign", true) \
     X(Yield, "javascript.yield", false) \
     X(Comma, "javascript.comma", true) \
     X(Initializer, "javascript.initializer", false) \
