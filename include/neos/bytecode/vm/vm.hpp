@@ -66,6 +66,16 @@ namespace neos
             // (the calling thread's: a thread (below) takes those of the thread that constructs it, so that programs that run at the 
             // same time (e.g. in different contexts) each have their own)
             void set_compile_service(compile_service aService);
+            // (the source that the compile service is compiling (on the calling thread) is an extension of the program that compiles it 
+            // (see neos_rt_host::extend_n): the indices of the program's functions and globals that the extension's first follow, and 
+            // the address of its data (the service compiles it so: see language::compiler::set_extension); none: a program of its own)
+            struct extension
+            {
+                std::uint32_t functions = 0u;
+                std::uint32_t globals = 0u;
+                std::uint32_t data = 0u;
+            };
+            std::optional<extension> const& compile_extension();
             // (the program's command line arguments (see neos_rt_host::arguments); the calling thread's, as set_compile_service's)
             void set_program_arguments(std::vector<std::string> aArguments);
 

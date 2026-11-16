@@ -261,6 +261,7 @@ add_neos_compiler_plugin(compiler.javascript javascript
     compilers/javascript/src/compiler.cpp
     compilers/javascript/src/codegen.cpp
     compilers/javascript/src/early_errors.cpp
+    compilers/javascript/src/deferral.cpp
     runtime/javascript/src/regexp_engine.cpp
     runtime/javascript/src/unicode.cpp
     runtime/javascript/src/unicode_data.cpp)

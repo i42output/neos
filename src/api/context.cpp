@@ -381,7 +381,10 @@ namespace neos
             language::ast{ compiled.symbolTable } });
         compiler().set_language_options(aLanguage, aOptions);
         compiler().set_quiet(true);
-        struct reset { context& c; std::string const& language; ~reset() { c.compiler().set_language_options(language, {}); c.compiler().set_quiet(false); } } const resetOptions{ *this, aLanguage };
+        // (source that is an extension of the program that compiles it (see bytecode::vm::compile_extension))
+        if (auto const& extension = bytecode::vm::compile_extension())
+            compiler().set_extension(language::compiler::extension{ extension->functions, extension->globals, extension->data });
+        struct reset { context& c; std::string const& language; ~reset() { c.compiler().set_language_options(language, {}); c.compiler().set_quiet(false); c.compiler().set_extension({}); } } const resetOptions{ *this, aLanguage };
         try
         {
             if (!compiler().compile(compiled))

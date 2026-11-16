@@ -261,6 +261,7 @@ namespace neos
                     void* code = nullptr;
                     std::size_t codeSize = 0u;
                     std::uint32_t(*trampoline)(context*, void const*) = nullptr;
+                    std::size_t thunkOffset = 0u;           ///< (lazy_compile's thunk (see code_generator::generate_entries))
                     std::vector<std::size_t> functionOffsets;
                     std::vector<std::size_t> entryTargets;  ///< (the offsets that the entries' addresses are set to first (see code_generator::entries))
                     // (call_indirect's table: each function's address and type (an import's: none))
@@ -2193,6 +2194,7 @@ namespace neos
                             a.jmp_r(RAX);
                             a.barrier();
                             auto const thunkOffset = a.label_offset(thunk);
+                            aOutput.thunkOffset = thunkOffset;
                             // (each entry (see entries): its code's address at first that of its stub: mov r11d, its index; jmp the thunk)
                             entries();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
@@ -4719,7 +4721,9 @@ namespace neos
                             save_pinned_xmms();     // (System V: see call)
                             save_pinned_gprs();
                             a.load(false, RAX, RSP, 8 * static_cast<std::int32_t>(n));
-                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(iModule.functions.size()));
+                            // (the table's size: the module's functions and those that its program may be extended by (whose entries have
+                            // no type until then))
+                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(iModule.functions.size() + iModule.extensionRoom));
                             a.jcc(AE, iTrapLabels[TrapIndirectCall]);
                             a.shift_ri(4, true, RAX, 4u);
                             a.mov_ri(R11, reinterpret_cast<std::uint64_t>(iIndirect), true);
@@ -8357,7 +8361,7 @@ namespace neos
                             auto const index = gpr(i.operands[n], RAX);
                             if (index != RAX)
                                 a.mov_rr(false, RAX, index);
-                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(iModule.functions.size()));
+                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(iModule.functions.size() + iModule.extensionRoom));
                             a.jcc(AE, iTrapLabels[TrapIndirectCall]);
                             a.shift_ri(4, true, RAX, 4u);
                             a.mov_ri(R11, reinterpret_cast<std::uint64_t>(iTier.indirect.data()), true);
@@ -10247,6 +10251,14 @@ namespace neos
                             }
                             iWork.notify_one();
                         }
+                        // (a module is changed (see extend): none of its jobs is being made while aChange runs (those not yet made are made 
+                        // afterwards))
+                        void quiesce(compiled_module& aModule, std::function<void()> const& aChange)
+                        {
+                            std::unique_lock<std::mutex> lock{ iMutex };
+                            iIdle.wait(lock, [&]() { return aModule.jobsInFlight == 0u; });
+                            aChange();
+                        }
                         // (a module is destroyed: its jobs are not made (it waits for the one being made))
                         void closing(compiled_module& aModule)
                         {
@@ -10926,12 +10938,18 @@ namespace neos
                 {
                     compiled_module_ptr result{ new compiled_module{} };
                     result->description = aModule;
-                    result->blockEnds = std::make_unique<std::atomic<std::vector<std::uint32_t> const*>[]>(aModule.functions.size());
+                    // (a module whose program may be extended (see extend): what is each function's has room for those functions, so that
+                    // none of it moves (generated code has the addresses of some of it; optimizations made in the background read it))
+                    auto const room = aModule.functions.size() + aModule.extensionRoom;
+                    result->description.functions.reserve(room);
+                    if (aModule.extensionRoom != 0u)
+                        result->description.types.reserve(aModule.types.size() + ExtensionTypes);
+                    result->blockEnds = std::make_unique<std::atomic<std::vector<std::uint32_t> const*>[]>(room);
                     result->host = std::move(aHost);
                     try
                     {
                         // (call_indirect's table: its types now, its addresses once the code is where it runs)
-                        result->indirect.resize(result->description.functions.size());
+                        result->indirect.resize(room);
                         for (std::size_t f = 0u; f < result->description.functions.size(); ++f)
                             if (!result->description.functions[f].imported)
                                 result->indirect[f].type = result->description.functions[f].type;
@@ -10957,6 +10975,24 @@ namespace neos
                             m.verbose = static_cast<std::uint32_t>(setting("NEOS_TIER2_VERBOSE").value_or(0));
                             auto const calls = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_CALLS").value_or(2000), 1, NotAgain));
                             auto const n = m.description.functions.size();
+                            for (auto* v : { &m.counters, &m.loopCounters, &m.osrPending })
+                                v->reserve(room);
+                            m.loopTriggered.reserve(room);
+                            m.staleJobs.reserve(room);
+                            m.tierState.reserve(room);
+                            m.recompiles.reserve(room);
+                            m.noInline.reserve(room);
+                            m.noDeopt.reserve(room);
+                            m.guardFailures.reserve(room);
+                            m.deoptStrikes.reserve(room);
+                            m.struck.reserve(room);
+                            m.tokensHash.reserve(room);
+                            m.currentVersion.reserve(room);
+                            m.savedEntries.reserve(room);
+                            m.jobs.reserve(room);
+                            m.parametersRead.reserve(room);
+                            m.usefulSpeculations.reserve(room);
+                            m.deoptFrames.reserve(room);
                             m.counters.assign(n, calls);
                             m.tierCalls = calls;
                             m.loopIterations = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_LOOPS").value_or(10000), 1, NotAgain));
@@ -10967,7 +11003,7 @@ namespace neos
                             m.tierState.assign(n, 0u);
                             m.recompiles.assign(n, 0u);
                             m.noInline.resize(n);
-                            m.largeRejects = std::make_unique<std::atomic<std::uint8_t>[]>(n);
+                            m.largeRejects = std::make_unique<std::atomic<std::uint8_t>[]>(room);
                             m.noDeopt.resize(n);
                             m.guardFailures.resize(n);
                             m.deoptStrikes.resize(n);
@@ -11020,7 +11056,7 @@ namespace neos
                         if (result->code == nullptr)
                             return {};
                         result->trampoline = reinterpret_cast<std::uint32_t(*)(context*, void const*)>(result->code);
-                        for (std::size_t f = 0u; f < result->indirect.size(); ++f)
+                        for (std::size_t f = 0u; f < result->description.functions.size(); ++f)
                             if (!result->description.functions[f].imported)
                                 result->indirect[f].target = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(result->code) + result->functionOffsets[f]);
                     }
@@ -11029,6 +11065,102 @@ namespace neos
                         return {};
                     }
                     return result;
+                }
+
+                bool extend(compiled_module& aModule, std::size_t aFunctions, std::size_t aTypes, std::function<void(module_description&)> const& aAppend)
+                {
+                    auto& m = aModule;
+                    std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
+                    if (!m.lazy || aFunctions > m.description.extensionRoom || m.description.types.size() + aTypes > m.description.types.capacity())
+                        return false;
+                    tier_worker::instance().quiesce(m, [&]()
+                    {
+                        auto const first = m.description.functions.size();
+                        aAppend(m.description);
+                        auto const n = m.description.functions.size();
+                        if (n - first > aFunctions || n > m.indirect.size())
+                            throw std::logic_error("neos::bytecode::vm::jit::extend: no room");
+                        m.description.extensionRoom -= static_cast<std::uint32_t>(n - first);
+                        // (the new functions' state (the room for it was kept: nothing moves))
+                        m.functionOffsets.resize(n);
+                        m.entryTargets.resize(n);
+                        m.counters.resize(n, m.tierCalls);
+                        m.loopCounters.resize(n, m.loopIterations);
+                        m.osrPending.resize(n, 0);
+                        m.loopTriggered.resize(n, 0u);
+                        m.staleJobs.resize(n, 0u);
+                        m.tierState.resize(n, 0u);
+                        m.recompiles.resize(n, 0u);
+                        m.noInline.resize(n);
+                        m.noDeopt.resize(n);
+                        m.guardFailures.resize(n);
+                        m.deoptStrikes.resize(n);
+                        m.struck.resize(n);
+                        m.tokensHash.resize(n, 0u);
+                        m.currentVersion.resize(n, nullptr);
+                        m.savedEntries.resize(n);
+                        m.jobs.resize(n);
+                        if (!m.parametersRead.empty())
+                        {
+                            m.parametersRead.resize(n);
+                            for (auto g = first; g < n; ++g)
+                                m.parametersRead[g] = optimizer::parameters_read(m.description, static_cast<std::uint32_t>(g));
+                        }
+                        if (m.tiering)
+                        {
+                            std::lock_guard<std::mutex> lockFrames{ m.deoptMutex };
+                            m.deoptFrames.resize(n);
+                        }
+                        // (their entries (as code_generator::entries's and generate_entries's stubs, in a chunk of their own): each 
+                        // jmp [rip+2]; int3 int3; its code's address (at first its stub's); the stub: mov r11d, the function; mov rax, 
+                        // lazy_compile's thunk; jmp rax)
+                        constexpr std::size_t Slot = 48u;
+                        bytes code((n - first) * Slot, 0xCCu);
+                        auto const thunk = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(m.code) + m.thunkOffset);
+                        for (auto f = first; f < n; ++f)
+                        {
+                            if (m.description.functions[f].imported)
+                                continue;
+                            auto* const slot = code.data() + (f - first) * Slot;
+                            std::uint8_t const entry[] = { 0xFFu, 0x25u, 0x02u, 0x00u, 0x00u, 0x00u, 0xCCu, 0xCCu };
+                            std::memcpy(slot, entry, sizeof(entry));
+                            slot[16] = 0x41u;
+                            slot[17] = 0xBBu;
+                            auto const index = static_cast<std::uint32_t>(f);
+                            std::memcpy(slot + 18, &index, sizeof(index));
+                            slot[22] = 0x48u;
+                            slot[23] = 0xB8u;
+                            std::memcpy(slot + 24, &thunk, sizeof(thunk));
+                            slot[32] = 0xFFu;
+                            slot[33] = 0xE0u;
+                        }
+                        compiled_module::tier_chunk chunk;
+                        chunk.code = allocate_executable(code, chunk.size, nullptr, [&](std::uint8_t* aCode)
+                        {
+                            for (auto f = first; f < n; ++f)
+                                if (!m.description.functions[f].imported)
+                                {
+                                    auto const stub = reinterpret_cast<std::uint64_t>(aCode + (f - first) * Slot + 16u);
+                                    std::memcpy(aCode + (f - first) * Slot + 8u, &stub, sizeof(stub));
+                                }
+                        });
+                        if (chunk.code == nullptr)
+                            throw std::bad_alloc{};
+                        auto const base = reinterpret_cast<std::uintptr_t>(m.code);
+                        for (auto f = first; f < n; ++f)
+                        {
+                            if (m.description.functions[f].imported)
+                                continue;
+                            auto const entry = reinterpret_cast<std::uintptr_t>(chunk.code) + (f - first) * Slot;
+                            // (offsets from the module's code, as the others' (the entries are elsewhere: the offsets wrap))
+                            m.functionOffsets[f] = static_cast<std::size_t>(entry - base);
+                            m.entryTargets[f] = static_cast<std::size_t>(entry + 16u - base);
+                            m.indirect[f].target = static_cast<std::uint64_t>(entry);
+                            m.indirect[f].type = m.description.functions[f].type;
+                        }
+                        m.chunks.push_back(std::move(chunk));
+                    });
+                    return true;
                 }
 
                 std::vector<value> invoke(compiled_module& aModule, std::uint32_t aFunction, std::span<value const> aArguments, invocation* aInvocation)

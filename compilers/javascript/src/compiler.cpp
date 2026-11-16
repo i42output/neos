@@ -48,6 +48,8 @@ namespace neos::compilers::javascript
         iKind = code_kind::Script;
         iEvalFlags = 0u;
         iModuleMain = false;
+        iUnit = false;
+        iUnitFirst.reset();
         iEvalPrivateNames.clear();
         if (options.starts_with("eval:"))
         {
@@ -64,6 +66,20 @@ namespace neos::compilers::javascript
             iKind = code_kind::IndirectEval;
         else if (options == "script-eval")
             iKind = code_kind::EvaluateScript;
+        else if (options == "unit" || options.starts_with("unit:"))
+        {
+            // (a deferred function's source (see preparse): a script whose completion value is the function; "unit:<first>": compiled
+            // as an extension of the program (the index of the program's first function))
+            iKind = code_kind::EvaluateScript;
+            iUnit = true;
+            if (options.size() > 5u)
+            {
+                // ("unit:<first>:<sites>")
+                auto const colon = options.find(':', 5u);
+                iUnitFirst = static_cast<std::uint32_t>(std::stoul(options.substr(5u, colon == std::string::npos ? std::string::npos : colon - 5u)));
+                iUnitSites = colon == std::string::npos ? 0u : static_cast<std::uint32_t>(std::stoul(options.substr(colon + 1u)));
+            }
+        }
         else if (options == "module")
             iKind = code_kind::Module;
         else if (options.starts_with("function:"))
@@ -83,7 +99,7 @@ namespace neos::compilers::javascript
 
     void compiler::begin_pass()
     {
-        iPropertySites = 0u;    // (each pass numbers the program's sites from 0)
+        iPropertySites = iUnitFirst ? iUnitSites : 0u;    // (each pass numbers the program's sites from 0 (an extension's: after the program's))
         iRuntimeIndices.clear();    // (and makes the module's functions again)
     }
 
@@ -498,9 +514,63 @@ namespace neos::compilers::javascript
     {
         // (the keywords that a previous pass found to be identifiers parsed as operators (see keyword_operators): their first letters
         // capitalized (the source's length and offsets unchanged), so that they parse as identifiers (see identifier_text))
-        auto const text = aFragment.source().to_std_string();
+        auto text = aFragment.source().to_std_string();
         auto const preparsed = iPreparsedSources.find(text);
-        std::string const original = preparsed != iPreparsedSources.end() ? preparsed->second : text;
+        std::string original = preparsed != iPreparsedSources.end() ? preparsed->second : text;
+        // (the program's script, compiled to be run now (see i_code_generator::deferred_compilation): the functions that can be compiled 
+        // when they are first called (see deferrable_functions) are: the source that is parsed has their bodies cut (but their directives 
+        // that make them strict, their lines, and the column of the line that ends them); their code calls the runtime, which compiles 
+        // their source as written (a range of the script's source text, as Function.prototype.toString's) when they are first called)
+        if (iDepth == 1 && iKind == code_kind::Script && !iUnit && deferred_compilation() && !debug_info() && !generator().linked())
+        {
+            if (!iDeferred || iDeferred->cut != original)
+            {
+                iDeferred.reset();
+                auto const functions = deferrable_functions(original);
+                if (!functions.empty())
+                {
+                    deferred_source d;
+                    d.cut.reserve(original.size());
+                    std::size_t from = 0u;
+                    for (auto const& f : functions)
+                    {
+                        // (kept: the body's '{' and what precedes it; the newlines of what is cut, and (if it has any) as many spaces as
+                        // the characters between the last of them and the body's '}')
+                        d.cut.append(original, from, f.body + 1u - from);
+                        auto const bodyOffset = d.cut.size() - 1u;
+                        if (f.strict)
+                            d.cut.append("\"use strict\";");
+                        std::size_t lastNewline = std::string::npos;
+                        for (std::size_t i = f.body + 1u; i < f.end; ++i)
+                            if (original[i] == '\n')
+                            {
+                                d.cut.push_back('\n');
+                                lastNewline = i;
+                            }
+                        if (lastNewline != std::string::npos)
+                            d.cut.append(f.end - lastNewline - 1u, ' ');
+                        from = f.end;
+                        d.cuts.push_back(deferred_source::cut_entry{ bodyOffset, d.cut.size(), from - d.cut.size() });
+                    }
+                    d.cut.append(original, from, std::string::npos);
+                    d.original = std::move(original);
+                    original = d.cut;
+                    text = d.cut;
+                    iDeferred = std::move(d);
+                    aFragment.set_source(neolib::string_view{ text });
+                    iSource = aFragment.source().to_std_string_view();
+                }
+            }
+        }
+        else if (iDepth == 1)
+            iDeferred.reset();
+        // (the fragment's source when this returns is the one cut (or that with its keywords renamed))
+        struct parsed_source
+        {
+            compiler& c;
+            i_source_fragment& f;
+            ~parsed_source() { if (c.iDepth == 1 && c.iDeferred) c.iDeferred->parsed = f.source().to_std_string_view().data(); }
+        } const parsedSource{ *this, aFragment };
         // (those that a scan of its tokens finds, and those that a pass's tree found (see keyword_operators), but those that a pass's tree
         // found to be operators)
         auto sites = keyword_division_sites(original, iKind == code_kind::Module);
@@ -525,6 +595,46 @@ namespace neos::compilers::javascript
         }
         if (iDepth == 1)
             iSource = aFragment.source().to_std_string_view();
+    }
+
+    compiler::deferred_source const* compiler::deferred_source_of_script() const
+    {
+        return iDeferred && iDeferred->parsed == iSource.data() && iDeferred->cut.size() == iSource.size() ? &*iDeferred : nullptr;
+    }
+
+    bool compiler::deferred_function(node const* aFunction) const
+    {
+        auto const* const d = deferred_source_of_script();
+        if (d == nullptr || aFunction == nullptr || aFunction->children.empty() || !aFunction->children.back()->is(construct::Body))
+            return false;
+        auto const body = aFunction->children.back()->source;
+        if (body.data() < iSource.data() || body.data() >= iSource.data() + iSource.size())
+            return false;
+        auto const offset = static_cast<std::size_t>(body.data() - iSource.data());
+        auto const cut = std::lower_bound(d->cuts.begin(), d->cuts.end(), offset, [](auto const& aEntry, std::size_t aOffset) { return aEntry.body < aOffset; });
+        return cut != d->cuts.end() && cut->body == offset;
+    }
+
+    std::size_t compiler::written_offset(std::size_t aOffset, bool aEnd) const
+    {
+        auto const* const d = deferred_source_of_script();
+        if (d == nullptr)
+            return aOffset;
+        // (the cuts before it: those whose text would precede it (an end: the text that it ends is before a cut that it is at))
+        auto const after = aEnd ?
+            std::lower_bound(d->cuts.begin(), d->cuts.end(), aOffset, [](auto const& aEntry, std::size_t aAt) { return aEntry.at < aAt; }) :
+            std::upper_bound(d->cuts.begin(), d->cuts.end(), aOffset, [](std::size_t aAt, auto const& aEntry) { return aAt < aEntry.at; });
+        return aOffset + (after == d->cuts.begin() ? 0u : std::prev(after)->removed);
+    }
+
+    std::string_view compiler::written_source_text() const
+    {
+        auto const* const d = deferred_source_of_script();
+        if (d == nullptr || iSourceText.empty() || iSourceText.data() < iSource.data() || iSourceText.data() + iSourceText.size() > iSource.data() + iSource.size())
+            return iSourceText;
+        auto const first = written_offset(static_cast<std::size_t>(iSourceText.data() - iSource.data()), false);
+        auto const last = written_offset(static_cast<std::size_t>(iSourceText.data() - iSource.data()) + iSourceText.size(), true);
+        return std::string_view{ d->original }.substr(first, last - first);
     }
 
     std::string compiler::original_source() const
@@ -1726,7 +1836,12 @@ namespace neos::compilers::javascript
         case construct::AsyncFunctionExpression:
         case construct::Arrow:
         case construct::AsyncArrow:
-            function_scope(aNode, new_function(aNode, aFunction));
+            {
+                auto* inner = new_function(aNode, aFunction);
+                function_scope(aNode, inner);
+                // (a function whose body the preparse cut: compiled when it is first called)
+                inner->deferred = aNode->is(construct::FunctionExpression) && !inner->generator && !inner->async && deferred_function(aNode);
+            }
             return;
         case construct::Method:
         case construct::Getter:
@@ -2167,12 +2282,13 @@ namespace neos::compilers::javascript
             iGlobalIndex.clear();
             iGlobalIndexed = 0u;
         }
+        // (the globals' indices: after the heap's base's, and (an extension of a program: see i_code_generator::global_base) the program's)
         for (; iGlobalIndexed < g.global_count(); ++iGlobalIndexed)
-            iGlobalIndex.emplace(g.global_name(iGlobalIndexed).to_std_string(), static_cast<std::uint32_t>(iGlobalIndexed + 1u));
+            iGlobalIndex.emplace(g.global_name(iGlobalIndexed).to_std_string(), static_cast<std::uint32_t>(iGlobalIndexed + 1u) + g.global_base());
         if (auto const existing = iGlobalIndex.find(aName); existing != iGlobalIndex.end())
             return existing->second;
         g.add_global(neolib::string{ aName }, aType);
-        return static_cast<std::uint32_t>(g.global_count());
+        return static_cast<std::uint32_t>(g.global_count()) + g.global_base();
     }
 
     std::uint32_t compiler::literal_string(std::string const& aText)
@@ -2192,8 +2308,10 @@ namespace neos::compilers::javascript
         {
             // (the script's source text as a literal (UTF-8, NUL as C0 80: see utf8_encoding)), as written (the keywords that the preparse
             // renamed: see preparse)
-            std::string written{ iSourceText };
-            if (auto const keywords = iKeywordIdentifiers.find(original_source()); keywords != iKeywordIdentifiers.end() &&
+            // (a script whose functions' bodies were cut: its source as written is kept (see preparse))
+            std::string written{ written_source_text() };
+            if (auto const keywords = deferred_source_of_script() == nullptr ? iKeywordIdentifiers.find(original_source()) : iKeywordIdentifiers.end(); 
+                keywords != iKeywordIdentifiers.end() &&
                 iSourceText.data() >= iSource.data() && iSourceText.data() + iSourceText.size() <= iSource.data() + iSource.size())
             {
                 auto const base = static_cast<std::size_t>(iSourceText.data() - iSource.data());
@@ -2230,8 +2348,9 @@ namespace neos::compilers::javascript
             // runtime's utf16) are fewer than their bytes, with the difference so far)
             iSourceUnits.emplace();
             std::size_t fewer = 0u;
-            auto const* const text = reinterpret_cast<unsigned char const*>(iSourceText.data());
-            auto const size = iSourceText.size();
+            auto const writtenText = written_source_text();
+            auto const* const text = reinterpret_cast<unsigned char const*>(writtenText.data());
+            auto const size = writtenText.size();
             for (std::size_t i = 0u; i < size;)
             {
                 auto const c = text[i];
@@ -2262,9 +2381,18 @@ namespace neos::compilers::javascript
             auto const after = std::upper_bound(iSourceUnits->begin(), iSourceUnits->end(), aByte, [](std::size_t aOffset, auto const& aEntry) { return aOffset < aEntry.first; });
             return aByte - (after == iSourceUnits->begin() ? 0u : std::prev(after)->second);
         };
-        auto const first = static_cast<std::size_t>(aText.data() - iSourceText.data());
+        // (its offsets in the source text as written (a script whose functions' bodies were cut: see preparse))
+        auto first = static_cast<std::size_t>(aText.data() - iSourceText.data());
+        auto last = first + aText.size();
+        if (deferred_source_of_script() != nullptr)
+        {
+            auto const base = static_cast<std::size_t>(iSourceText.data() - iSource.data());
+            auto const writtenBase = written_offset(base, false);
+            first = written_offset(base + first, false) - writtenBase;
+            last = written_offset(base + last, true) - writtenBase;
+        }
         auto const start = units(first);
-        auto const length = units(first + aText.size()) - start;
+        auto const length = units(last) - start;
         if (start > 0xFFFFFFFFu || length >= 0xFFFFFFFFu)
             return std::nullopt;
         return (static_cast<std::uint64_t>(start) << 32u) | length;
@@ -2274,7 +2402,7 @@ namespace neos::compilers::javascript
     {
         // (a script that is the program (it runs once, in one realm): its global references read the bindings' mirrors (see the
         // runtime's global_mirror); eval code and the other scripts that the runtime loads are cached and may run in other realms)
-        if (iKind != code_kind::Script || iModule)
+        if ((iKind != code_kind::Script && !iUnit) || iModule)
             return std::nullopt;
         auto const existing = iMirrors.find(aName);
         if (existing != iMirrors.end())
@@ -2336,6 +2464,7 @@ namespace neos::compilers::javascript
 
     std::uint32_t compiler::allocation_state_global()
     {
+        iAllocationStateUsed = true;
         return global_index("%jsalloc", type::I64);
     }
 
@@ -2384,6 +2513,11 @@ namespace neos::compilers::javascript
     {
         // (the slow functions (see slow_function): each is defined when the code first calls it)
         iSlowFunctions.clear();
+    }
+
+    std::uint32_t compiler::template_base_global()
+    {
+        return global_index("%jstemplates", type::I64);
     }
 
     std::uint32_t compiler::tail_depth_global()

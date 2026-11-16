@@ -57,6 +57,16 @@ namespace neos::language
         virtual bool linked() const = 0;                        ///< (the program has more than one translation unit: the code of each uses 
                                                                 ///< the others' globals by their names (see neos_rt_link_type); each is compiled
                                                                 ///< on its own, a program of its own)
+        virtual std::uint32_t global_base() const = 0;          ///< (the index of the program's first global is this plus 1: not 0 if the source 
+                                                                ///< is compiled as an extension of a program that runs (see set_extension_room): 
+                                                                ///< its functions, globals and data follow that program's)
+        virtual void set_extension_room(std::uint32_t aFunctions, std::uint32_t aGlobals) = 0;  ///< (the program may be extended while 
+                                                                ///< it runs (source that its language's runtime has compiled then becomes part 
+                                                                ///< of it: see neos_rt_host::extend_n), by up to this many functions and globals)
+        virtual bool deferred_compilation() const = 0;          ///< (the program is compiled to be run now, by the process that compiles it
+                                                                ///< (its text is not kept, e.g. cached or made into an image): a language's 
+                                                                ///< compiler may leave parts of it to be compiled when the program first needs
+                                                                ///< them (by its runtime, as source that the program compiles while it runs))
         // debugging (see neos/debug.hpp)
     public:
         virtual bool debug_info() const = 0;                    ///< (the program is compiled to be debugged: its functions' variables are 

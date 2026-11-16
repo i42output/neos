@@ -403,6 +403,19 @@ namespace neos::language
         void set_trap_on_overflow(bool aTrapOnOverflow);            ///< traps; off by default: it wraps)
         bool debug_info() const final;                              ///< (the program is compiled to be debugged (see 
         void set_debug_info(bool aDebugInfo);                       ///< i_code_generator::debug_info); off by default)
+        std::uint32_t global_base() const final;
+        void set_extension_room(std::uint32_t aFunctions, std::uint32_t aGlobals) final;
+        // (the next compilation is of an extension of a program that runs (see i_code_generator::global_base): the indices of that 
+        // program's functions and globals that its first function and global follow, and the address of its data; none: a program)
+        struct extension
+        {
+            std::uint32_t functions = 0u;
+            std::uint32_t globals = 0u;
+            std::uint32_t data = 0u;
+        };
+        void set_extension(std::optional<extension> const& aExtension);
+        bool deferred_compilation() const final;                    ///< (the program is compiled to be run now, its text not kept (see
+        void set_deferred_compilation(bool aDeferredCompilation);   ///< i_code_generator::deferred_compilation); off by default)
                                                                     ///< (bigint_promotion: a language's integers are of any size: a result that overflows 
         std::optional<bool> bigint_promotion_override() const;      ///< is promoted to an arbitrary precision integer (e.g. Python's int); 
         void set_bigint_promotion_override(std::optional<bool> aBigintPromotion); ///< the schema's bigint.promotion, unless overridden)
@@ -546,6 +559,10 @@ namespace neos::language
         bool iPreparse = true;
         bool iTrapOnOverflow = false;
         bool iDebugInfo = false;
+        bool iDeferredCompilation = false;
+        std::optional<extension> iExtension;
+        std::uint32_t iExtensionRoom = 0u;
+        std::uint32_t iExtensionGlobals = 0u;
         void debug_type(type aType, std::string& aLanguage, std::string& aTypeName) const;
         std::vector<debug_variable_info> iDebugGlobals;
         bool iQuiet = false;

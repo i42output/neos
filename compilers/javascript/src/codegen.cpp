@@ -438,6 +438,7 @@ namespace neos::compilers::javascript
             {
                 auto const frame = f->script ? std::string{ "<script>" } : f->name.empty() ? std::string{ "<anonymous>" } : f->name;
                 auto const line = f->declaration != nullptr ? source_line_of(f->declaration->source) : 1u;
+                f->number = number;
                 signature.set_name(neolib::string{ "%js." + std::to_string(number) });
                 f->index = generator().define_function(neolib::string{ "%js." + std::to_string(number) }, signature, neolib::vector<type>{},
                     neolib::string{ frame }, line);
@@ -465,6 +466,16 @@ namespace neos::compilers::javascript
                 for (std::size_t i = 1u; iDirectDispatch && i < indices.size(); ++i)
                     iDirectDispatch = indices[i] == indices[0] + i;
                 iDispatchSignature = generator().indirect_signature(neolib::vector<type>{ I64, I64, I64, I32, I64, I64, I64, I64 }, I64);
+                // (an extension of the program: its functions are called as the program's are)
+                if (iUnitFirst && !iDirectDispatch)
+                    error(aScript->source, "internal error: a deferred function's functions cannot be the program's");
+                // (a script with deferred functions (see preparse) whose functions are called by their numbers: the program may be 
+                // extended by their sources when they are first called (room for their functions and globals: by their size))
+                if (auto const* const d = deferred_source_of_script(); d != nullptr && iDirectDispatch)
+                {
+                    auto const functions = static_cast<std::uint32_t>(std::min<std::size_t>((d->original.size() - d->cut.size()) / 128u + 4096u, std::size_t{ 1u } << 18u));
+                    set_extension_room(functions, functions * 4u);
+                }
             }
             // (the dispatcher: (function number, callee, this, new.target, count, arguments) -> result)
             {
@@ -484,6 +495,7 @@ namespace neos::compilers::javascript
             // (the property caches' stubs (see function_generator::stub)), and the slow paths' functions
             define_slow_functions();
             std::fill(std::begin(iStubsUsed), std::end(iStubsUsed), false);
+            iAllocationStateUsed = false;
             std::fill(std::begin(iStubs), std::end(iStubs), NoStub);
             // (each function's code)
             for (auto* f : all)
@@ -580,7 +592,34 @@ namespace neos::compilers::javascript
             code.resize(code.size() + 5u);
             call("javascript::init", { I32 }, I64);
             put_op(code, opcode::Drop);
-            if (iPropertySites != 0u)
+            if (iUnitFirst)
+            {
+                // (an extension of the program: its sites are numbered after the program's; their entries' offset (less its first 
+                // site's) is its global's)
+                if (iPropertySites != iUnitSites)
+                {
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(iUnitSites));
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(iPropertySites - iUnitSites));
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(property_sites_global()));
+                    call("javascript::property_sites_extension", { I32, I32, I32 }, I64);
+                    put_op(code, opcode::Drop);
+                }
+            }
+            if (iUnitFirst ? iTemplateSites != 0u : (deferred_source_of_script() != nullptr && iDirectDispatch))
+            {
+                // (the tagged template sites of a program that may be extended (how many it has), or of an extension (its global: the
+                // number of its first))
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(iTemplateSites));
+                put_op(code, opcode::I32Const);
+                put_s64(code, iUnitFirst ? static_cast<std::int32_t>(template_base_global()) : -1);
+                call("javascript::template_sites", { I32, I32 }, I64);
+                put_op(code, opcode::Drop);
+            }
+            if (!iUnitFirst && iPropertySites != 0u)
             {
                 // (the program's property cache sites: their table, whose offset is the global's)
                 put_op(code, opcode::I32Const);
@@ -590,12 +629,10 @@ namespace neos::compilers::javascript
                 call("javascript::property_sites", { I32, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
-            if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ConstructThis)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayLiteral)] ||
-                iStubsUsed[static_cast<std::size_t>(function_generator::stub::ObjectLiteral)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::GetNamed)] ||
-                iStubsUsed[static_cast<std::size_t>(function_generator::stub::GetComputed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetNamed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetComputed)] ||
-                iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPush)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPop)])
+            if (iAllocationStateUsed)
             {
-                // (the isolate's allocation state: the construct this stub's (its region offset))
+                // (the isolate's allocation state (its region offset): what the code that uses it reads (e.g. the construct this stub, 
+                // the length stub))
                 call("javascript::allocation_state", {}, I64);
                 put_op(code, opcode::I32Const);
                 put_s64(code, static_cast<std::int32_t>(allocation_state_global()));
@@ -3237,7 +3274,10 @@ namespace neos::compilers::javascript
             return;
         }
         get(aNumber);
-        function_index(iCompiler.iFunctions.front());
+        if (iCompiler.iUnitFirst)
+            i32(static_cast<std::int32_t>(*iCompiler.iUnitFirst));  // (an extension of the program: the program's first function)
+        else
+            function_index(iCompiler.iFunctions.front());
         op(opcode::I32Add);
         op(opcode::CallIndirect);
         iRelocations.emplace_back(static_cast<std::uint32_t>(iCode.size()), IndirectSignature | iCompiler.iDispatchSignature);
@@ -3814,7 +3854,7 @@ namespace neos::compilers::javascript
         iScratch = local();
         // (a numeric version: when its parameters' arguments are numbers (see version_check))
         bool versioned = false;
-        if (version_eligible())
+        if (!iFunction.deferred && version_eligible())
         {
             iNumericParameters = true;
             infer_numeric();
@@ -3826,6 +3866,30 @@ namespace neos::compilers::javascript
         begin(control_kind::Exit);
         auto const generate_code = [&]()
         {
+        if (iFunction.deferred)
+        {
+            // (a function whose compilation is deferred (see compiler::preparse): the runtime compiles its source (the range of the
+            // script's source text that is its own, as Function.prototype.toString's) when it is first called and makes the function 
+            // object (the callee) that function's; the call (and one that still comes here, e.g. from a site that has its number) is 
+            // then made to it, with the arguments as they are)
+            get(CalleeLocal);
+            source_text(iFunction.declaration->source);
+            i32(iFunction.parent != nullptr && iFunction.parent->strict ? 1 : 0);
+            // (the program's first function, if its functions are called by their numbers from it: the source can then be compiled as
+            // an extension of the program (see i_code_generator::set_extension_room); else -1)
+            if (iCompiler.iDirectDispatch && !iCompiler.iUnitFirst && !iCompiler.iUnit)
+                function_index(iCompiler.iFunctions.front());
+            else
+                i32(-1);
+            runtime("deferred", { I64, I64, I64, I32, I32 }, I64);
+            check();
+            op(opcode::Drop);
+            for (std::uint32_t i = 0u; i < FirstArgumentLocal + 4u; ++i)
+                get(i);
+            runtime("deferred_call", { I64, I64, I64, I32, I64, I64, I64, I64 }, I64);
+            op(opcode::Return);
+            return;
+        }
         prologue();
         auto* declaration = iFunction.declaration;
         if (iFunction.script)
@@ -4470,16 +4534,15 @@ namespace neos::compilers::javascript
         if (aFunction.classConstructor)
             flags |= ClosureConstructor;
         // (its number for the dispatcher: its position in the program's functions)
-        std::uint32_t number = 0u;
-        for (auto& f : iCompiler.iFunctions)
+        if (iCompiler.iUnitFirst)
         {
-            if (&f == &aFunction)
-                break;
-            ++number;
-            if ((f.generator || f.async) && !f.script)
-                ++number;
+            // (an extension of the program: its number is from the program's first function)
+            function_index(aFunction);
+            i32(static_cast<std::int32_t>(*iCompiler.iUnitFirst));
+            op(opcode::I32Sub);
         }
-        i32(static_cast<std::int32_t>(number));
+        else
+            i32(static_cast<std::int32_t>(aFunction.number));
         function_index(aFunction);
         environment_value();
         i32(flags);
@@ -6348,7 +6411,17 @@ namespace neos::compilers::javascript
         }
         flush();
         (void)havePending;
-        i32(static_cast<std::int32_t>(iCompiler.iTemplateSites++));
+        if (iCompiler.iUnitFirst)
+        {
+            // (an extension of the program: its sites are numbered after the program's (and its extensions') so far)
+            op(opcode::GlobalGet);
+            u32(iCompiler.template_base_global());
+            op(opcode::I32ConvertI64);
+            i32(static_cast<std::int32_t>(iCompiler.iTemplateSites++));
+            op(opcode::I32Add);
+        }
+        else
+            i32(static_cast<std::int32_t>(iCompiler.iTemplateSites++));
         get(cooked);
         get(raw);
         runtime("template_object", { I32, I64, I64 }, I64);

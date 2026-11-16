@@ -177,6 +177,32 @@ namespace neos::language
         iDebugInfo = aDebugInfo;
     }
 
+    std::uint32_t compiler::global_base() const
+    {
+        return iExtension ? iExtension->globals : 0u;
+    }
+
+    void compiler::set_extension_room(std::uint32_t aFunctions, std::uint32_t aGlobals)
+    {
+        iExtensionRoom = aFunctions;
+        iExtensionGlobals = aGlobals;
+    }
+
+    void compiler::set_extension(std::optional<extension> const& aExtension)
+    {
+        iExtension = aExtension;
+    }
+
+    bool compiler::deferred_compilation() const
+    {
+        return iDeferredCompilation;
+    }
+
+    void compiler::set_deferred_compilation(bool aDeferredCompilation)
+    {
+        iDeferredCompilation = aDeferredCompilation;
+    }
+
     // (debugging: how the debugger shows a value of a type (see VariablesSection): the VM's types, else (e.g. an object) the language's 
     // runtime plugin's)
     void compiler::debug_type(type aType, std::string& aLanguage, std::string& aTypeName) const
@@ -291,6 +317,7 @@ namespace neos::language
                 unit.ast.root()->children().clear();
             }
             iModule = {};
+            iExtensionRoom = 0u;
             iModule.functions.reserve(256u);    // (a function is copied when the list grows: a small program's are not)
             iSymbolInfo.clear();
             iSymbolSequence = 0u;
@@ -1694,7 +1721,7 @@ namespace neos::language
             return existing->second;
         while (iModule.data.size() % 4u != 0u)
             iModule.data.push_back(0u);
-        auto const address = DataBase + static_cast<std::uint32_t>(iModule.data.size());
+        auto const address = (iExtension ? iExtension->data : DataBase) + static_cast<std::uint32_t>(iModule.data.size());
         // (see bytecode::string_header)
         auto const header = bytecode::string_header_of(aValue);
         put_raw(iModule.data, header.bytes);
@@ -4312,8 +4339,9 @@ namespace neos::language
                 order.push_back(id);
             }
         std::vector<std::uint32_t> finalIndex(iModule.functions.size());
+        // (an extension's functions follow those of the program that it extends)
         for (std::uint32_t i = 0u; i < order.size(); ++i)
-            finalIndex[order[i]] = i;
+            finalIndex[order[i]] = (iExtension ? iExtension->functions : 0u) + i;
         // types
         std::vector<bytes> types;
         std::vector<std::uint32_t> typeOf(iModule.functions.size());
@@ -4389,7 +4417,8 @@ namespace neos::language
         for (auto const& global : iInference.globals)
             if (global.second == type::String)
                 string_literal(""); // (the initial value of a string global)
-        std::uint32_t const heapBase = (DataBase + static_cast<std::uint32_t>(iModule.data.size()) + 7u) & ~7u;
+        std::uint32_t const dataBase = iExtension ? iExtension->data : DataBase;
+        std::uint32_t const heapBase = (dataBase + static_cast<std::uint32_t>(iModule.data.size()) + 7u) & ~7u;
         bytes module = { 0x00u, 0x61u, 0x73u, 0x6Du, 0x01u, 0x00u, 0x00u, 0x00u };
         {
             bytes section;
@@ -4563,11 +4592,20 @@ namespace neos::language
             put_u32(section, 1u);
             section.push_back(0x00u);
             put_op(section, opcode::I32Const);
-            put_s64(section, static_cast<std::int32_t>(DataBase));
+            put_s64(section, static_cast<std::int32_t>(dataBase));
             put_op(section, opcode::End);
             put_u32(section, iModule.data.size());
             section.insert(section.end(), iModule.data.begin(), iModule.data.end());
             put_section(module, 11u, section);
+        }
+        if (iExtensionRoom != 0u && !iExtension)
+        {
+            // (the program may be extended while it runs (see bytecode::ExtensionSection))
+            bytes section;
+            put_name(section, bytecode::ExtensionSection);
+            put_u32(section, iExtensionRoom);
+            put_u32(section, iExtensionGlobals);
+            put_section(module, 0u, section);
         }
         {
             // the functions' frames (see bytecode::FramesSection)

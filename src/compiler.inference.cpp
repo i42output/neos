@@ -168,7 +168,7 @@ namespace neos::language
             iInference.globalIndices.emplace(aName, index);
         }
         auto& symbols = state().program->symbolTable[&state().program->scope];
-        auto& entry = symbols.insert(neolib::string{ aName }, symbol_table_entry{ aType, index + 1u })->second();
+        auto& entry = symbols.insert(neolib::string{ aName }, symbol_table_entry{ aType, index + 1u + global_base() })->second();
         auto& info = iSymbolInfo[&entry];
         info.global = true;
         info.sequence = ++iSymbolSequence;

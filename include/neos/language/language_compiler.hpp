@@ -168,6 +168,9 @@ namespace neos::language
         // debugging (see i_code_generator::debug_info)
     public:
         bool debug_info() const { return iGenerator->debug_info(); }
+        bool deferred_compilation() const { return iGenerator->deferred_compilation(); }
+        std::uint32_t global_base() const { return iGenerator->global_base(); }
+        void set_extension_room(std::uint32_t aFunctions, std::uint32_t aGlobals) { iGenerator->set_extension_room(aFunctions, aGlobals); }
         void debug_variable(std::uint32_t aFunction, std::string const& aName, std::uint8_t aFlags, std::uint8_t aStorage, std::uint32_t aIndex,
             std::uint32_t aFirstLine, std::uint32_t aLastLine, std::string const& aLanguage, std::string const& aType)
         {

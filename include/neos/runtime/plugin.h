@@ -82,7 +82,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 21
+#define NEOS_RUNTIME_PLUGIN_VERSION 22
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -377,6 +377,14 @@ typedef struct neos_rt_host
        copied up to its first NUL */
     size_t (*string_size)(char const* aString);
     void (*string_result)(char const* aString, size_t aSize);
+    /* (version 22) source that the calling program compiles (as load_n's) as an extension of itself: its code becomes part of the 
+       calling program (its functions, globals and data follow the program's: its functions' indices are the program's), if the 
+       program is one that may be extended (its compiler said so: see neos::language::i_code_generator::set_extension_room) and has 
+       room for it. The index of the extension's entry point (a function of the program's now: the plugin calls it (see call) to run 
+       the extension's top level); or -1: with *aError NULL the program cannot be extended by it (the plugin may load it as a program 
+       of its own: see load_n), else *aError is the error (as load_n's) */
+    int (*extend_n)(char const* aLanguage, char const* aSource, size_t aSourceLength, char const* aSourceName, char const* aOptions,
+        char const** aError);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

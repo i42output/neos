@@ -354,6 +354,10 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
         // (-g: the program is compiled to be debugged, then debugged)
         if (aOptions.count("debug"))
             context.compiler().set_debug_info(true);
+        // (a program that is compiled to be run now (its text is not kept: not cached, not made into an image; not debugged or traced): 
+        // its language's compiler may leave parts of it to be compiled when it first needs them)
+        if (!cacheKey && !aOptions.count("img") && !aOptions.count("trace") && !aOptions.count("debug"))
+            context.compiler().set_deferred_compilation(true);
         try
         {
             context.compile_program();

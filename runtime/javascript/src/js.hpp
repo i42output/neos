@@ -2089,7 +2089,11 @@ namespace neos::javascript_runtime
     void init_async_builtins(realm& aRealm);
     void init_disposable(realm& aRealm);
     void detach_array_buffer(value aBuffer, value aKey);         ///< (typed_arrays.cpp: DetachArrayBuffer)
+    std::size_t program_site_count();                             ///< (api.cpp: the running program's property cache sites (and its extensions'))
     value evaluate_script(value aSource);                         ///< (eval.cpp: a script's evaluation (as indirect eval's))
+    value deferred_function(value aSource, std::uint64_t aRange, bool aStrict, std::int32_t aFirst); ///< (eval.cpp: the running program's function whose
+                                                                  ///< compilation was deferred (its source: a range (first code unit << 32 | 
+                                                                  ///< code units) of the program's source text): compiled when first asked for)
 
     // promises and jobs (promise.cpp)
     value new_promise_capability(value aConstructor, value& aResolve, value& aReject);

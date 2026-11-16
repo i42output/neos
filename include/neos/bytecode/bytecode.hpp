@@ -127,6 +127,9 @@ namespace neos
         // program has its own (its value as the global's initializer gives it, when the thread first uses it; the program's own thread's: the
         // module's), e.g. a language's stack pointer)
         inline constexpr std::uint8_t GlobalPerThread = 0x80u;
+        // (a custom section: the program may be extended while it runs (source that it compiles then is compiled as part of it: see 
+        // neos_rt_host::extend_n): the numbers of functions and of globals (each a u32) that the VM keeps room for)
+        inline constexpr char ExtensionSection[] = "neos.extension";
         inline constexpr char LinkedSection[] = "neos.linked";
         inline constexpr char LinksSection[] = "neos.links";
         // (a module's import of a function that another translation unit's code defines (its global of the name): "link::<name>#<link 

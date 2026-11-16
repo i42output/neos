@@ -478,47 +478,51 @@ namespace neos
                         return std::nullopt;
                     }
                     // compile the module to native code (null if not supported: the interpreter is then used)
+                    // (a function of the program's, as the JIT has it)
+                    jit::function_description describe(function const& f)
+                    {
+                        jit::function_description d;
+                        // (a function may be inlined: one without a frame of its own (that the compiler did not name: e.g. a language's 
+                        // helper) has none where it is inlined; one with a frame, its frame (see the optimizer's inline chains))
+                        if (auto const index = static_cast<std::size_t>(&f - iFunctions.data()); !f.import && (index >= iFrames.size() || !iFrames[index].frame))
+                            d.inlinable = d.frameless = true;
+                        else if (!f.import)
+                            d.inlinable = true;
+                        d.parameters = &iTypes.at(f.type).parameters;
+                        d.results = &iTypes.at(f.type).results;
+                        d.type = f.type;
+                        d.locals = &f.locals;
+                        d.imported = f.import.has_value();
+                        if (d.imported)
+                        {
+                            d.checked = jit::checked_arithmetic(*f.import);
+                            if (*f.import == "neos::object_retain")
+                                d.call = jit::import_call::ObjectRetain;
+                            else if (*f.import == "neos::object_release")
+                                d.call = jit::import_call::ObjectRelease;
+                            else if (*f.import == "neos::assume")
+                                d.call = jit::import_call::Assume;
+                            else if (*f.import == "neos::stack_low")
+                                d.call = jit::import_call::StackLow;
+                            else if (f.import->starts_with(std::string{ bytecode::LinkNamespace } + "::") || *f.import == "neos::link_run")
+                                ; // (the VM's (see link_call and link_run))
+                            else if (!d.checked)
+                                d.plugin = plugin_function(*f.import);
+                            if (d.plugin)
+                                d.call = jit::import_call::Plugin;
+                        }
+                        d.codeBegin = f.codeBegin;
+                        d.codeEnd = f.codeEnd;
+                        return d;
+                    }
                     jit::compiled_module_ptr compile()
                     {
                         if (!jit::available())
                             return {};
                         jit::module_description module;
                         for (auto const& f : iFunctions)
-                        {
-                            jit::function_description d;
-                            // (a function may be inlined: one without a frame of its own (that the compiler did not name: e.g. a language's 
-                            // helper) has none where it is inlined; one with a frame, its frame (see the optimizer's inline chains))
-                            if (auto const index = static_cast<std::size_t>(&f - iFunctions.data()); !f.import && (index >= iFrames.size() || !iFrames[index].frame))
-                                d.inlinable = d.frameless = true;
-                            else if (!f.import)
-                                d.inlinable = true;
-                            d.parameters = &iTypes.at(f.type).parameters;
-                            d.results = &iTypes.at(f.type).results;
-                            d.type = f.type;
-                            d.locals = &f.locals;
-                            d.imported = f.import.has_value();
-                            if (d.imported)
-                            {
-                                d.checked = jit::checked_arithmetic(*f.import);
-                                if (*f.import == "neos::object_retain")
-                                    d.call = jit::import_call::ObjectRetain;
-                                else if (*f.import == "neos::object_release")
-                                    d.call = jit::import_call::ObjectRelease;
-                                else if (*f.import == "neos::assume")
-                                    d.call = jit::import_call::Assume;
-                                else if (*f.import == "neos::stack_low")
-                                    d.call = jit::import_call::StackLow;
-                                else if (f.import->starts_with(std::string{ bytecode::LinkNamespace } + "::") || *f.import == "neos::link_run")
-                                    ; // (the VM's (see link_call and link_run))
-                                else if (!d.checked)
-                                    d.plugin = plugin_function(*f.import);
-                                if (d.plugin)
-                                    d.call = jit::import_call::Plugin;
-                            }
-                            d.codeBegin = f.codeBegin;
-                            d.codeEnd = f.codeEnd;
-                            module.functions.push_back(d);
-                        }
+                            module.functions.push_back(describe(f));
+                        module.extensionRoom = iAnyThreadGlobals ? 0u : iExtensionRoom;
                         for (auto const& t : iTypes)
                             module.types.emplace_back(&t.parameters, &t.results);
                         module.tokens = &iTokens;
@@ -551,6 +555,73 @@ namespace neos
                         {
                             call_import(aFunction, aBuffer);
                         });
+                    }
+                    // (the program is extended by source that it compiles (see neos_rt_host::extend_n). Where the extension's functions, 
+                    // globals and data go (it is compiled so: see compile_extension): after the program's; none: the program cannot be 
+                    // extended (it is not one that may be (see bytecode::ExtensionSection), or it has globals that each thread has its own of))
+                    std::optional<extension> extension_bases()
+                    {
+                        if (iExtensionRoom == 0u || iAnyThreadGlobals)
+                            return {};
+                        if (!iHeap)
+                            iHeap = global("__heap_base");
+                        return extension{ static_cast<std::uint32_t>(iFunctions.size()), static_cast<std::uint32_t>(iGlobals.size()), (*iHeap + 7u) & ~7u };
+                    }
+                    // (the extension's module (compiled with extension_bases's) becomes part of the program, whose native code is aNative: 
+                    // its entry point (its function main: the caller calls it); none: the program has no room for it (nothing is changed))
+                    std::optional<std::uint32_t> extend(text const& aText, jit::compiled_module& aNative)
+                    {
+                        std::span<std::uint8_t const> const module{ reinterpret_cast<std::uint8_t const*>(aText.data()), aText.size() };
+                        // (how many types, functions and globals it has (at most): its sections' counts)
+                        std::size_t types = 0u;
+                        std::size_t functions = 0u;
+                        std::size_t globals = 0u;
+                        {
+                            reader r{ module };
+                            if (r.raw<std::uint32_t>() != 0x6D736100u || r.raw<std::uint32_t>() != 1u)
+                                throw exceptions::invalid_instruction();
+                            while (r.position() < module.size())
+                            {
+                                auto const id = r.byte();
+                                auto const size = static_cast<std::size_t>(r.u());
+                                auto const end = r.position() + size;
+                                if (id == 1)
+                                    types = static_cast<std::size_t>(r.u());
+                                else if (id == 2 || id == 3)
+                                    functions += static_cast<std::size_t>(r.u());
+                                else if (id == 6)
+                                    globals = static_cast<std::size_t>(r.u());
+                                r.seek(end);
+                            }
+                        }
+                        if (iFunctions.size() + functions > iFunctions.capacity() || iTypes.size() + types > iTypes.capacity() ||
+                            iGlobals.size() + globals > iGlobals.capacity() || iFunctions.size() + functions > iFrames.capacity())
+                            return {};
+                        std::optional<std::uint32_t> entry;
+                        bool const extended = jit::extend(aNative, functions, types, [&](jit::module_description& aDescription)
+                        {
+                            auto const firstFunction = iFunctions.size();
+                            auto const firstType = iTypes.size();
+                            auto const firstGlobal = iGlobals.size();
+                            iModule = module;
+                            struct parsed
+                            {
+                                machine& m;
+                                ~parsed() { m.iModule = {}; }
+                            } const parsing{ *this };
+                            parse(true, &entry);
+                            // (its globals: none is fixed yet; its first is its heap's base (the end of its data): the program's heap's now)
+                            iFixedGlobals.resize(iGlobals.size(), 0u);
+                            if (iGlobals.size() > firstGlobal)
+                                iHeap = std::max(iHeap.value_or(0u), as_u32(iGlobals[firstGlobal]));
+                            for (auto f = firstFunction; f < iFunctions.size(); ++f)
+                                aDescription.functions.push_back(describe(iFunctions[f]));
+                            for (auto t = firstType; t < iTypes.size(); ++t)
+                                aDescription.types.emplace_back(&iTypes[t].parameters, &iTypes[t].results);
+                        });
+                        if (!extended)
+                            return {};
+                        return entry;
                     }
                     // (a function of the program, run as native code)
                     std::vector<value> invoke(jit::compiled_module& aNative, std::uint32_t aFunction, std::span<value const> aArguments)
@@ -1337,12 +1408,24 @@ namespace neos
                         oss << std::hex << aValue;
                         return oss.str();
                     }
-                    void parse()
+                    // (the module: the program's, or (aExtension) one that extends it (see extend): its functions, globals and data follow
+                    // the program's (it was compiled so); its types are the program's that are the same, else new ones; aEntry: its
+                    // entry point (its function main))
+                    void parse(bool aExtension = false, std::optional<std::uint32_t>* aEntry = nullptr)
                     {
                         reader r{ iModule };
                         if (r.raw<std::uint32_t>() != 0x6D736100u || r.raw<std::uint32_t>() != 1u)
                             throw exceptions::invalid_instruction();
                         std::vector<std::uint32_t> definedTypes;
+                        std::vector<std::uint32_t> typeMap;     // (the module's types: the program's)
+                        auto const firstFunction = iFunctions.size();
+                        auto const firstSource = iSources.size();
+                        struct mapping
+                        {
+                            machine& m;
+                            ~mapping() { m.iTypeMap = nullptr; }
+                        } const mapped{ *this };
+                        iTypeMap = &typeMap;
                         while (r.position() < iModule.size())
                         {
                             auto const id = r.byte();
@@ -1360,7 +1443,12 @@ namespace neos
                                         t.parameters.push_back(r.byte());
                                     for (auto p = r.u(); p > 0u; --p)
                                         t.results.push_back(r.byte());
-                                    iTypes.push_back(t);
+                                    auto existing = iTypes.end();
+                                    if (aExtension)
+                                        existing = std::find_if(iTypes.begin(), iTypes.end(), [&](function_type const& x) { return x.parameters == t.parameters && x.results == t.results; });
+                                    typeMap.push_back(static_cast<std::uint32_t>(existing - iTypes.begin()));
+                                    if (existing == iTypes.end())
+                                        iTypes.push_back(t);
                                 }
                                 break;
                             case 2:
@@ -1371,7 +1459,7 @@ namespace neos
                                     if (r.byte() != 0x00u)
                                         throw trap{ "unsupported import kind" };
                                     function f;
-                                    f.type = static_cast<std::uint32_t>(r.u());
+                                    f.type = typeMap.at(static_cast<std::size_t>(r.u()));
                                     f.import = field;
                                     iImportTypes[field] = f.type;
                                     iFunctions.push_back(f);
@@ -1379,13 +1467,15 @@ namespace neos
                                 break;
                             case 3:
                                 for (auto n = r.u(); n > 0u; --n)
-                                    definedTypes.push_back(static_cast<std::uint32_t>(r.u()));
+                                    definedTypes.push_back(typeMap.at(static_cast<std::size_t>(r.u())));
                                 break;
                             case 5:
                                 for (auto n = r.u(); n > 0u; --n)
                                 {
                                     auto const flags = r.byte();
-                                    resize_memory(static_cast<std::size_t>(r.u()) * 65536u);
+                                    auto const pages = static_cast<std::size_t>(r.u());
+                                    if (!aExtension)
+                                        resize_memory(pages * 65536u);
                                     if (flags & 1u)
                                         r.u();
                                 }
@@ -1407,7 +1497,13 @@ namespace neos
                                     auto const name = r.name();
                                     auto const kind = r.byte();
                                     auto const index = static_cast<std::uint32_t>(r.u());
-                                    if (kind == 0x00u)
+                                    if (aExtension)
+                                    {
+                                        // (an extension's exports are not the program's: its entry point is the caller's to call)
+                                        if (kind == 0x00u && name == "main" && aEntry != nullptr)
+                                            *aEntry = index;
+                                    }
+                                    else if (kind == 0x00u)
                                         iFunctionExports[name] = index;
                                     else if (kind == 0x03u)
                                         iGlobalExports[name] = index;
@@ -1465,11 +1561,18 @@ namespace neos
                                         iOwnLinks.push_back(std::move(l));
                                     }
                                 }
+                                else if (sectionName == bytecode::ExtensionSection)
+                                {
+                                    iExtensionRoom = static_cast<std::uint32_t>(r.u());
+                                    iExtensionGlobals = static_cast<std::uint32_t>(r.u());
+                                }
                                 else if (sectionName == bytecode::FramesSection)
                                 {
                                     for (auto n = r.u(); n > 0u; --n)
                                         iSources.push_back(r.name());
-                                    auto const imports = static_cast<std::size_t>(std::count_if(iFunctions.begin(), iFunctions.end(), [](function const& f) { return f.import.has_value(); }));
+                                    // (the module's functions that are not imports (which are its first): the last of the functions)
+                                    auto const imports = static_cast<std::size_t>(std::count_if(iFunctions.begin() + firstFunction, iFunctions.end(), 
+                                        [](function const& f) { return f.import.has_value(); })) + firstFunction;
                                     auto const count = r.u();
                                     iFrames.resize(imports + count);
                                     for (std::uint64_t i = 0u; i < count; ++i)
@@ -1477,7 +1580,7 @@ namespace neos
                                         auto& info = iFrames[imports + i];
                                         info.name = r.name();
                                         info.frame = !info.name.empty();
-                                        info.source = static_cast<std::uint32_t>(r.u());
+                                        info.source = static_cast<std::uint32_t>(firstSource + r.u());
                                         info.firstLine = static_cast<std::uint32_t>(r.u());
                                     }
                                 }
@@ -1511,6 +1614,8 @@ namespace neos
                                         throw trap{ "unsupported data segment" };
                                     auto const offset = static_cast<std::size_t>(as_u32(constant(r)));
                                     auto const length = static_cast<std::size_t>(r.u());
+                                    if (offset + length > iMemory.size() && aExtension)
+                                        resize_memory(((offset + length) / 65536u + 1u) * 65536u);
                                     if (offset + length > iMemory.size())
                                         throw trap{ "data segment out of bounds" };
                                     if (r.position() + length > iModule.size())
@@ -1524,11 +1629,25 @@ namespace neos
                             }
                             r.seek(end);
                         }
-                        for (std::uint32_t f = 0u; f < iFunctions.size(); ++f)
+                        for (auto f = static_cast<std::uint32_t>(firstFunction); f < iFunctions.size(); ++f)
                             if (!iFunctions[f].import)
                                 iCodeOrder.push_back(f);
                         std::sort(iCodeOrder.begin(), iCodeOrder.end(), [&](std::uint32_t l, std::uint32_t r) { return iFunctions[l].codeBegin < iFunctions[r].codeBegin; });
                         iFrames.resize(std::max(iFrames.size(), iFunctions.size()));
+                        // (a program that may be extended (see bytecode::ExtensionSection): room for its extensions' functions, types 
+                        // and globals, so that none of what it has moves when they are added (see extend))
+                        if (!aExtension && iExtensionRoom != 0u)
+                        {
+                            iFunctions.reserve(iFunctions.size() + iExtensionRoom);
+                            iFrames.reserve(iFunctions.size() + iExtensionRoom);
+                            iTypes.reserve(iTypes.size() + jit::ExtensionTypes);
+                            auto const globals = iGlobals.size() + iExtensionGlobals;
+                            iGlobals.reserve(globals);
+                            iGlobalInitials.reserve(globals);
+                            iGlobalTypes.reserve(globals);
+                            iThreadGlobals.reserve(globals);
+                            iFixedGlobals.reserve(globals);
+                        }
                     }
                     static value constant(reader& r)
                     {
@@ -1588,7 +1707,11 @@ namespace neos
                                 }
                                 break;
                             case 0x11:
-                                token(r.u());
+                                // (its type: the program's (see parse))
+                                {
+                                    auto const type = r.u();
+                                    token(iTypeMap != nullptr ? iTypeMap->at(static_cast<std::size_t>(type)) : type);
+                                }
                                 token(r.u());
                                 break;
                             case 0x3F: case 0x40:
@@ -2575,6 +2698,9 @@ namespace neos
                     // (a global whose value does not change again (see neos_rt_host::fix_global): code optimized after this uses it as a constant)
                     void fix_global(std::uint32_t aIndex)
                     {
+                        // (a program that is interpreted until it is warm (see warm) is compiled after it has fixed its globals)
+                        if (aIndex < iGlobals.size() && iFixedGlobals.size() < iGlobals.size())
+                            iFixedGlobals.resize(iGlobals.size(), 0u);
                         if (aIndex < iGlobals.size() && aIndex < iFixedGlobals.size())
                             iFixedGlobals[aIndex] = 1u;
                     }
@@ -2609,6 +2735,9 @@ namespace neos
                     jit::memory iMemoryView;   ///< (for the JIT)
                     std::vector<value> iGlobals;
                     std::vector<std::uint8_t> iFixedGlobals;    ///< (see fix_global)
+                    std::uint32_t iExtensionRoom = 0u;          ///< (the functions that the program may yet be extended by (see extend))
+                    std::uint32_t iExtensionGlobals = 0u;       ///< (... and the globals)
+                    std::vector<std::uint32_t> const* iTypeMap = nullptr;   ///< (while a module is parsed: its types (see parse))
                     std::vector<std::uint8_t> iThreadGlobals;   ///< (see thread_globals: nonzero for a global that each thread has its own of)
                     bool iAnyThreadGlobals = false;
                     std::vector<value> iGlobalInitials;
@@ -3163,6 +3292,13 @@ namespace neos
                 void host_thread_attach(void* aContext)
                 {
                     tRunning = aContext != nullptr ? *static_cast<running*>(aContext) : running{};
+                    // (it is the thread's context from now on (see host_thread_context): a plugin that attaches its thread to one program 
+                    // then another (e.g. a call from one's code to the other's, and its return) does not find each again (the lock taken))
+                    if (aContext != nullptr)
+                    {
+                        tLastContext = static_cast<running*>(aContext);
+                        tLastContextGeneration = the_thread_contexts().generation.load(std::memory_order_acquire);
+                    }
                     // (debugging: the thread's programs are its program's session's)
                     tDebugSession = tRunning.program != nullptr ? tRunning.program->debug_session() : nullptr;
                     tDebugStep = debug_step{};
@@ -3282,6 +3418,68 @@ namespace neos
                         auto const result = host_thread_context();
                         tRunning = previous;
                         return result;
+                    }
+                    catch (std::exception const& e)
+                    {
+                        return fail(e.what());
+                    }
+                }
+
+                // (the calling thread's (see compile_extension))
+                std::optional<extension>& the_compile_extension()
+                {
+                    thread_local std::optional<extension> tExtension;
+                    return tExtension;
+                }
+
+                int host_extend_n(char const* aLanguage, char const* aSource, size_t aSourceLength, char const* aSourceName, char const* aOptions,
+                    char const** aError)
+                {
+                    thread_local std::string tError;
+                    auto fail = [&](std::string aMessage)
+                    {
+                        tError = std::move(aMessage);
+                        if (aError != nullptr)
+                            *aError = tError.c_str();
+                        return -1;
+                    };
+                    if (aError != nullptr)
+                        *aError = nullptr;
+                    // (a program that runs as native code, that may be extended (see machine::extension_bases); not one being debugged)
+                    if (tRunning.program == nullptr || tRunning.native == nullptr || !tRunning.program->source_compiler() || tRunning.program->restricted() ||
+                        tRunning.program->debug_session() != nullptr)
+                        return -1;
+                    auto const bases = tRunning.program->extension_bases();
+                    if (!bases)
+                        return -1;
+                    std::optional<text> compiled;
+                    std::string error;
+                    {
+                        std::lock_guard<std::mutex> lock{ loaded_mutex() };
+                        auto const running = tRunning;
+                        the_compile_extension() = bases;
+                        try
+                        {
+                            compiled = tRunning.program->source_compiler()(aLanguage, std::string{ aSource, aSourceLength }, aSourceName != nullptr ? aSourceName : "",
+                                aOptions != nullptr ? aOptions : "", error);
+                        }
+                        catch (std::exception const& e)
+                        {
+                            error = e.what();
+                        }
+                        the_compile_extension().reset();
+                        tRunning = running;
+                    }
+                    if (!compiled)
+                        return fail(error.empty() ? std::string{ "compilation failed" } : error);
+                    try
+                    {
+                        // (the program as it was when the extension was compiled for it: e.g. its data goes where its heap ended)
+                        auto const now = tRunning.program->extension_bases();
+                        if (!now || now->functions != bases->functions || now->globals != bases->globals || now->data != bases->data)
+                            return -1;
+                        auto const entry = tRunning.program->extend(*compiled, *tRunning.native);
+                        return entry ? static_cast<int>(*entry) : -1;
                     }
                     catch (std::exception const& e)
                     {
@@ -5687,7 +5885,7 @@ namespace neos
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
                     host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global, host_link, host_watched_changed, 
-                    host_shared_memory, host_stack_limit, host_string_size, host_string_result };
+                    host_shared_memory, host_stack_limit, host_string_size, host_string_result, host_extend_n };
             }
 
             void const* runtime::host()
@@ -5698,6 +5896,11 @@ namespace neos
             void const* runtime::debugger()
             {
                 return &sDebugger;
+            }
+
+            std::optional<extension> const& compile_extension()
+            {
+                return the_compile_extension();
             }
 
             void set_program_arguments(std::vector<std::string> aArguments)

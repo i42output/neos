@@ -366,6 +366,34 @@ namespace neos::javascript_runtime
             return context.result;
         }
 
+        // (an extension of the running program (see neos_rt_host::extend_n): its entry point, run as run runs a program)
+        value run_extension(std::uint32_t aEntry, eval_context const& aContext)
+        {
+            tContexts.push_back(aContext);
+            tContexts.back().program = current_program();
+            auto& extra = extra_arguments();
+            auto const base = extra.size();
+            neos_rt_value result{};
+#if defined(_WIN32)
+            NEOS_JS_SPILL_REGISTERS();
+            stack_switch const switching{ stack_pointer() };
+#endif
+            auto const trap = host()->call(aEntry, 0u, nullptr, nullptr, NEOS_RT_VOID, &result);
+            extra.resize(base);
+            auto const context = tContexts.back();
+            tContexts.pop_back();
+            if (trap != nullptr && !context.completed)
+            {
+                std::string const message{ trap };
+                if (message.find("stack") != std::string::npos)
+                    throw_range_error("Maximum call stack size exceeded");
+                throw_error(the_realm().errorPrototype, "internal error: " + message);
+            }
+            if (context.threw)
+                throw js_exception{ context.result };
+            return context.result;
+        }
+
         std::string source_text(value aSource)
         {
             // (UTF-8 (lone surrogates as WTF-8))
@@ -441,6 +469,63 @@ namespace neos::javascript_runtime
             context.thisValue = the_realm().global;
             return perform_eval(argument(aArguments, 0u), "eval-indirect", context);
         }
+    }
+
+    namespace
+    {
+        // (the functions whose compilation their programs' compilers deferred (see the compiler's preparse) that have been called: by
+        // program and the range of the program's source text that is the function's source: the function (of the program that the 
+        // runtime compiled from that source) that the program's function objects for it are made to be)
+        using deferred_units = std::map<std::pair<void*, std::uint64_t>, value>;
+        deferred_units& the_deferred_units()
+        {
+            static isolate_local<deferred_units> sUnits;
+            return *sUnits;
+        }
+
+        root_tracer const sDeferredRoots{ [](tracer& aTracer)
+        {
+            for (auto const& unit : the_deferred_units())
+                aTracer.mark(unit.second);
+        } };
+    }
+
+    value deferred_function(value aSource, std::uint64_t aRange, bool aStrict, std::int32_t aFirst)
+    {
+        auto& units = the_deferred_units();
+        std::pair<void*, std::uint64_t> const key{ current_program(), aRange };
+        if (auto const existing = units.find(key); existing != units.end())
+            return existing->second;
+        // (its source: an expression (parenthesized), in strict code if the code that it is in is)
+        auto const text = str(aSource).substr(static_cast<std::size_t>(aRange >> 32u), static_cast<std::size_t>(aRange & 0xFFFFFFFFu));
+        std::string source = aStrict ? "\"use strict\";(" : "(";
+        source += wtf8(text);
+        source += ")";
+        eval_context context;
+        context.thisValue = the_realm().global;
+        value function = Undefined;
+        bool extended = false;
+        // (as an extension of the program (aFirst: the index of its first function), if the program can be extended by it (its 
+        // functions are then the program's: calls between them are calls within the program); else as a program of its own)
+        if (auto const* h = host(); aFirst >= 0 && h != nullptr && h->version >= 22u && h->extend_n != nullptr)
+        {
+            char const* failure = nullptr;
+            auto const options = "unit:" + std::to_string(aFirst) + ":" + std::to_string(program_site_count());
+            auto const entry = h->extend_n("javascript", source.data(), source.size(), "<eval>", options.c_str(), &failure);
+            // (not extended (the program cannot be, or the source did not compile so): a program of its own (its errors are that
+            // compilation's))
+            if (entry >= 0)
+            {
+                function = run_extension(static_cast<std::uint32_t>(entry), context);
+                extended = true;
+            }
+        }
+        if (!extended)
+            function = run(compile(source, "unit"), context);
+        if (!is_object(function) || as_function(function) == nullptr)
+            throw_error(the_realm().errorPrototype, "internal error: a deferred function's source is not a function");
+        units.emplace(key, function);
+        return function;
     }
 
     value evaluate_script(value aSource)

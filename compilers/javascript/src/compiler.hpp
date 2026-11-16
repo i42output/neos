@@ -153,12 +153,15 @@ namespace neos::compilers::javascript
         bool usesSuperCall = false;
         bool directEval = false;
         bool needsOuterEnvironment = false; ///< (it uses a binding of a function that encloses it)
+        bool deferred = false;              ///< (its body is compiled when it is first called (see compiler::preparse): its code calls
+                                            ///< the runtime, which compiles its source (a program of its own) and calls that)
         scope* top = nullptr;               ///< (its parameters and var declarations)
         scope* body = nullptr;              ///< (its lexical declarations, if its parameters are not simple; otherwise top)
         std::vector<function_info*> functions;
         std::vector<scope*> scopes;         ///< (its scopes, in the order they were created)
         std::uint32_t index = 0u;           ///< (its WebAssembly function)
         std::uint32_t bodyIndex = 0u;       ///< (a generator or async function: the function its body runs as)
+        std::uint32_t number = 0u;          ///< (its number for the dispatcher: its position in the program's functions (see closure))
         std::uint32_t length = 0u;          ///< (the number of its parameters before the first with a default or a rest)
         binding* argumentsBinding = nullptr;
         binding* thisBinding = nullptr;     ///< (captured this (arrow functions use it))
@@ -175,6 +178,17 @@ namespace neos::compilers::javascript
     };
 
     bool is_class_constructor_method(node const* aNode);   ///< (codegen.cpp)
+
+    // (deferral.cpp) the functions of a script (its source as written) that can be compiled when they are first called rather than with
+    // the script (see compiler::preparse), in the order of the source (none within another): the offset of the function's body (its '{'),
+    // that of its end (the body's '}'), and whether its body has a directive that makes it strict
+    struct deferrable_function
+    {
+        std::size_t body;
+        std::size_t end;
+        bool strict;
+    };
+    std::vector<deferrable_function> deferrable_functions(std::string_view aSource);
 
     class compiler;
 
@@ -583,6 +597,22 @@ namespace neos::compilers::javascript
         // generators: a division, which the literal hides): their offsets (in the fragment's source as written), for the next pass's preparse
         // to rename them (their first letter capitalized: an identifier that parses as one, named by its node's keywordIdentifier))
         std::string original_source() const;
+        // (a script whose functions' bodies the preparse cut (see preparse): the source as written and as parsed (cut), and for each cut 
+        // (in order): the offset of its function's body (its '{') in the source as parsed, the offset there of what follows the text cut, 
+        // and how much shorter the source as parsed is up to there)
+        struct deferred_source
+        {
+            struct cut_entry { std::size_t body; std::size_t at; std::size_t removed; };
+            std::string original;
+            std::string cut;
+            std::vector<cut_entry> cuts;
+            char const* parsed = nullptr;   ///< (the fragment's source (the one cut, or that with its keywords renamed))
+        };
+        std::optional<deferred_source> iDeferred;
+        deferred_source const* deferred_source_of_script() const;   ///< (the source being compiled is one whose functions' bodies were cut)
+        bool deferred_function(node const* aFunction) const;        ///< (a function whose body was cut)
+        std::size_t written_offset(std::size_t aOffset, bool aEnd) const;  ///< (an offset in the source as parsed: in the source as written)
+        std::string_view written_source_text() const;               ///< (the script's source text (iSourceText) as written)
         void keyword_operators(node* aNode, bool aGenerator, bool aAwait, std::set<std::size_t>& aOffsets, std::set<std::size_t>& aOperators) const;
         void mark_keyword_identifiers(node* aNode, std::set<std::size_t> const& aOffsets) const;
         std::map<std::string, std::set<std::size_t>, std::less<>> iKeywordIdentifiers;  ///< (a fragment's source as written: the offsets)
@@ -636,6 +666,8 @@ namespace neos::compilers::javascript
         void define_slow_functions();       ///< (none yet: each is defined when the code first calls it (see slow_function))
         std::uint32_t stub_function(function_generator::stub aStub);   ///< (the stub's function (defined when the code first calls it))
         std::uint32_t tail_depth_global();      ///< (the global (an i64): the tail calls made as calls that are running (see call_value))
+        std::uint32_t template_base_global();   ///< (an extension of the program: the global (an i64) that holds the number of its first 
+                                                ///< tagged template site (they are numbered after the program's: see the runtime's template_sites))
         std::uint32_t source_line_of(std::string_view aSource) const;
         std::uint64_t source_position(std::string_view aSource) const;   ///< (its span (see bytecode::position): 0 if it does not fit)
         mutable std::vector<std::size_t> iNewlines;     ///< (see source_line_of)
@@ -666,6 +698,7 @@ namespace neos::compilers::javascript
         std::uint32_t iDispatcher = 0u;
         bool iFunctionCallUsed = false;         ///< (function_call_global is used: the program's start sets it)
         bool iProgramSerialUsed = false;        ///< (program_serial_global is used: the program's start sets it)
+        bool iAllocationStateUsed = false;      ///< (allocation_state_global is used (by the program's code: e.g. a stub's): the program's start sets it)
         std::uint32_t iDirectBuiltinsUsed = 0u; ///< (by bit: the direct built-ins whose globals are used (the program's start sets them))
         bool iDirectDispatch = false;           ///< (the program's functions are called directly (call_indirect): their indices are consecutive)
         std::uint32_t iDispatchSignature = 0u;  ///< (their signature (an indirect signature))
@@ -698,6 +731,11 @@ namespace neos::compilers::javascript
         };
         code_kind iKind = code_kind::Script;
         bool iModuleMain = false;       ///< (a module that is the program (not one that the runtime loaded))
+        bool iUnit = false;             ///< (a function of the program's whose compilation was deferred (see preparse): its source, evaluated
+                                        ///< for its value by the runtime when the function is first called (a script that runs once))
+        std::uint32_t iUnitSites = 0u;  ///< (... its property cache sites are numbered from the program's (and its extensions') so far)
+        std::optional<std::uint32_t> iUnitFirst;    ///< (... compiled as an extension of the program (see i_code_generator::global_base): its
+                                        ///< functions are the program's (their numbers are from the program's first function, whose index this is))
         bool iTopLevelAwait = false;    ///< (a module whose code awaits)
         std::string module_descriptor(node* aModule);
         std::uint32_t iEvalFlags = 0u;

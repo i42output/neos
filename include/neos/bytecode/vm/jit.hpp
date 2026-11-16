@@ -167,6 +167,8 @@ namespace neos
                     value* (*threadGlobals)(void* aHost) = nullptr;
                 };
 
+                inline constexpr std::size_t ExtensionTypes = 256u;     ///< (the types that a program's extensions may add (see extend))
+
                 struct module_description
                 {
                     std::vector<function_description> functions;
@@ -180,6 +182,8 @@ namespace neos
                     memory const* linearMemory = nullptr;
                     object_table* objects = nullptr;    ///< (null: generated code calls the host's object functions)
                     host_interface host;
+                    std::uint32_t extensionRoom = 0u;   ///< (the functions that the module's program may yet be extended by (see extend): its
+                                                        ///< compiled module keeps room for them (what its code has the addresses of does not move))
                 };
 
                 // (an imported function: aBuffer holds its arguments and receives its results; its size is the larger of 
@@ -199,6 +203,11 @@ namespace neos
                 bool available();
                 // returns null if the module uses an instruction the JIT does not support (the interpreter is then used)
                 compiled_module_ptr compile(module_description const& aModule, host_function aHost);
+                // (the module's program is extended (see module_description::extensionRoom): aAppend adds the new functions (at most
+                // aFunctions) and types (at most aTypes) to the module's description (and may change what optimizations made in the 
+                // background read (e.g. the program's tokens): none is being made while it runs); the new functions are then the module's 
+                // (compiled when they are first called); false (nothing is changed): the module has no room for them)
+                bool extend(compiled_module& aModule, std::size_t aFunctions, std::size_t aTypes, std::function<void(module_description&)> const& aAppend);
                 // (the external memories (memory indices 1 to NEOS_RT_EXTERNAL_MEMORIES: see neos_rt_host::external_memory_at), process-wide;
                 // an index beyond them: a memory of no size (an access traps))
                 memory& external_memory(std::uint64_t aIndex);

@@ -35,6 +35,7 @@
 // value Exception, with the exception pending (javascript::catch takes it)
 
 #include <algorithm>
+#include <deque>
 #include <typeinfo>
 #include <atomic>
 #include <cstdio>
@@ -996,6 +997,49 @@ namespace neos::javascript_runtime
             });
         }
 
+        value deferred(value aCallee, value aSource, std::uint64_t aRange, std::int32_t aStrict, std::int32_t aFirst)
+        {
+            // (a function whose compilation was deferred (see the compiler's preparse) is called: its source is compiled (when the first
+            // of its function objects is first called), and the callee (a function object of the program's for it) becomes that function 
+            // (of the program that the source was compiled as): its code, environment and dispatch key)
+            return guard([&]() -> value
+            {
+                auto const function = deferred_function(aSource, aRange, aStrict != 0, aFirst);
+                auto const& target = *as_function(function);
+                auto* const f = as_function(aCallee);
+                if (f == nullptr || f->kind != function_kind::Compiled || target.kind != function_kind::Compiled)
+                    throw_error(the_realm().errorPrototype, "internal error: a deferred function's callee is not its function");
+                if (f->program != target.program || f->index != target.index)
+                {
+                    f->program = target.program;
+                    f->index = target.index;
+                    f->nativeId = target.nativeId;
+                    f->dispatch = target.dispatch;
+                    f->environment = target.environment;
+                }
+                return Undefined;
+            });
+        }
+
+        value deferred_call(value aCallee, value aThis, value aNewTarget, std::int32_t aCount, value a0, value a1, value a2, value a3)
+        {
+            // (the call that found the function's compilation deferred (see deferred): made to the function that the callee now is)
+            return guard([&]() -> value
+            {
+                auto* const f = as_function(aCallee);
+                if (f == nullptr || f->kind != function_kind::Compiled)
+                    throw_error(the_realm().errorPrototype, "internal error: a deferred function's callee is not its function");
+                if (aCount <= 4)
+                {
+                    value const registers[] = { a0, a1, a2, a3 };
+                    return call_compiled_index(f->program, f->index, aCallee, aThis, arguments{ registers, static_cast<std::size_t>(std::max(aCount, 0)) }, aNewTarget);
+                }
+                auto const base = static_cast<std::int32_t>(calls().extraArguments.size()) - std::max(0, aCount - 4);
+                auto const list = argument_list(aCount, a0, a1, a2, a3, base);
+                return call_compiled_index(f->program, f->index, aCallee, aThis, list, aNewTarget);
+            });
+        }
+
         value tail_call(value aCallee, value aThis, std::int32_t aCount, value a0, value a1, value a2, value a3)
         {
             // (a call in tail position of a built-in: made now (nested), while there are few such calls running (the stack grows only by 
@@ -1506,14 +1550,32 @@ namespace neos::javascript_runtime
             inline std::uint64_t shape_word(shape const* aShape) { return shape_ref::word_of(aShape); }
 
             // (the programs' tables)
+            // (a program's table: its own sites' entries, then those of each of its extensions (see property_sites_extension): none of
+            // them moves (compiled code has their offsets))
+            struct site_chunk
+            {
+                std::size_t first = 0u;         ///< (its first site's number)
+                region_vector<site> entries;
+            };
+            using site_table = std::deque<site_chunk>;
+            site* site_entries(site_table& aTable, std::size_t aSite)
+            {
+                for (auto chunk = aTable.rbegin(); chunk != aTable.rend(); ++chunk)
+                    if (aSite >= chunk->first)
+                    {
+                        auto const index = (aSite - chunk->first) * jsl::SiteEntries;
+                        return index < chunk->entries.size() ? &chunk->entries[index] : nullptr;
+                    }
+                return nullptr;
+            }
             struct site_tables
             {
-                std::unordered_map<void*, region_vector<site>> tables;
+                std::unordered_map<void*, site_table> tables;
                 // (each program's sites that the runtime has used (site_of): only their entries can refer to values (see sSiteRoots))
                 std::unordered_map<void*, std::vector<std::uint32_t>> used;
                 std::unordered_map<void*, std::vector<bool>> listed;
                 void* lastProgram = nullptr;
-                region_vector<site>* lastTable = nullptr;
+                site_table* lastTable = nullptr;
                 std::vector<std::uint32_t>* lastUsed = nullptr;
                 std::vector<bool>* lastListed = nullptr;
             };
@@ -1526,11 +1588,14 @@ namespace neos::javascript_runtime
             {
                 // (the sites that the runtime has used (the others' entries are empty): their entries)
                 auto& t = the_site_tables();
-                for (auto const& [program, table] : t.tables)
+                for (auto& [program, table] : t.tables)
                     for (auto const site : t.used[program])
                         for (std::size_t e = 0u; e < jsl::SiteEntries; ++e)
                         {
-                            auto const& s = table[static_cast<std::size_t>(site) * jsl::SiteEntries + e];
+                            auto const* const entries = site_entries(table, site);
+                            if (entries == nullptr)
+                                break;
+                            auto const& s = entries[e];
                             if (s.kind != jsl::SiteNone)
                                 for (auto const& p : s.prototypes)
                                     if (p.object != 0u)
@@ -1555,17 +1620,17 @@ namespace neos::javascript_runtime
                     t.lastUsed = &t.used[program];
                     t.lastListed = &t.listed[program];
                 }
-                auto const index = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite)) * jsl::SiteEntries;
-                if (index >= t.lastTable->size())
+                auto const number = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite));
+                auto* const entries = site_entries(*t.lastTable, number);
+                if (entries == nullptr || number >= t.lastListed->size())
                     return nullptr;
                 // (used: its entries may come to refer to values)
-                auto const number = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite));
                 if (!(*t.lastListed)[number])
                 {
                     (*t.lastListed)[number] = true;
                     t.lastUsed->push_back(static_cast<std::uint32_t>(aSite));
                 }
-                return &(*t.lastTable)[index];
+                return entries;
             }
 
             // (an entry remembered: it replaces the site's entry for the same receiver's shape and key, else it is the first (the
@@ -1973,12 +2038,35 @@ namespace neos::javascript_runtime
                 auto& t = the_site_tables();
                 auto& table = t.tables[current_program()];
                 table.clear();
-                table.resize(static_cast<std::size_t>(std::max(aCount, 1)) * jsl::SiteEntries, site{ 0u, 0u, jsl::SiteNone, 0u, 0u, 0u, {}, 0u, 0u, -1, 0u });
+                auto& entries = table.emplace_back().entries;
+                entries.resize(static_cast<std::size_t>(std::max(aCount, 1)) * jsl::SiteEntries, site{ 0u, 0u, jsl::SiteNone, 0u, 0u, 0u, {}, 0u, 0u, -1, 0u });
                 t.used[current_program()].clear();
                 t.listed[current_program()].assign(static_cast<std::size_t>(std::max(aCount, 1)), false);
                 t.lastProgram = nullptr;
                 t.lastTable = nullptr;
-                *program_word(aGlobal) = region_offset(table.data());
+                *program_word(aGlobal) = region_offset(entries.data());
+                fix_program_word(aGlobal);
+                publish_heap();
+                return Undefined;
+            });
+        }
+
+        value property_sites_extension(std::int32_t aFirst, std::int32_t aCount, std::int32_t aGlobal)
+        {
+            // (the sites of an extension of the program (see deferred_function): numbered from aFirst (the program's sites so far: see 
+            // program_site_count); their entries' offset is the extension's global aGlobal's, less its first site's (its code finds a 
+            // site's entries by its number, as the program's does))
+            return guard([&]() -> value
+            {
+                auto& t = the_site_tables();
+                auto& table = t.tables[current_program()];
+                auto& chunk = table.emplace_back();
+                chunk.first = static_cast<std::size_t>(aFirst);
+                chunk.entries.resize(static_cast<std::size_t>(std::max(aCount, 1)) * jsl::SiteEntries, site{ 0u, 0u, jsl::SiteNone, 0u, 0u, 0u, {}, 0u, 0u, -1, 0u });
+                t.listed[current_program()].resize(static_cast<std::size_t>(aFirst) + static_cast<std::size_t>(std::max(aCount, 1)), false);
+                t.lastProgram = nullptr;
+                t.lastTable = nullptr;
+                *program_word(aGlobal) = region_offset(chunk.entries.data()) - static_cast<std::uint64_t>(aFirst) * jsl::SiteEntries * sizeof(site);
                 fix_program_word(aGlobal);
                 publish_heap();
                 return Undefined;
@@ -2496,6 +2584,33 @@ namespace neos::javascript_runtime
             });
         }
 
+        namespace
+        {
+            // (the programs' tagged template sites: how many each has (with its extensions'))
+            std::unordered_map<void*, std::uint64_t>& template_site_counts()
+            {
+                static isolate_local<std::unordered_map<void*, std::uint64_t>> sCounts;
+                return *sCounts;
+            }
+        }
+
+        value template_sites(std::int32_t aCount, std::int32_t aGlobal)
+        {
+            // (the running program has aCount more tagged template sites: its own (aGlobal -1: numbered from 0), or those of an
+            // extension of it (see deferred_function), numbered from the program's so far (which the extension's global aGlobal is set to))
+            return guard([&]() -> value
+            {
+                auto& count = template_site_counts()[current_program()];
+                if (aGlobal >= 0)
+                {
+                    *program_word(aGlobal) = count;
+                    fix_program_word(aGlobal);
+                }
+                count += static_cast<std::uint64_t>(std::max(aCount, 0));
+                return Undefined;
+            });
+        }
+
         value template_object(std::int32_t aSite, value aCooked, value aRaw)
         {
             return guard([&]() -> value
@@ -2821,6 +2936,10 @@ namespace neos::javascript_runtime
             { "env_bind_this", NEOS_RT_FUNCTION(env_bind_this), I64, 4u, { I64, I32, I32, I64 }, 0u },
             { "with_has", NEOS_RT_FUNCTION(with_has), I64, 2u, { I64, I64 }, 0u },
             { "closure", NEOS_RT_FUNCTION(closure), I64, 8u, { I32, I32, I64, I32, I64, I32, I64, I64 }, 0u },
+            { "deferred", NEOS_RT_FUNCTION(deferred), I64, 5u, { I64, I64, I64, I32, I32 }, 0u },
+            { "property_sites_extension", NEOS_RT_FUNCTION(property_sites_extension), I64, 3u, { I32, I32, I32 }, 0u },
+            { "template_sites", NEOS_RT_FUNCTION(template_sites), I64, 2u, { I32, I32 }, 0u },
+            { "deferred_call", NEOS_RT_FUNCTION(deferred_call), I64, 8u, { I64, I64, I64, I32, I64, I64, I64, I64 }, 0u },
             { "function_env", NEOS_RT_FUNCTION(function_env), I64, 1u, { I64 }, 0u },
             { "function_home", NEOS_RT_FUNCTION(function_home), I64, 1u, { I64 }, 0u },
             { "set_home", NEOS_RT_FUNCTION(set_home), I64, 2u, { I64, I64 }, 0u },
@@ -2991,6 +3110,16 @@ namespace neos::javascript_runtime
             static isolate_local<retained> sPrograms;
             return *sPrograms;
         }
+    }
+
+    std::size_t program_site_count()
+    {
+        // (the running program's sites: its own and its extensions' (the next extension's are numbered from there))
+        auto& t = api::the_site_tables().tables;
+        auto const existing = t.find(current_program());
+        if (existing == t.end() || existing->second.empty())
+            return 0u;
+        return existing->second.back().first + existing->second.back().entries.size() / neos::language::javascript::layout::SiteEntries;
     }
 
     void retain_program(void* aProgram)
