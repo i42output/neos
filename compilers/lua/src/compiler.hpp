@@ -364,6 +364,7 @@ namespace neos::compilers::lua
         void end_fragment() override;
         void emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
+        bool references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const override;
     private:
         // the syntax tree
         node* make_node(construct aKind, std::string_view aSource);

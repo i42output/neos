@@ -7874,6 +7874,31 @@ namespace neos::compilers::python
         return iPyCompilesAtRunTime;
     }
 
+    bool compiler::references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const
+    {
+        // the names of a source file of the program compiled last that denote what the name at a position of it does, in its source as 
+        // written (the compiler rewrites it: see name_references); the file: that of the path, or the program's only one; a source that 
+        // preparse decoded (PEP 263) is not its file's text: not known
+        aReferences.clear();
+        std::string const path{ aSourcePath.to_std_string_view() };
+        std::error_code ec;
+        auto const absolute = std::filesystem::absolute(path, ec).string();
+        py_fragment_syntax const* file = nullptr;
+        for (auto const& [source, syntax] : iPySyntax)
+            if (!syntax.expression && !path.empty() && (syntax.file == path || (!ec && syntax.file == absolute)))
+                file = &syntax;
+        if (file == nullptr && iPySyntax.size() == 1u && !iPySyntax.begin()->second.expression)
+            file = &iPySyntax.begin()->second;
+        if (file == nullptr || iPyDecoded.contains(file->original))
+            return false;
+        std::vector<std::size_t> references;
+        if (!name_references(file->original, aPosition, references))
+            return false;
+        for (auto const reference : references)
+            aReferences.push_back(static_cast<std::uint32_t>(reference));
+        return true;
+    }
+
     bool compiler::parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const
     {
         // (a program's source as py_join_lines rewrites it, as much of it as needs no compilation (see rewrite_source); a stub's return type 

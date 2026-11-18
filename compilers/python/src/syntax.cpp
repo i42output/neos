@@ -43,6 +43,7 @@
 #include <neolib/neolib.hpp>
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -1727,6 +1728,622 @@ namespace neos::compilers::python
             }
             close_blocks(0u, std::nullopt);
         }
+    }
+
+    namespace
+    {
+        // --- the names of a source as written: the scope whose name each is (the symbol table's rules)
+
+        struct name_scope
+        {
+            enum kind_t { Module, Function, Class, Comprehension, Annotation } kind;    ///< (Function: a lambda's too; Annotation: type parameters')
+            name_scope* parent;
+            std::set<std::string, std::less<>> bound;
+            std::set<std::string, std::less<>> globals;
+            std::set<std::string, std::less<>> nonlocals;
+            std::map<std::string, std::size_t, std::less<>> first;  ///< (the end of the statement that first binds each of its names)
+        };
+
+        class name_analysis
+        {
+        public:
+            // (a name: its scope is that of its statement or expression (see resolve); fixed: it is another module's name too (an import's))
+            struct occurrence { std::size_t begin; std::size_t end; name_scope* scope; bool binding; bool fixed; };
+        private:
+            typedef std::vector<token> tokens_t;
+        public:
+            explicit name_analysis(std::string const& aSource) : iSource{ aSource }
+            {
+                struct block { std::size_t indent; name_scope* scope; };
+                std::vector<block> blocks;          // (the functions and classes whose bodies are open)
+                std::vector<std::size_t> matches;   // (the match statements that are open: their indentation)
+                for (auto const& line : tokens::tokenize(iSource))
+                {
+                    while (!blocks.empty() && blocks.back().indent >= line.indent)
+                        blocks.pop_back();
+                    while (!matches.empty() && matches.back() >= line.indent)
+                        matches.pop_back();
+                    iOpened = nullptr;
+                    iMatch = false;
+                    iCase = !matches.empty();
+                    statements(line.tokens, 0u, line.tokens.size(), blocks.empty() ? iModule : *blocks.back().scope);
+                    if (iOpened != nullptr)
+                        blocks.push_back({ line.indent, iOpened });
+                    if (iMatch)
+                        matches.push_back(line.indent);
+                }
+            }
+        public:
+            // (false: a string of it is not a token (an f-string with its own quote in a replacement field, e.g.: its names are not known))
+            bool ok() const
+            {
+                return iOk;
+            }
+            std::vector<occurrence> const& occurrences() const
+            {
+                return iOccurrences;
+            }
+            std::string_view name(occurrence const& aOccurrence) const
+            {
+                return std::string_view{ iSource }.substr(aOccurrence.begin, aOccurrence.end - aOccurrence.begin);
+            }
+            // (the scope whose name a name is (null: not known): its own scope's if that binds it (a class's: after the statement that first 
+            // does; a name that it reads before is the module's), unless it declares it global or nonlocal; else the nearest enclosing function's 
+            // that binds it (not a class's, except from its type parameters' or its methods' annotations), else the module's (or a builtin))
+            name_scope const* resolve(occurrence const& aOccurrence) const
+            {
+                auto const n = name(aOccurrence);
+                auto const* const s = aOccurrence.scope;
+                if (s->globals.contains(n))
+                    return &iModule;
+                if (s->nonlocals.contains(n))
+                {
+                    for (auto const* p = s->parent; p != nullptr; p = p->parent)
+                        if (p->kind != name_scope::Class && p->kind != name_scope::Module && p->bound.contains(n) && !p->nonlocals.contains(n) && !p->globals.contains(n))
+                            return p;
+                    return nullptr;
+                }
+                if (s->bound.contains(n))
+                    return s->kind != name_scope::Class || aOccurrence.binding || s->first.find(n)->second <= aOccurrence.begin ? s : &iModule;
+                for (auto const* inner = s, *p = s->parent; p != nullptr; inner = p, p = p->parent)
+                {
+                    if (p->kind == name_scope::Module)
+                        return p;
+                    if (p->kind == name_scope::Class)
+                    {
+                        if (inner->kind == name_scope::Annotation && p->bound.contains(n))
+                            return p;
+                        continue;
+                    }
+                    if (p->globals.contains(n))
+                        return &iModule;
+                    if (!p->nonlocals.contains(n) && p->bound.contains(n))
+                        return p;
+                }
+                return &iModule;
+            }
+        private:
+            bool is_op(token const& aToken, std::string_view aOp) const
+            {
+                return python::is_op(iSource, aToken, aOp);
+            }
+            bool is_name(token const& aToken, std::string_view aName) const
+            {
+                return python::is_name(iSource, aToken, aName);
+            }
+            name_scope& new_scope(name_scope::kind_t aKind, name_scope& aParent)
+            {
+                iScopes.push_back(std::make_unique<name_scope>(name_scope{ aKind, &aParent }));
+                return *iScopes.back();
+            }
+            void use(token const& aToken, name_scope& aScope)
+            {
+                iOccurrences.push_back({ aToken.begin, aToken.end, &aScope, false, false });
+            }
+            void bind(token const& aToken, name_scope& aScope, bool aFixed = false)
+            {
+                std::string const n{ text_of(iSource, aToken) };
+                aScope.bound.insert(n);
+                aScope.first.try_emplace(n, std::max(iEnd, aToken.end));
+                iOccurrences.push_back({ aToken.begin, aToken.end, &aScope, true, aFixed });
+            }
+            // (the bracket that closes the one at aOpen (aEnd: none))
+            std::size_t close_of(tokens_t const& t, std::size_t aOpen, std::size_t aEnd) const
+            {
+                int depth = 0;
+                for (auto i = aOpen; i < aEnd; ++i)
+                {
+                    if (opening(iSource, t[i]))
+                        ++depth;
+                    else if (closing(iSource, t[i]) && --depth == 0)
+                        return i;
+                }
+                return aEnd;
+            }
+            // (the first token of a range that is one (a name or an operator) outside its brackets and its lambdas' parameters (aEnd: none))
+            std::size_t find_top(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, token::kind_t aKind, std::string_view aText, std::string_view aOr = {}) const
+            {
+                int lambdas = 0;
+                for (auto i = aBegin; i < aEnd; ++i)
+                {
+                    if (opening(iSource, t[i]))
+                    {
+                        i = close_of(t, i, aEnd);
+                        continue;
+                    }
+                    if (is_name(t[i], "lambda"))
+                        ++lambdas;
+                    else if (lambdas > 0)
+                    {
+                        if (is_op(t[i], ":"))
+                            --lambdas;
+                    }
+                    else if (t[i].kind == aKind && (text_of(iSource, t[i]) == aText || (!aOr.empty() && text_of(iSource, t[i]) == aOr)))
+                        return i;
+                }
+                return aEnd;
+            }
+            // (a logical line's statements, or those of a compound statement's inline body)
+            void statements(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, name_scope& aScope)
+            {
+                if (aBegin >= aEnd)
+                    return;
+                iEnd = t[aEnd - 1u].end;
+                if (is_op(t[aBegin], "@"))
+                {
+                    expression(t, aBegin + 1u, aEnd, aScope);
+                    return;
+                }
+                auto const h = is_name(t[aBegin], "async") && aBegin + 1u < aEnd ? aBegin + 1u : aBegin;
+                if (is_name(t[h], "def") || is_name(t[h], "class"))
+                {
+                    definition(t, h, aEnd, aScope);
+                    return;
+                }
+                auto const colon = find_top(t, h + 1u, aEnd, token::Op, ":");
+                if (colon < aEnd)
+                {
+                    iEnd = t[colon].end;
+                    if (is_name(t[h], "for"))
+                    {
+                        auto const in = find_top(t, h + 1u, colon, token::Name, "in");
+                        targets(t, h + 1u, in, aScope);
+                        expression(t, std::min(in + 1u, colon), colon, aScope);
+                        statements(t, colon + 1u, aEnd, aScope);
+                        return;
+                    }
+                    // (with ... as x, except E as x: see expression)
+                    for (auto const header : { "if", "elif", "while", "with", "except", "else", "try", "finally" })
+                        if (is_name(t[h], header))
+                        {
+                            expression(t, h + 1u, colon, aScope);
+                            statements(t, colon + 1u, aEnd, aScope);
+                            return;
+                        }
+                    // (match and case: soft keywords)
+                    if (is_name(t[aBegin], "match") && colon + 1u == aEnd && colon > aBegin + 1u && !is_op(t[aBegin + 1u], "."))
+                    {
+                        iMatch = true;
+                        expression(t, aBegin + 1u, colon, aScope);
+                        return;
+                    }
+                    if (iCase && is_name(t[aBegin], "case") && colon > aBegin + 1u && !is_op(t[aBegin + 1u], "."))
+                    {
+                        auto const guard = find_top(t, aBegin + 1u, colon, token::Name, "if");
+                        pattern(t, aBegin + 1u, guard, aScope);
+                        expression(t, std::min(guard + 1u, colon), colon, aScope);
+                        statements(t, colon + 1u, aEnd, aScope);
+                        return;
+                    }
+                }
+                for (auto b = aBegin; b < aEnd;)
+                {
+                    auto const e = find_top(t, b, aEnd, token::Op, ";");
+                    statement(t, b, e, aScope);
+                    b = e + 1u;
+                }
+            }
+            // (a def or class statement (at aAt): its name is its scope's; its parameters' defaults, its decorators and its bases are its scope's
+            // expressions; its annotations too, or its type parameters' scope's)
+            void definition(tokens_t const& t, std::size_t aAt, std::size_t aEnd, name_scope& aScope)
+            {
+                bool const function = is_name(t[aAt], "def");
+                auto i = aAt + 1u;
+                if (i >= aEnd || t[i].kind != token::Name)
+                    return;
+                iEnd = t[i].end;
+                bind(t[i++], aScope);
+                auto* enclosing = &aScope;
+                if (i < aEnd && is_op(t[i], "["))
+                {
+                    auto const close = close_of(t, i, aEnd);
+                    enclosing = &type_parameters(t, i + 1u, close, aScope);
+                    i = std::min(close + 1u, aEnd);
+                }
+                auto& inner = new_scope(function ? name_scope::Function : name_scope::Class, *enclosing);
+                if (i < aEnd && is_op(t[i], "("))
+                {
+                    auto const close = close_of(t, i, aEnd);
+                    if (function)
+                        parameters(t, i + 1u, close, inner, *enclosing, aScope);
+                    else
+                        expression(t, i + 1u, close, *enclosing, true);
+                    i = std::min(close + 1u, aEnd);
+                }
+                auto const colon = find_top(t, i, aEnd, token::Op, ":");
+                expression(t, i, colon, *enclosing);
+                statements(t, std::min(colon + 1u, aEnd), aEnd, inner);
+                iOpened = &inner;
+            }
+            // (type parameters (PEP 695): their scope)
+            name_scope& type_parameters(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, name_scope& aScope)
+            {
+                auto& inner = new_scope(name_scope::Annotation, aScope);
+                for (auto b = aBegin; b < aEnd;)
+                {
+                    auto const e = find_top(t, b, aEnd, token::Op, ",");
+                    auto i = b;
+                    while (i < e && t[i].kind == token::Op)
+                        ++i;
+                    if (i < e && t[i].kind == token::Name)
+                    {
+                        bind(t[i], inner);
+                        expression(t, i + 1u, e, inner);
+                    }
+                    b = e + 1u;
+                }
+                return inner;
+            }
+            // (a function's or lambda's parameters: its names)
+            void parameters(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, name_scope& aFunction, name_scope& aAnnotations, name_scope& aDefaults)
+            {
+                for (auto b = aBegin; b < aEnd;)
+                {
+                    auto const e = find_top(t, b, aEnd, token::Op, ",");
+                    auto i = b;
+                    while (i < e && t[i].kind == token::Op)
+                        ++i;
+                    if (i < e && t[i].kind == token::Name && !keyword(iSource, t[i]))
+                    {
+                        bind(t[i++], aFunction);
+                        auto const equals = find_top(t, i, e, token::Op, "=");
+                        expression(t, i, equals, aAnnotations);
+                        expression(t, std::min(equals + 1u, e), e, aDefaults);
+                    }
+                    b = e + 1u;
+                }
+            }
+            // (a simple statement)
+            void statement(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, name_scope& aScope)
+            {
+                if (aBegin >= aEnd)
+                    return;
+                iEnd = t[aEnd - 1u].end;
+                auto const& first = t[aBegin];
+                if (is_name(first, "import"))
+                {
+                    // (import a.b: a is bound; import a.b as c: c is)
+                    for (auto b = aBegin + 1u; b < aEnd;)
+                    {
+                        auto const e = find_top(t, b, aEnd, token::Op, ",");
+                        auto const as = find_top(t, b, e, token::Name, "as");
+                        if (as + 1u < e && t[as + 1u].kind == token::Name)
+                            bind(t[as + 1u], aScope);
+                        else if (as == e && b < e && t[b].kind == token::Name)
+                            bind(t[b], aScope, true);
+                        b = e + 1u;
+                    }
+                    return;
+                }
+                if (is_name(first, "from"))
+                {
+                    for (auto i = find_top(t, aBegin, aEnd, token::Name, "import") + 1u; i < aEnd; ++i)
+                        if (t[i].kind == token::Name && !is_name(t[i], "as"))
+                        {
+                            if (i + 2u < aEnd && is_name(t[i + 1u], "as") && t[i + 2u].kind == token::Name)
+                                bind(t[i += 2u], aScope);
+                            else
+                                bind(t[i], aScope, true);
+                        }
+                    return;
+                }
+                if (bool const global = is_name(first, "global"); global || is_name(first, "nonlocal"))
+                {
+                    for (auto i = aBegin + 1u; i < aEnd; ++i)
+                        if (t[i].kind == token::Name)
+                        {
+                            (global ? aScope.globals : aScope.nonlocals).insert(std::string{ text_of(iSource, t[i]) });
+                            use(t[i], aScope);
+                        }
+                    return;
+                }
+                if (is_name(first, "del"))
+                {
+                    targets(t, aBegin + 1u, aEnd, aScope);
+                    return;
+                }
+                // (a type alias (type: a soft keyword))
+                if (is_name(first, "type") && aBegin + 2u < aEnd && t[aBegin + 1u].kind == token::Name && !keyword(iSource, t[aBegin + 1u]) &&
+                    (is_op(t[aBegin + 2u], "=") || is_op(t[aBegin + 2u], "[")))
+                {
+                    bind(t[aBegin + 1u], aScope);
+                    auto* inner = &aScope;
+                    auto i = aBegin + 2u;
+                    if (is_op(t[i], "["))
+                    {
+                        auto const close = close_of(t, i, aEnd);
+                        inner = &type_parameters(t, i + 1u, close, aScope);
+                        i = std::min(close + 1u, aEnd);
+                    }
+                    expression(t, std::min(i + 1u, aEnd), aEnd, *inner);
+                    return;
+                }
+                // (an annotation: its target, if a name, is bound (with a value or not))
+                auto const equals = find_top(t, aBegin, aEnd, token::Op, "=");
+                if (auto const colon = find_top(t, aBegin, equals, token::Op, ":"); colon < equals)
+                {
+                    if (colon == aBegin + 1u && first.kind == token::Name && !keyword(iSource, first))
+                        bind(first, aScope);
+                    else
+                        expression(t, aBegin, colon, aScope);
+                    expression(t, colon + 1u, equals, aScope);
+                    expression(t, std::min(equals + 1u, aEnd), aEnd, aScope);
+                    return;
+                }
+                // (an assignment: each of its target lists)
+                if (equals < aEnd)
+                {
+                    auto b = aBegin;
+                    for (auto e = equals; e < aEnd; e = find_top(t, b, aEnd, token::Op, "="))
+                    {
+                        targets(t, b, e, aScope);
+                        b = e + 1u;
+                    }
+                    expression(t, b, aEnd, aScope);
+                    return;
+                }
+                // (an augmented assignment: its target, if a name, is bound)
+                for (auto const op : { "+=", "-=", "*=", "/=", "//=", "%=", "**=", ">>=", "<<=", "&=", "|=", "^=", "@=" })
+                    if (auto const augmented = find_top(t, aBegin, aEnd, token::Op, op); augmented < aEnd)
+                    {
+                        if (augmented == aBegin + 1u && first.kind == token::Name && !keyword(iSource, first))
+                            bind(first, aScope);
+                        else
+                            expression(t, aBegin, augmented, aScope);
+                        expression(t, augmented + 1u, aEnd, aScope);
+                        return;
+                    }
+                expression(t, aBegin, aEnd, aScope);
+            }
+            // (targets (an assignment's, a for's, a with item's, a del's): the names that are bound (not an attribute's, subscript's or call's object))
+            void targets(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, name_scope& aScope)
+            {
+                for (auto i = aBegin; i < aEnd; ++i)
+                {
+                    auto const& k = t[i];
+                    if (opening(iSource, k))
+                    {
+                        auto const close = close_of(t, i, aEnd);
+                        if (i > 0u && ends_expression(iSource, t[i - 1u]))
+                            expression(t, i + 1u, close, aScope, is_op(k, "("));
+                        else
+                            targets(t, i + 1u, close, aScope);
+                        i = close;
+                    }
+                    else if (k.kind == token::String)
+                        fields(k, aScope);
+                    else if (k.kind == token::Name && !keyword(iSource, k) && !(i > 0u && is_op(t[i - 1u], ".")))
+                    {
+                        if (i + 1u < aEnd && (is_op(t[i + 1u], ".") || opening(iSource, t[i + 1u])))
+                            use(k, aScope);
+                        else
+                            bind(k, aScope);
+                    }
+                }
+            }
+            // (a case's pattern: its captures are bound (not a value's or class's name, a keyword pattern's name or the wildcard))
+            void pattern(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, name_scope& aScope)
+            {
+                for (auto i = aBegin; i < aEnd; ++i)
+                {
+                    auto const& k = t[i];
+                    if (k.kind != token::Name || keyword(iSource, k) || (i > 0u && is_op(t[i - 1u], ".")) || is_name(k, "_"))
+                        continue;
+                    if (i + 1u < aEnd && (is_op(t[i + 1u], ".") || is_op(t[i + 1u], "(")))
+                        use(k, aScope);
+                    else if (!(i + 1u < aEnd && is_op(t[i + 1u], "=")))
+                        bind(k, aScope);
+                }
+            }
+            // (an expression (aCall: a call's arguments): the names that it reads, its lambdas' and comprehensions' scopes, the names that its 
+            // assignment expressions bind and those after an as (a with item's, an except clause's))
+            void expression(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, name_scope& aScope, bool aCall = false)
+            {
+                for (auto i = aBegin; i < aEnd; ++i)
+                {
+                    auto const& k = t[i];
+                    if (k.kind == token::String)
+                        fields(k, aScope);
+                    else if (opening(iSource, k))
+                    {
+                        auto const close = close_of(t, i, aEnd);
+                        if (auto const loop = find_top(t, i + 1u, close, token::Name, "for"); loop < close)
+                            comprehension(t, i + 1u, close, loop, aScope);
+                        else
+                            expression(t, i + 1u, close, aScope, is_op(k, "(") && i > 0u && ends_expression(iSource, t[i - 1u]));
+                        i = close;
+                    }
+                    else if (is_name(k, "lambda"))
+                    {
+                        // (its body: up to a comma (outside its brackets))
+                        auto const colon = find_top(t, i + 1u, aEnd, token::Op, ":");
+                        auto const end = colon < aEnd ? find_top(t, colon + 1u, aEnd, token::Op, ",") : aEnd;
+                        auto& inner = new_scope(name_scope::Function, aScope);
+                        parameters(t, i + 1u, colon, inner, aScope, aScope);
+                        expression(t, std::min(colon + 1u, end), end, inner);
+                        i = end - 1u;
+                    }
+                    else if (is_name(k, "as"))
+                    {
+                        auto const end = find_top(t, i + 1u, aEnd, token::Op, ",");
+                        targets(t, i + 1u, end, aScope);
+                        i = end - 1u;
+                    }
+                    else if (k.kind != token::Name || keyword(iSource, k) || (i > 0u && is_op(t[i - 1u], ".")))
+                        continue;
+                    else if (aCall && i + 1u < aEnd && is_op(t[i + 1u], "=") && (i == aBegin || is_op(t[i - 1u], ",")))
+                        continue; // (a keyword argument's name)
+                    else if (i + 1u < aEnd && is_op(t[i + 1u], ":="))
+                    {
+                        // (an assignment expression in a comprehension: the name of the scope that contains it (PEP 572))
+                        auto* s = &aScope;
+                        while (s->kind == name_scope::Comprehension)
+                            s = s->parent;
+                        bind(k, *s);
+                    }
+                    else
+                        use(k, aScope);
+                }
+            }
+            // (a comprehension or generator expression (aLoop: its first for): its scope's are its targets and its expressions' names, except 
+            // those of its first iterable (its enclosing scope's))
+            void comprehension(tokens_t const& t, std::size_t aBegin, std::size_t aEnd, std::size_t aLoop, name_scope& aScope)
+            {
+                auto& inner = new_scope(name_scope::Comprehension, aScope);
+                expression(t, aBegin, aLoop, inner);
+                for (auto i = aLoop; i < aEnd;)
+                {
+                    bool const loop = is_name(t[i], "for");
+                    auto const in = loop ? find_top(t, i + 1u, aEnd, token::Name, "in") : i;
+                    if (loop)
+                        targets(t, i + 1u, in, inner);
+                    auto const next = find_top(t, std::min(in + 1u, aEnd), aEnd, token::Name, "for", "if");
+                    expression(t, std::min(in + 1u, aEnd), next, loop && i == aLoop ? aScope : inner);
+                    i = next;
+                }
+            }
+            // (an f-string's replacement fields: their expressions)
+            void fields(token const& aString, name_scope& aScope)
+            {
+                auto const quote = iSource.find_first_of("\'\"", aString.begin);
+                if (quote >= aString.end || iSource.find_first_of("fF", aString.begin) >= quote)
+                    return;
+                if (tokens::fstring_end(iSource, quote) != aString.end)
+                {
+                    iOk = false;
+                    return;
+                }
+                char const q = iSource[quote];
+                bool const triple = quote + 2u < aString.end && iSource[quote + 1u] == q && iSource[quote + 2u] == q;
+                bool const raw = tokens::raw_literal(iSource, quote);
+                auto const end = aString.end - std::min<std::size_t>(triple ? 3u : 1u, aString.end - quote);
+                for (auto j = quote + (triple ? 3u : 1u); j < end; ++j)
+                {
+                    if (auto const named = raw ? j : tokens::named_escape_end(iSource, j); named != j)
+                        j = named - 1u;
+                    else if (iSource[j] == '\\' && j + 1u < end && iSource[j + 1u] != '{' && iSource[j + 1u] != '}')
+                        j = tokens::escape_last(iSource, j);
+                    else if (iSource[j] == '{')
+                    {
+                        if (j + 1u < end && iSource[j + 1u] == '{')
+                            ++j;
+                        else
+                            j = field(j + 1u, end, aScope) - 1u;
+                    }
+                }
+            }
+            // (a replacement field (aStart: after its '{'): its expression (up to its '}', or its conversion's '!', its format specification's 
+            // ':' or a debug specifier's '=', outside its brackets and strings) and its format specification's fields'; its end: after its '}')
+            std::size_t field(std::size_t aStart, std::size_t aEnd, name_scope& aScope)
+            {
+                int depth = 0;
+                auto j = aStart;
+                for (; j < aEnd; ++j)
+                {
+                    char const c = iSource[j];
+                    if (c == '\'' || c == '\"')
+                        j = tokens::literal_end(iSource, j) - 1u;
+                    else if (c == '#')
+                    {
+                        while (j + 1u < aEnd && iSource[j + 1u] != '\n')
+                            ++j;
+                    }
+                    else if (c == '(' || c == '[' || c == '{')
+                        ++depth;
+                    else if (depth > 0)
+                    {
+                        if (c == ')' || c == ']' || c == '}')
+                            --depth;
+                    }
+                    else if (c == '}' || c == ':' || (c == '!' && !(j + 1u < aEnd && iSource[j + 1u] == '=')))
+                        break;
+                    else if (c == '=')
+                    {
+                        if (j + 1u < aEnd && iSource[j + 1u] == '=')
+                            ++j;
+                        else if (iSource[j - 1u] != '!' && iSource[j - 1u] != '<' && iSource[j - 1u] != '>')
+                            break;
+                    }
+                }
+                // (its tokens: those of its text in brackets (a logical line))
+                {
+                    tokens_t t;
+                    for (auto const& line : tokens::tokenize("(" + iSource.substr(aStart, std::min(j, aEnd) - aStart) + ")"))
+                        for (auto const& k : line.tokens)
+                            t.push_back({ k.kind, k.begin + aStart - 1u, k.end + aStart - 1u });
+                    if (t.size() > 2u)
+                        expression(t, 1u, t.size() - 1u, aScope);
+                }
+                while (j < aEnd && iSource[j] != '}' && iSource[j] != ':')
+                    ++j;
+                if (j < aEnd && iSource[j] == ':')
+                    for (++j; j < aEnd && iSource[j] != '}'; ++j)
+                    {
+                        if (iSource[j] == '\\')
+                            ++j;
+                        else if (iSource[j] == '{')
+                            j = field(j + 1u, aEnd, aScope) - 1u;
+                    }
+                return std::min(j + 1u, aEnd);
+            }
+        private:
+            std::string const& iSource;
+            name_scope iModule{ name_scope::Module, nullptr };
+            std::vector<std::unique_ptr<name_scope>> iScopes;
+            std::vector<occurrence> iOccurrences;
+            name_scope* iOpened = nullptr;  ///< (the function or class that the line being analysed opens)
+            bool iMatch = false;            ///< (it is a match statement)
+            bool iCase = false;             ///< (it is in one)
+            std::size_t iEnd = 0u;          ///< (the end of the statement (or of the compound statement's header) being analysed)
+            bool iOk = true;
+        };
+    }
+
+    bool name_references(std::string const& aSource, std::size_t aPosition, std::vector<std::size_t>& aReferences)
+    {
+        name_analysis const analysis{ aSource };
+        if (!analysis.ok())
+            return false;
+        auto const& names = analysis.occurrences();
+        auto const target = std::find_if(names.begin(), names.end(), [&](auto const& o) { return o.begin <= aPosition && aPosition < o.end; });
+        if (target == names.end())
+            return false;
+        // (a class's name (a method's, e.g.) is its instances' attribute too: those are not known)
+        auto const* const declared = analysis.resolve(*target);
+        if (declared == nullptr || declared->kind == name_scope::Class)
+            return false;
+        std::set<std::size_t> references;
+        for (auto const& o : names)
+            if (analysis.name(o) == analysis.name(*target) && analysis.resolve(o) == declared)
+            {
+                // (an import's: it is the name of what it imports)
+                if (o.fixed)
+                    return false;
+                if (o.begin != target->begin)
+                    references.insert(o.begin);
+            }
+        aReferences.assign(references.begin(), references.end());
+        return true;
     }
 
     std::vector<syntax_issue> syntax_issues(std::string const& aSource, bool aExpression)

@@ -89,6 +89,9 @@ namespace neos::compilers::python
     };
     // (a source's syntax errors (aExpression: eval's): the tokenizer's first (if any: only it), else those of its statements)
     std::vector<syntax_issue> syntax_issues(std::string const& aSource, bool aExpression);
+    // (the names of a source as written that denote what the name at a position of it does (a function's name, e.g.: by its scopes' 
+    // rules), other than that name; false: not known (a method's or another class attribute's name, an import's, no name))
+    bool name_references(std::string const& aSource, std::size_t aPosition, std::vector<std::size_t>& aReferences);
     // (the parser's error at a position: CPython's message for it)
     syntax_issue parse_failure_issue(std::string const& aSource, std::size_t aPosition, bool aExpression);
     std::string source_line(std::string const& aSource, std::uint32_t aLine);
@@ -252,6 +255,7 @@ namespace neos::compilers::python
         void end_fragment() override;
         void preparse(i_source_fragment& aFragment) override;
         bool parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const override;
+        bool references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const override;
         void parsed(i_source_fragment& aFragment) override;
         void diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t& aEndLine, std::uint32_t& aEndColumn,
             neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport) override;

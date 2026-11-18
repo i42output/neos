@@ -578,6 +578,7 @@ namespace neos::compilers::javascript
         void preparse(i_source_fragment& aFragment) override;
         void emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
+        bool references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const override;
         void set_options(neolib::i_string const& aOptions) override;
         void diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t& aEndLine, std::uint32_t& aEndColumn,
             neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport) override;
@@ -680,6 +681,8 @@ namespace neos::compilers::javascript
         std::string_view iSource;
         std::deque<node> iNodes;
         std::pmr::monotonic_buffer_resource iNodeMemory;    ///< (the nodes' children: released with the nodes (at once))
+        std::unordered_map<node const*, binding const*> iUses;  ///< (the references (identifiers) that the analysis resolved: their bindings 
+                                                            ///< (see use and references))
         std::vector<node*> iStack;
         std::deque<function_info> iFunctions;
         std::deque<scope> iScopes;

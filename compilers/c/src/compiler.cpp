@@ -265,6 +265,60 @@ namespace neos::compilers::c
         return iLinkedFunctions.contains(aName.to_std_string());
     }
 
+    bool compiler::references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const
+    {
+        // the names of a translation unit's source file (of the program compiled last) that denote what the declared name at a position 
+        // of it declares: the identifiers and the declared names (its other declarations') that the analysis gave the same entity 
+        // (node::ent); a name that a macro's expansion has, or that is in a file that the unit includes, is not a name of the file
+        aReferences.clear();
+        translation_unit const* unit = nullptr;
+        for (auto const& u : iUnits)
+            if (!u.prelude && u.path == aSourcePath.to_std_string_view())
+                unit = &u;
+        auto const source = unit != nullptr ? iSources.find(unit->path) : iSources.end();
+        if (unit == nullptr || source == iSources.end())
+            return false;
+        // (the source as written (the nodes' is the preprocessor's output): where each of its lines begins)
+        std::string const& written = source->second.first;
+        std::vector<std::size_t> lines{ 0u };
+        for (std::size_t i = 0u; i < written.size(); ++i)
+            if (written[i] == '\n')
+                lines.push_back(i + 1u);
+        // (where a name is in the source as written: its token's place (the preprocessor's: a line and a column of a file), if that is in 
+        // the unit's own file and the name is what is there)
+        auto const position_of = [&](node const& aNode) -> std::optional<std::uint32_t>
+        {
+            if (aNode.unit != unit)
+                return {};
+            auto const where = unit->location_of(aNode.source);
+            if (where.line == 0u || where.line > lines.size() || where.column == 0u || unit->file_of(where) != unit->path)
+                return {};
+            auto const offset = lines[where.line - 1u] + where.column - 1u;
+            auto const name = name_of(&aNode);
+            if (name.empty() || offset + name.size() > written.size() || written.compare(offset, name.size(), name) != 0)
+                return {};
+            return static_cast<std::uint32_t>(offset);
+        };
+        // (an entity's declarations may each have one of their own: the one that they all refer to)
+        auto const self = [](entity const* aEntity) { return aEntity != nullptr && aEntity->canonical != nullptr ? aEntity->canonical : aEntity; };
+        // the declared name at the position, and what it declares
+        node const* declared = nullptr;
+        for (auto const& n : iNodes)
+            if (n.is(construct::DeclName) && n.ent != nullptr)
+                if (auto const position = position_of(n); position && *position <= aPosition && aPosition < *position + name_of(&n).size())
+                    declared = &n;
+        if (declared == nullptr)
+            return false;
+        std::set<std::uint32_t> references;
+        for (auto const& n : iNodes)
+            if (&n != declared && (n.is(construct::Identifier) || n.is(construct::DeclName)) && n.ent != nullptr && self(n.ent) == self(declared->ent))
+                if (auto const position = position_of(n))
+                    references.insert(*position);
+        for (auto const reference : references)
+            aReferences.push_back(reference);
+        return true;
+    }
+
     std::uint32_t compiler::source_line(i_source_fragment const& aFragment, std::size_t aPosition)
     {
         for (auto& unit : iUnits)

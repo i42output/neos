@@ -671,6 +671,35 @@ namespace neos::compilers::javascript
     {
         iNodes.clear();
         iNodeMemory.release();
+        iUses.clear();
+    }
+
+    bool compiler::references(neolib::i_string_view const&, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const
+    {
+        // the names of the script compiled last that denote the binding that the name at a position of it declares (a function 
+        // declaration's name, e.g.): the identifiers that the analysis resolved to that binding (see use), not those of another binding 
+        // of the same name (another scope's), nor a property's name
+        aReferences.clear();
+        auto const in_source = [&](node const& aNode)
+        {
+            return aNode.source.data() >= iSource.data() && aNode.source.data() + aNode.source.size() <= iSource.data() + iSource.size();
+        };
+        auto const position_of = [&](node const& aNode) { return static_cast<std::uint32_t>(aNode.source.data() - iSource.data()); };
+        binding const* declared = nullptr;
+        for (auto const& s : iScopes)
+            for (auto const& b : s.bindings)
+                if (b->declaration != nullptr && in_source(*b->declaration) && b->declaration->source == b->name &&
+                    position_of(*b->declaration) <= aPosition && aPosition < position_of(*b->declaration) + b->declaration->source.size())
+                    declared = b.get();
+        if (declared == nullptr)
+            return false;
+        std::set<std::uint32_t> references;
+        for (auto const& use : iUses)
+            if (use.second == declared && use.first != declared->declaration && in_source(*use.first) && use.first->source == declared->name)
+                references.insert(position_of(*use.first));
+        for (auto const reference : references)
+            aReferences.push_back(reference);
+        return true;
     }
 
     void compiler::emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource)
@@ -2034,11 +2063,12 @@ namespace neos::compilers::javascript
     void compiler::use(std::string const& aName, scope* aScope, function_info* aFunction, node* aSite)
     {
         // (a reference to a binding: bindings of functions other than the one that uses them are captured)
-        (void)aSite;
         for (auto* s = aScope; s != nullptr; s = s->parent)
         {
             if (auto* b = s->find(aName); b != nullptr && !(eval_code() && s->kind == scope_kind::Script && !s->function->strict && (b->kind == binding_kind::Var || b->kind == binding_kind::Function)))
             {
+                if (aSite != nullptr)
+                    iUses[aSite] = b;
                 if (s->function != aFunction)
                 {
                     b->captured = true;

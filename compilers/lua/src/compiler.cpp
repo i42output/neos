@@ -188,6 +188,39 @@ namespace neos::compilers::lua
         return true;
     }
 
+    bool compiler::references(neolib::i_string_view const&, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const
+    {
+        // the names of the chunk compiled last that denote what the name at a position of it does: a local variable (a local function's 
+        // name, e.g.): its declaration's name and the identifiers that the analysis resolved to it; else (an identifier that is no local 
+        // variable's) a global: the identifiers of its name that are no local variable's either (in the same environment); a field's name 
+        // (function t.f's f) is neither: what it denotes is not known
+        aReferences.clear();
+        auto const in_source = [&](node const& aNode)
+        {
+            return aNode.source.data() >= iSource.data() && aNode.source.data() + aNode.source.size() <= iSource.data() + iSource.size();
+        };
+        auto const position_of = [&](node const& aNode) { return static_cast<std::uint32_t>(aNode.source.data() - iSource.data()); };
+        node const* name = nullptr;
+        for (auto const& n : iNodes)
+            if ((n.is(construct::Identifier) || n.declared != nullptr) && in_source(n) && position_of(n) <= aPosition && aPosition < position_of(n) + n.source.size())
+                name = &n;
+        if (name == nullptr)
+            return false;
+        variable const* const local = name->declared != nullptr ? name->declared : name->resolved;
+        std::set<std::uint32_t> references;
+        for (auto const& n : iNodes)
+        {
+            if (&n == name || !in_source(n))
+                continue;
+            if (local != nullptr ? n.declared == local || (n.is(construct::Identifier) && n.resolved == local) :
+                n.is(construct::Identifier) && n.declared == nullptr && n.resolved == nullptr && n.environment == name->environment && n.source == name->source)
+                references.insert(position_of(n));
+        }
+        for (auto const reference : references)
+            aReferences.push_back(reference);
+        return true;
+    }
+
     void compiler::error(std::string_view aSource, std::string const& aMessage) const
     {
         throw syntax_error{ aSource, aMessage };
