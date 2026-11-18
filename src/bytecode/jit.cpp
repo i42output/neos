@@ -362,6 +362,13 @@ namespace neos
                     struct tier_job;
                     bool background = true;
                     std::vector<std::shared_ptr<tier_job>> jobs;        ///< (by function: its optimization in the background)
+                    // (a function whose optimized code is to be made again (a guard of its failed, or it left for its own code often): its
+                    // optimized code stays (it leaves again where it left) while the optimization is made in the background, and is replaced
+                    // when it next leaves once that has been made (see replace_later); NEOS_TIER2_REPLACE 0: its own code runs meanwhile)
+                    bool replace = true;
+                    std::vector<std::shared_ptr<tier_job>> replacements;
+                    std::vector<std::int32_t> pollCalls;                ///< (by function: its calls before it next looks for its optimization
+                                                                        ///< being made (see optimize_function))
                     std::uint32_t jobsInFlight = 0u;                    ///< (being made by the worker (see tier_worker::mutex))
                     bool closing = false;                               ///< (being destroyed: no more jobs (see tier_worker::mutex))
                     std::vector<tier_chunk> chunks;
@@ -10193,7 +10200,9 @@ namespace neos
                         auto* const optimized = static_cast<std::uint8_t*>(chunk.code) + entry;
                         m.chunks.push_back(std::move(chunk));
                         // (calls of it go there: its indirect table entry and its entry (a jump: jmp [rip]; its address))
-                        m.savedEntries[f] = entry_of(m, f);
+                        // (its own code's entry: kept when optimized code is replaced (see replace_later))
+                        if (m.tierState[f] != 1u)
+                            m.savedEntries[f] = entry_of(m, f);
                         auto const target = reinterpret_cast<std::uint64_t>(optimized);
                         set_entry(m, f, target);
                         m.indirect[f].target = target;
@@ -10308,7 +10317,7 @@ namespace neos
                         bool iStarted = false;
                     };
 
-                    constexpr std::int32_t PollCalls = 100;     ///< (calls before a function whose optimization is being made looks again)
+                    constexpr std::int32_t PollCalls = 100;     ///< (calls before a function whose optimization is being made looks again: at most)
 
                     void const* optimize_function(compiled_module& aModule, std::uint32_t aFunction)
                     {
@@ -10320,7 +10329,10 @@ namespace neos
                             auto job = m.jobs[f];
                             if (!job || !job->done.load(std::memory_order_acquire))
                             {
-                                m.counters[f] = PollCalls;
+                                // (it looks again after twice as many calls (at most PollCalls): a function that is seldom
+                                // called runs its optimized code soon after it is made)
+                                m.pollCalls[f] = std::min(PollCalls, std::max(m.pollCalls[f], 1) * 2);
+                                m.counters[f] = m.pollCalls[f];
                                 return nullptr;
                             }
                             m.jobs[f].reset();
@@ -10344,7 +10356,8 @@ namespace neos
                             m.tierState[f] = 3u;
                             m.jobs[f] = job;
                             tier_worker::instance().add(job);
-                            m.counters[f] = PollCalls;
+                            m.pollCalls[f] = 1;
+                            m.counters[f] = 1;
                             return nullptr;
                         }
                         if (rewrite_optimization(*job))
@@ -10567,6 +10580,48 @@ namespace neos
                         return nullptr;
                     }
 
+                    // (a function whose optimized code (the current one) is to be made again: optimized in the background now, its
+                    // optimized code staying until then (see compiled_module::replace); false if it cannot be (its own code runs until
+                    // it has been optimized again, as before))
+                    bool replace_later(compiled_module& aModule, std::uint32_t aFunction)
+                    {
+                        auto& m = aModule;
+                        auto const f = aFunction;
+                        if (!m.replace || !m.background || !m.backend || m.staleJobs[f] >= MaxStaleJobs)
+                            return false;
+                        ++m.recompiles[f];
+                        auto job = prepare_optimization(m, f);
+                        job->background = true;
+                        m.replacements[f] = job;
+                        tier_worker::instance().add(job);
+                        return true;
+                    }
+
+                    // (optimized code that is being replaced (see replace_later) has left again: replaced if its replacement has been
+                    // made; false if that was not installed (the memory that it read has changed): it is made again)
+                    bool replaced(compiled_module& aModule, std::uint32_t aFunction)
+                    {
+                        auto& m = aModule;
+                        auto const f = aFunction;
+                        auto const job = m.replacements[f];
+                        if (!job->done.load(std::memory_order_acquire))
+                            return true;
+                        m.replacements[f].reset();
+                        if (install_optimization(m, *job) != nullptr)
+                            return true;
+                        if (m.tierState[f] == 1u)
+                        {
+                            m.loopCounters[f] = m.loopIterations;
+                            return false;
+                        }
+                        // (not optimized (nor will it be): its own code from now on (the code that stayed would leave again
+                        // each time))
+                        set_entry(m, f, m.savedEntries[f]);
+                        m.indirect[f].target = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f]);
+                        m.currentVersion[f] = nullptr;
+                        return true;
+                    }
+
                     void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept
                     {
                         auto& m = *aContext->module;
@@ -10574,6 +10629,10 @@ namespace neos
                         std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
                         try
                         {
+                            // (being replaced: nothing more until it is)
+                            if (aVersion->osrLoop == NoOsrLoop && m.currentVersion[f] == aVersion && m.tierState[f] == 1u && m.replacements[f] &&
+                                replaced(m, f))
+                                return;
                             // (an inlined call whose guards fail again is not inlined)
                             if (aSite < aVersion->sites.size())
                             {
@@ -10590,6 +10649,12 @@ namespace neos
                             }
                             if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
                                 return;
+                            if (replace_later(m, f))
+                            {
+                                if (m.verbose != 0u)
+                                    std::fprintf(stderr, "[tier2] f%u: a guard failed (site %u): being replaced\n", f, aSite);
+                                return;
+                            }
                             // (the function's own code again (its optimized code may be running: it stays), until it is optimized again (with 
                             // the values that the guards' words have then))
                             auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
@@ -10626,10 +10691,18 @@ namespace neos
                             // from one, see tier_loop))
                             if (m.loopCounters[f] == NotAgain)
                                 m.loopCounters[f] = m.loopIterations;
+                            // (being replaced: nothing more until it is; its replacement not installed: made again)
+                            bool again = false;
+                            if (aVersion->osrLoop == NoOsrLoop && m.currentVersion[f] == aVersion && m.tierState[f] == 1u && m.replacements[f])
+                            {
+                                if (replaced(m, f))
+                                    return;
+                                again = true;
+                            }
                             // (a deopt within a loop of the function's code is counted as any other: its call's remaining iterations are
                             // the baseline's (or continue in optimized code from the loop, see tier_loop), and the loop's code keeps no
                             // call whose path joins the others')
-                            if (!d.guard)
+                            if (!d.guard && !again)
                             {
                                 ++aVersion->deoptCounts[aDeopt];
                                 if (++aVersion->deoptsTaken < DeoptsBeforeReoptimizing)
@@ -10670,6 +10743,13 @@ namespace neos
                             }
                             if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
                                 return;
+                            if (replace_later(m, f))
+                            {
+                                if (m.verbose != 0u)
+                                    std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s%s): being replaced\n", f, aDeopt, d.call, d.guard ? ", a guard" : "",
+                                        d.frames.empty() ? "" : ", frames");
+                                return;
+                            }
                             auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
                             set_entry(m, f, m.savedEntries[f]);
                             m.indirect[f].target = reinterpret_cast<std::uint64_t>(baseline);
@@ -10931,6 +11011,7 @@ namespace neos
                             m.backend = setting("NEOS_TIER2_SSA").value_or(1) != 0;
                             m.deopt = setting("NEOS_TIER2_DEOPT").value_or(1) != 0;
                             m.background = setting("NEOS_TIER2_BACKGROUND").value_or(1) != 0;
+                            m.replace = setting("NEOS_TIER2_REPLACE").value_or(1) != 0;
                             m.osr = m.backend && setting("NEOS_TIER2_OSR").value_or(1) != 0;
                             m.verbose = static_cast<std::uint32_t>(setting("NEOS_TIER2_VERBOSE").value_or(0));
                             auto const calls = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_CALLS").value_or(2000), 1, NotAgain));
@@ -10950,6 +11031,8 @@ namespace neos
                             m.currentVersion.reserve(room);
                             m.savedEntries.reserve(room);
                             m.jobs.reserve(room);
+                            m.replacements.reserve(room);
+                            m.pollCalls.reserve(room);
                             m.parametersRead.reserve(room);
                             m.usefulSpeculations.reserve(room);
                             m.deoptFrames.reserve(room);
@@ -10972,6 +11055,8 @@ namespace neos
                             m.currentVersion.assign(n, nullptr);
                             m.savedEntries.resize(n);
                             m.jobs.resize(n);
+                            m.replacements.resize(n);
+                            m.pollCalls.resize(n, 1);
                         }
                         // (functions compiled when they are first called (NEOS_JIT_LAZY: 0, all now): those that are not called are not
                         // compiled (e.g. most of a large program's libraries); a module with an instruction that the code generator does not
@@ -11060,6 +11145,8 @@ namespace neos
                         m.currentVersion.resize(n, nullptr);
                         m.savedEntries.resize(n);
                         m.jobs.resize(n);
+                        m.replacements.resize(n);
+                        m.pollCalls.resize(n, 1);
                         if (!m.parametersRead.empty())
                         {
                             m.parametersRead.resize(n);
