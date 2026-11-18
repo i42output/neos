@@ -96,6 +96,16 @@ namespace neos::language
         return true;
     }
 
+    bool compiler::references(std::string const& aLanguage, std::string const& aSourcePath, std::uint32_t aPosition, std::vector<std::uint32_t>& aReferences) const
+    {
+        auto const* const languageCompiler = language(aLanguage);
+        neolib::vector<std::uint32_t> references;
+        if (languageCompiler == nullptr || !languageCompiler->references(neolib::string_view{ aSourcePath }, aPosition, references))
+            return false;
+        aReferences = references.to_std_vector();
+        return true;
+    }
+
     i_language_compiler* compiler::language(std::string const& aLanguage) const
     {
         for (auto const& languageCompiler : iLanguageCompilers)

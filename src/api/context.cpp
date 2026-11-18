@@ -456,6 +456,31 @@ namespace neos
             add_plugin(*plugin);
     }
 
+    std::optional<std::vector<std::size_t>> context::references(std::string const& aSchemaPath, std::string const& aSourcePath, std::string_view aSource, std::size_t aPosition)
+    {
+        try
+        {
+            // (compiled as a program of the file is (see load_program), but its source is aSource, not the file's as it was saved)
+            if (!schema_loaded() || schema().path() != aSchemaPath)
+                load_schema(aSchemaPath);
+            iProgram = decltype(iProgram){};
+            std::istringstream source{ std::string{ aSource } };
+            load_unit(language::source_fragment{ neolib::string{ aSourcePath } }, source);
+            compiler().set_quiet(true);
+            struct reset { context& c; ~reset() { c.compiler().set_quiet(false); } } const resetQuiet{ *this };
+            if (!compiler().compile(program()))
+                return {};
+            std::vector<std::uint32_t> references;
+            if (!compiler().references(schema().meta().language, aSourcePath, static_cast<std::uint32_t>(aPosition), references))
+                return {};
+            return std::vector<std::size_t>{ references.begin(), references.end() };
+        }
+        catch (...)
+        {
+            return {};
+        }
+    }
+
     context::translation_unit_t& context::load_unit(language::source_fragment&& aFragment, std::shared_ptr<language::schema> aSchema)
     {
         if (!schema_loaded())

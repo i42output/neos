@@ -119,9 +119,11 @@ namespace neos::language
         i_fragment const* small_integers(neolib::i_vector<std::uint32_t> const&) override { return nullptr; }
         void loop_variable_range(neolib::i_string_view const&, std::int64_t, std::int64_t) override {}
         i_fragment const* release_integer(std::uint32_t, bool) override { return nullptr; }
+        i_fragment const* loop_variable_bound(neolib::i_string_view const&, std::uint32_t, bool) override { return nullptr; }
         std::uint32_t source_line(i_source_fragment const&, std::size_t) override { return 0u; }
         bool frame_name(std::uint32_t, neolib::i_string&) override { return false; }
         bool linked_function(neolib::i_string_view const&) const override { return false; }
+        bool references(neolib::i_string_view const&, std::uint32_t, neolib::i_vector<std::uint32_t>&) const override { return false; }
         // the compiler's services
     protected:
         i_code_generator& generator() const { return *iGenerator; }

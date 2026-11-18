@@ -178,6 +178,12 @@ namespace neos
         // any) rewrites it): its nodes, each after the node that it is in (its children in the order of the source); empty if the source 
         // does not parse
         std::vector<outline_node> outline(std::string const& aSchemaPath, std::string_view aSource);
+        // where else in a source (aSource, of the file aSourcePath, in the language of the schema aSchemaPath) the name at aPosition (a 
+        // byte of it: a declaration's defining name, e.g. a function's) denotes what is declared there (the first byte of each: its uses 
+        // and its other declarations), as the language's compiler resolves its names (see i_language_compiler::references): the source is 
+        // compiled (as a program of its file is: the context's schema and program become its), so it may take a while; none: not known 
+        // (e.g. it does not compile, or the language's compiler does not record what its names denote)
+        std::optional<std::vector<std::size_t>> references(std::string const& aSchemaPath, std::string const& aSourcePath, std::string_view aSource, std::size_t aPosition);
     private:
         void init();
         translation_unit_t& load_unit(language::source_fragment&& aFragment, std::shared_ptr<language::schema> aSchema = {}); ///< (aSchema: the 

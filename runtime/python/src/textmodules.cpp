@@ -30,8 +30,9 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/string.py (string.Template's pattern) and Modules/binascii.c
-  (a2b_qp, b2a_qp, a2b_uu and b2a_uu)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They
+  Portions of this file are derived from CPython 3.13 (Lib/string.py (string.Template's pattern), Modules/binascii.c
+  (a2b_qp, b2a_qp, a2b_uu, b2a_uu and a2b_base64) and Lib/base64.py (_b32decode, _85encode, _b85decode, a85encode and
+  _input_type_check)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They
   are used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated
   from Python (and C) to C++ for the neos Python runtime plugin and adapted to its object model (see
   runtime/python/NOTICE).
@@ -1101,9 +1102,16 @@ namespace neos::python_runtime
             }
 
             // (a binary argument: bytes-like, or (aAscii) an ASCII str)
-            bool binary_argument(object* aValue, std::string& aResult, bool aAscii)
+            // (an argument that is binary data (or, aAscii, an ASCII str); aSimple: as a simple buffer's (PyBUF_SIMPLE: binascii's), a view of it 
+            // C-contiguous)
+            bool binary_argument(object* aValue, std::string& aResult, bool aAscii, bool aSimple = false)
             {
                 std::string_view b;
+                if (buffer_info buffer; aSimple && !buffer_of(aValue, buffer) && bytes_like(aValue, b))
+                {
+                    error("BufferError", "memoryview: underlying buffer is not C-contiguous");
+                    return false;
+                }
                 if (bytes_like(aValue, b))
                 {
                     aResult = std::string{ b };
@@ -1205,6 +1213,8 @@ namespace neos::python_runtime
             }
 
             // (binascii.a2b_base64: non-alphabet characters are discarded unless aStrict)
+            // (as CPython 3.13's binascii_a2b_base64_impl (Modules/binascii.c): pad characters other than a quad's are ignored (RFC 4648, 3.3); 
+            // strict: no leading or excess padding, nothing after it and only base64 data)
             bool base64_decode(std::string const& aText, std::string& aResult, bool aStrict)
             {
                 auto const value = [](char c) -> int
@@ -1216,43 +1226,23 @@ namespace neos::python_runtime
                     if (c == '/') return 63;
                     return -1;
                 };
-                unsigned accumulator = 0u;
-                int bits = 0;
-                std::size_t quad = 0u;      ///< (the position in the current group of 4)
-                std::size_t pads = 0u;
-                std::size_t characters = 0u;
-                bool padding = false;
+                int quad = 0;
+                unsigned leftchar = 0u;
+                int pads = 0;
                 for (std::size_t i = 0u; i < aText.size(); ++i)
                 {
                     auto const c = aText[i];
                     if (c == '=')
                     {
-                        if (aStrict && quad < 2u)
-                        {
-                            binascii_error(quad == 0u && i == 0u ? "Leading padding not allowed" : "Discontinuous padding not allowed");
-                            return false;
-                        }
-                        if (quad >= 2u)
-                        {
-                            ++pads;
-                            padding = true;
-                            if (quad + pads >= 4u)
-                            {
-                                // (the end of the data)
-                                if (aStrict && i + 1u < aText.size())
-                                {
-                                    binascii_error("Excess data after padding");
-                                    return false;
-                                }
-                                quad = 0u;
-                                accumulator = 0u;
-                                bits = 0;
-                                pads = 0u;
-                                if (!aStrict)
-                                    break;
-                            }
-                        }
-                        continue;
+                        ++pads;
+                        if (quad >= 2 && quad + pads <= 4)
+                            continue;
+                        if (!aStrict)
+                            continue;
+                        if (quad == 1)
+                            break;
+                        binascii_error(quad == 0 && i == 0u ? "Leading padding not allowed" : "Excess padding not allowed");
+                        return false;
                     }
                     auto const v = value(c);
                     if (v < 0)
@@ -1264,29 +1254,44 @@ namespace neos::python_runtime
                         }
                         continue;
                     }
-                    if (padding && aStrict)
+                    if (pads != 0 && aStrict)
                     {
-                        binascii_error("Discontinuous padding not allowed");
+                        binascii_error(quad + pads == 4 ? "Excess data after padding" : "Discontinuous padding not allowed");
                         return false;
                     }
-                    padding = false;
-                    pads = 0u;
-                    ++characters;
-                    accumulator = (accumulator << 6) | static_cast<unsigned>(v);
-                    bits += 6;
-                    quad = (quad + 1u) % 4u;
-                    if (bits >= 8)
+                    pads = 0;
+                    auto const ch = static_cast<unsigned>(v);
+                    switch (quad)
                     {
-                        bits -= 8;
-                        aResult += static_cast<char>((accumulator >> bits) & 0xFFu);
+                    case 0:
+                        quad = 1;
+                        leftchar = ch;
+                        break;
+                    case 1:
+                        quad = 2;
+                        aResult += static_cast<char>(((leftchar << 2) | (ch >> 4)) & 0xFFu);
+                        leftchar = ch & 0x0Fu;
+                        break;
+                    case 2:
+                        quad = 3;
+                        aResult += static_cast<char>(((leftchar << 4) | (ch >> 2)) & 0xFFu);
+                        leftchar = ch & 0x03u;
+                        break;
+                    case 3:
+                        quad = 0;
+                        aResult += static_cast<char>(((leftchar << 6) | ch) & 0xFFu);
+                        leftchar = 0u;
+                        break;
                     }
                 }
-                if (quad != 0u)
+                if (quad == 1)
                 {
-                    if (quad == 1u)
-                        binascii_error("Invalid base64-encoded string: number of data characters (" + std::to_string(characters) + ") cannot be 1 more than a multiple of 4");
-                    else
-                        binascii_error("Incorrect padding");
+                    binascii_error("Invalid base64-encoded string: number of data characters (" + std::to_string(aResult.size() / 3u * 4u + 1u) + ") cannot be 1 more than a multiple of 4");
+                    return false;
+                }
+                if (quad != 0 && quad + pads < 4)
+                {
+                    binascii_error("Incorrect padding");
                     return false;
                 }
                 return true;
@@ -1322,9 +1327,9 @@ namespace neos::python_runtime
                             return nullptr;
                         std::string data, separator;
                         long long perSep = 1;
-                        if (!binary_argument(a[0], data, false))
+                        if (!binary_argument(a[0], data, false, true))
                             return nullptr;
-                        if (a[1] != nullptr && !binary_argument(a[1], separator, true))
+                        if (a[1] != nullptr && !binary_argument(a[1], separator, true, true))
                             return nullptr;
                         if (a[2] != nullptr && !to_index(a[2], perSep))
                             return nullptr;
@@ -1336,7 +1341,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string text, result;
-                        if (!parse_arguments("unhexlify", aArgs, aKwargs, { "hexstr" }, 1u, 1u, a) || !binary_argument(a[0], text, true) || !unhexlify(text, result))
+                        if (!parse_arguments("unhexlify", aArgs, aKwargs, { "hexstr" }, 1u, 1u, a) || !binary_argument(a[0], text, true, true) || !unhexlify(text, result))
                             return nullptr;
                         return make_bytes(result);
                     } },
@@ -1344,7 +1349,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string data;
-                        if (!parse_arguments("b2a_base64", aArgs, aKwargs, { "data", "newline" }, 1u, 1u, a) || !binary_argument(a[0], data, false))
+                        if (!parse_arguments("b2a_base64", aArgs, aKwargs, { "data", "newline" }, 1u, 1u, a) || !binary_argument(a[0], data, false, true))
                             return nullptr;
                         bool const newline = a[1] == nullptr || truth(a[1]) == 1;
                         return make_bytes(base64_encode(data) + (newline ? "\n" : ""));
@@ -1353,7 +1358,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string text, result;
-                        if (!parse_arguments("a2b_base64", aArgs, aKwargs, { "data", "strict_mode" }, 1u, 1u, a) || !binary_argument(a[0], text, true))
+                        if (!parse_arguments("a2b_base64", aArgs, aKwargs, { "data", "strict_mode" }, 1u, 1u, a) || !binary_argument(a[0], text, true, true))
                             return nullptr;
                         bool const strict = a[1] != nullptr && truth(a[1]) == 1;
                         if (!base64_decode(text, result, strict))
@@ -1365,7 +1370,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string data;
-                        if (!parse_arguments("a2b_qp", aArgs, aKwargs, { "data", "header" }, 1u, 0u, a) || !binary_argument(a[0], data, true))
+                        if (!parse_arguments("a2b_qp", aArgs, aKwargs, { "data", "header" }, 1u, 0u, a) || !binary_argument(a[0], data, true, true))
                             return nullptr;
                         int header = 0;
                         if (a[1] != nullptr && (header = truth(a[1])) < 0)
@@ -1421,7 +1426,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string data;
-                        if (!parse_arguments("b2a_qp", aArgs, aKwargs, { "data", "quotetabs", "istext", "header" }, 1u, 0u, a) || !binary_argument(a[0], data, false))
+                        if (!parse_arguments("b2a_qp", aArgs, aKwargs, { "data", "quotetabs", "istext", "header" }, 1u, 0u, a) || !binary_argument(a[0], data, false, true))
                             return nullptr;
                         int quotetabs = 0, istext = 1, header = 0;
                         if ((a[1] != nullptr && (quotetabs = truth(a[1])) < 0) || (a[2] != nullptr && (istext = truth(a[2])) < 0) || 
@@ -1493,7 +1498,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string data;
-                        if (!parse_arguments("crc32", aArgs, aKwargs, { "data", "crc" }, 1u, 2u, a) || !binary_argument(a[0], data, false))
+                        if (!parse_arguments("crc32", aArgs, aKwargs, { "data", "crc" }, 1u, 2u, a) || !binary_argument(a[0], data, false, true))
                             return nullptr;
                         long long value = 0;
                         if (a[1] != nullptr && !to_index(a[1], value))
@@ -1505,7 +1510,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string text;
-                        if (!parse_arguments("a2b_uu", aArgs, aKwargs, { "data" }, 1u, 1u, a) || !binary_argument(a[0], text, true))
+                        if (!parse_arguments("a2b_uu", aArgs, aKwargs, { "data" }, 1u, 1u, a) || !binary_argument(a[0], text, true, true))
                             return nullptr;
                         if (text.empty())
                             return binascii_error("Missing length byte");
@@ -1554,7 +1559,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string data;
-                        if (!parse_arguments("b2a_uu", aArgs, aKwargs, { "data", "backtick" }, 1u, 1u, a) || !binary_argument(a[0], data, false))
+                        if (!parse_arguments("b2a_uu", aArgs, aKwargs, { "data", "backtick" }, 1u, 1u, a) || !binary_argument(a[0], data, false, true))
                             return nullptr;
                         if (aArgs.size() > 1u)
                             return error("TypeError", "b2a_uu() takes exactly 1 positional argument (" + std::to_string(aArgs.size()) + " given)");
@@ -1592,7 +1597,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string data;
-                        if (!parse_arguments("crc_hqx", aArgs, aKwargs, { "data", "crc" }, 2u, 2u, a) || !binary_argument(a[0], data, false))
+                        if (!parse_arguments("crc_hqx", aArgs, aKwargs, { "data", "crc" }, 2u, 2u, a) || !binary_argument(a[0], data, false, true))
                             return nullptr;
                         long long value = 0;
                         if (!to_index(a[1], value))
@@ -1636,7 +1641,7 @@ namespace neos::python_runtime
             object* b64encode(object* aData, object* aAltchars, bool aUrlsafe)
             {
                 std::string data;
-                if (!binary_argument(aData, data, false))
+                if (!binary_argument(aData, data, false, true))
                     return nullptr;
                 auto encoded = base64_encode(data);
                 if (aUrlsafe)
@@ -1691,6 +1696,7 @@ namespace neos::python_runtime
                 return result;
             }
 
+            // (as Lib/base64.py's _b32decode: its full quanta (the text, its padding stripped), then its padding (0, 1, 3, 4 or 6) checked)
             bool base32_decode(std::string const& aText, std::string& aResult, bool aCasefold, bool aHex)
             {
                 std::string const alphabet = aHex ? "0123456789ABCDEFGHIJKLMNOPQRSTUV" : "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -1703,36 +1709,39 @@ namespace neos::python_runtime
                 if (aCasefold)
                     for (auto& c : text)
                         c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                auto const l = text.size();
                 auto const stripped = text.find_last_not_of('=');
-                auto const pads = stripped == std::string::npos ? text.size() : text.size() - stripped - 1u;
-                static std::size_t const sBytesForPads[] = { 5u, 4u, 0u, 3u, 2u, 0u, 1u, 0u, 0u };
-                if (pads > 6u || (pads != 0u && sBytesForPads[pads] == 0u && pads != 0u))
+                text.resize(stripped == std::string::npos ? 0u : stripped + 1u);
+                auto const padchars = l - text.size();
+                std::uint64_t acc = 0u;
+                for (std::size_t i = 0u; i < text.size(); i += 8u)
+                {
+                    acc = 0u;
+                    for (std::size_t k = i; k < std::min(i + 8u, text.size()); ++k)
+                    {
+                        auto const position = alphabet.find(text[k]);
+                        if (position == std::string::npos)
+                        {
+                            binascii_error("Non-base32 digit found");
+                            return false;
+                        }
+                        acc = (acc << 5) + position;
+                    }
+                    for (int k = 4; k >= 0; --k)
+                        aResult += static_cast<char>(acc >> (8 * k));
+                }
+                if (padchars != 0u && padchars != 1u && padchars != 3u && padchars != 4u && padchars != 6u)
                 {
                     binascii_error("Incorrect padding");
                     return false;
                 }
-                for (std::size_t i = 0u; i < text.size(); i += 8u)
+                if (padchars != 0u && !aResult.empty())
                 {
-                    std::uint64_t block = 0u;
-                    for (std::size_t k = 0u; k < 8u; ++k)
-                    {
-                        auto const c = text[i + k];
-                        std::uint64_t v = 0u;
-                        if (c != '=')
-                        {
-                            auto const position = alphabet.find(c);
-                            if (position == std::string::npos)
-                            {
-                                binascii_error("Non-base32 digit found");
-                                return false;
-                            }
-                            v = position;
-                        }
-                        block = (block << 5) | v;
-                    }
-                    std::size_t const bytes = i + 8u == text.size() ? sBytesForPads[pads] : 5u;
-                    for (std::size_t k = 0u; k < bytes; ++k)
-                        aResult += static_cast<char>(block >> (32u - 8u * k));
+                    acc <<= 5u * padchars;
+                    auto const leftover = (43u - 5u * padchars) / 8u;
+                    aResult.resize(aResult.size() - 5u);
+                    for (std::size_t k = 0u; k < leftover; ++k)
+                        aResult += static_cast<char>(acc >> (32u - 8u * k));
                 }
                 return true;
             }
@@ -1740,18 +1749,26 @@ namespace neos::python_runtime
             char const sBase85Alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
             char const sZ85Alphabet[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
 
-            std::string base85_encode(std::string const& aData, bool aPad, bool aAscii85)
+            // (as Lib/base64.py's _85encode: its words (the last padded with NULs), folded (Ascii85's: z for a NUL word; with foldspaces, y for a 
+            // word of spaces); the last chunk (unless padding), as many characters as its bytes and one more (z unfolded))
+            std::string base85_encode(std::string const& aData, bool aPad, bool aAscii85, bool aFoldspaces = false)
             {
                 std::string result;
                 for (std::size_t i = 0u; i < aData.size(); i += 4u)
                 {
                     std::size_t const n = std::min<std::size_t>(4u, aData.size() - i);
+                    bool const last = n < 4u && !aPad;
                     std::uint32_t word = 0u;
                     for (std::size_t k = 0u; k < 4u; ++k)
                         word = (word << 8) | (k < n ? static_cast<unsigned char>(aData[i + k]) : 0u);
-                    if (aAscii85 && word == 0u && n == 4u)
+                    if (aAscii85 && word == 0u && !last)
                     {
                         result += 'z';
+                        continue;
+                    }
+                    if (aAscii85 && aFoldspaces && word == 0x20202020u)
+                    {
+                        result += 'y';
                         continue;
                     }
                     char chunk[5];
@@ -1760,7 +1777,7 @@ namespace neos::python_runtime
                         chunk[k] = aAscii85 ? static_cast<char>('!' + word % 85u) : sBase85Alphabet[word % 85u];
                         word /= 85u;
                     }
-                    result.append(chunk, n < 4u && !aPad ? n + 1u : 5u);
+                    result.append(chunk, last ? n + 1u : 5u);
                 }
                 return result;
             }
@@ -1817,6 +1834,7 @@ namespace neos::python_runtime
                         values.clear();
                     }
                 }
+                // (the last hunk, padded with the last digit (~ (base85) or u (Ascii85)): its overflow checked too)
                 if (!values.empty())
                 {
                     auto const n = values.size();
@@ -1825,10 +1843,45 @@ namespace neos::python_runtime
                     std::uint64_t word = 0u;
                     for (auto v : values)
                         word = word * 85u + static_cast<unsigned>(v);
+                    if (word > 0xFFFFFFFFull)
+                    {
+                        error("ValueError", aAscii85 ? "Ascii85 overflow" : "base85 overflow in hunk starting at byte " + std::to_string(aText.size() - n));
+                        return false;
+                    }
                     for (std::size_t k = 0u; k + 1u < n; ++k)
                         aResult += static_cast<char>(word >> (24u - 8u * k));
                 }
                 return true;
+            }
+
+            // (the legacy interface's argument (Lib/base64.py's _input_type_check): a view of it (TypeError if none), of single bytes, of one dimension; then 
+            // its data)
+            bool legacy_argument(object* aValue, std::string& aResult)
+            {
+                ref const view{ b_memoryview({ aValue }, nullptr) };
+                if (!view)
+                {
+                    clear_error();
+                    error("TypeError", std::string{ "expected bytes-like object, not " } + type_name(aValue));
+                    return false;
+                }
+                ref const format{ getattr(view.get(), "format") };
+                ref const ndim{ getattr(view.get(), "ndim") };
+                long long dimensions = 0;
+                if (!format || !ndim || !to_index(ndim.get(), dimensions))
+                    return false;
+                auto const f = text_of(format.get());
+                if (f != "c" && f != "b" && f != "B")
+                {
+                    error("TypeError", "expected single byte elements, not '" + f + "' from " + type_name(aValue));
+                    return false;
+                }
+                if (dimensions != 1)
+                {
+                    error("TypeError", "expected 1-D data, not " + std::to_string(dimensions) + "-D data from " + type_name(aValue));
+                    return false;
+                }
+                return binary_argument(aValue, aResult, false, true);
             }
 
             builtin_entry const sBase64Functions[] =
@@ -1857,7 +1910,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string data;
-                        if (!parse_arguments("encodebytes", aArgs, aKwargs, { "s" }, 1u, 0u, a) || !binary_argument(a[0], data, false))
+                        if (!parse_arguments("encodebytes", aArgs, aKwargs, { "s" }, 1u, 0u, a) || !legacy_argument(a[0], data))
                             return nullptr;
                         std::string result;
                         for (std::size_t i = 0u; i < data.size(); i += 57u)
@@ -1868,7 +1921,7 @@ namespace neos::python_runtime
                     {
                         std::vector<object*> a;
                         std::string text, result;
-                        if (!parse_arguments("decodebytes", aArgs, aKwargs, { "s" }, 1u, 0u, a) || !binary_argument(a[0], text, false) || !base64_decode(text, result, false))
+                        if (!parse_arguments("decodebytes", aArgs, aKwargs, { "s" }, 1u, 0u, a) || !legacy_argument(a[0], text) || !base64_decode(text, result, false))
                             return nullptr;
                         return make_bytes(result);
                     } },
@@ -2000,9 +2053,30 @@ namespace neos::python_runtime
                         std::string data;
                         if (!parse_arguments("a85encode", aArgs, aKwargs, { "b", "foldspaces", "wrapcol", "pad", "adobe" }, 1u, 0u, a) || !binary_argument(a[0], data, false))
                             return nullptr;
-                        auto text = base85_encode(data, a[3] != nullptr && truth(a[3]) == 1, true);
-                        if (a[4] != nullptr && truth(a[4]) == 1)
-                            text = "<~" + text + "~>";
+                        // (as Lib/base64.py's: wrapped at wrapcol (at least 1; 2 with adobe, its ~> not split from its last line))
+                        bool const adobe = a[4] != nullptr && truth(a[4]) == 1;
+                        auto text = base85_encode(data, a[3] != nullptr && truth(a[3]) == 1, true, a[1] != nullptr && truth(a[1]) == 1);
+                        if (adobe)
+                            text = "<~" + text;
+                        long long wrapcol = 0;
+                        if (a[2] != nullptr && !to_index(a[2], wrapcol))
+                            return nullptr;
+                        if (wrapcol != 0)
+                        {
+                            auto const width = static_cast<std::size_t>(std::max(adobe ? 2ll : 1ll, wrapcol));
+                            std::vector<std::string> chunks;
+                            for (std::size_t i = 0u; i < text.size(); i += width)
+                                chunks.push_back(text.substr(i, width));
+                            if (chunks.empty())
+                                chunks.emplace_back();
+                            if (adobe && chunks.back().size() + 2u > width)
+                                chunks.emplace_back();
+                            text.clear();
+                            for (std::size_t i = 0u; i < chunks.size(); ++i)
+                                text += (i != 0u ? "\n" : "") + chunks[i];
+                        }
+                        if (adobe)
+                            text += "~>";
                         return make_bytes(text);
                     } },
                 { "a85decode", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*

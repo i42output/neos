@@ -2279,7 +2279,23 @@ namespace neos::compilers::python
             bool nestedChanged = false;
             track_lines();
             std::vector<std::size_t> nestedLines;
-            text = rewrite_nested_functions(text, nestedChanged, &aAnnotations, &nestedLines, aStubReturnTypes);
+            try
+            {
+                text = rewrite_nested_functions(text, nestedChanged, &aAnnotations, &nestedLines, aStubReturnTypes);
+            }
+            catch (tokens::rewrite_error const& e)
+            {
+                // (at the start of its line of the source)
+                std::size_t position = 0u;
+                if (e.line < lines.size() && lines[e.line] > 1u)
+                    for (std::size_t i = 0u, line = 1u; i < aSource.size(); ++i)
+                        if (aSource[i] == '\n' && ++line == lines[e.line])
+                        {
+                            position = i + 1u;
+                            break;
+                        }
+                syntax_error(position, e.what());
+            }
             if (nestedChanged)
             {
                 std::vector<std::uint32_t> rewritten;
@@ -4744,8 +4760,9 @@ namespace neos::compilers::python
             return dummy;
         }
         // (exec: a name of its namespaces (its locals', its globals') or a builtin; a module that it imports: as the program's)
+        // (in a function: its globals', then a builtin)
         if (py_exec_mode() && !py_current_module())
-            return py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(aName) }));
+            return py_owned(py_runtime_call(implicit_entry() ? "python::exec_lookup" : "python::exec_global_lookup", { type::String }, type::Object, { py_string(aName) }));
         // (a module whose namespace (globals()) can bind names: one of those, or a builtin)
         if (iPyIntrospective.contains(py_module_name()))
             return py_owned(py_runtime_call("python::global_lookup", { type::String, type::String }, type::Object, { py_string(py_module_name()), py_string(aName) }));
@@ -4810,6 +4827,9 @@ namespace neos::compilers::python
         if (predeclared != iInference.pyLocals.end())
             if (auto const v = predeclared->second.find(aName); v != predeclared->second.end())
                 t = v->second;
+        // (exec: its module's names are objects (its namespace's), whatever binds them (e.g. a range's loop))
+        if (module && py_exec_mode())
+            t = type::Object;
         generator().define_symbol(name, t, neolib::string_view{});
         auto& entry = *find_symbol(current_scope(), neolib::string_view{ name }, true);
         if (t == type::Integer)
@@ -5066,6 +5086,26 @@ namespace neos::compilers::python
         return counter->second;
     }
 
+    bool compiler::py_exec_namespace_name(std::string const& aName, bool aGlobal)
+    {
+        // (exec's code (not a module that it imports): a name of its module (its top level's, or a global), not one that the compiler's
+        // rewrites bind (a comprehension's variable: its own))
+        return py_exec_mode() && !py_current_module() && !declaration_pass() && in_function() && (aGlobal || implicit_entry()) && !synthetic_name(aName) &&
+            !aName.starts_with("_k_") && !numbered_name(aName, 'q', true) && aName != "_cc___class__";
+    }
+
+    bool compiler::py_exec_top_level(std::string const& aName)
+    {
+        // (exec's top level: its locals' (a name that a function declares global: its globals', as CPython's module scope's explicit 
+        // globals))
+        if (!implicit_entry())
+            return false;
+        for (auto const& declared : iInference.pyGlobals)
+            if (declared.second.contains(aName))
+                return false;
+        return true;
+    }
+
     void compiler::py_bind_name(std::string const& aName, operand_type const& aValue, fragment& aStatement)
     {
         py_bound(aName);
@@ -5107,6 +5147,15 @@ namespace neos::compilers::python
             put_local(aStatement, global ? opcode::GlobalGet : opcode::LocalGet, index);
             put_local(aStatement, opcode::LocalSet, previous);
             put_local(aStatement, global ? opcode::GlobalSet : opcode::LocalSet, index);
+            // (exec: a name of its module's is its namespace's as it is bound (its locals', or its globals'), which its reads read)
+            if (py_exec_namespace_name(aName, global))
+            {
+                fragment bound;
+                put_local(bound, global ? opcode::GlobalGet : opcode::LocalGet, index);
+                bound.valueType = type::Object;
+                append(aStatement, py_runtime_call(py_exec_top_level(aName) ? "python::exec_store" : "python::exec_global_store", { type::String, type::Object }, 
+                    type::Void, { py_string(aName), bound }));
+            }
             put_local(aStatement, opcode::LocalGet, previous);
             emit_call_to(aStatement, runtime_function("neos::object_release", { type::Object }, type::Void));
             if (holder)
@@ -6154,7 +6203,8 @@ namespace neos::compilers::python
         if (execBuiltin && py_current_module())
             append(statement, py_owned(py_runtime_call("python::global_lookup", { type::String, type::String }, type::Object, { py_string(py_module_name()), py_string(*execBuiltin) })));
         else if (execBuiltin)
-            append(statement, py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(*execBuiltin) })));
+            append(statement, py_owned(py_runtime_call(implicit_entry() ? "python::exec_lookup" : "python::exec_global_lookup", { type::String }, type::Object, 
+                { py_string(*execBuiltin) })));
         else if (method)
         {
             // (its receiver: a function of the program that is the method is called with it first (see below))
@@ -6345,7 +6395,8 @@ namespace neos::compilers::python
                     // (exec: a name that the code does not bind is its namespaces')
                     if (!py_exec_mode())
                         throw std::runtime_error("name '" + target.name + "' is not defined");
-                    current = operand_type{ py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(target.name) })) };
+                    current = operand_type{ py_owned(py_runtime_call(implicit_entry() ? "python::exec_lookup" : "python::exec_global_lookup", { type::String }, 
+                        type::Object, { py_string(target.name) })) };
                 }
                 break;
             case py_target::kind_t::Item:
@@ -7719,8 +7770,12 @@ namespace neos::compilers::python
                     if (name == "_k___class__")
                         append(result, py_runtime_call("python::ns_classcell", { type::Object, type::Object }, type::Void, { local_value(dict, type::Object), value }));
                     else
+                    {
+                        // (_k__nc_x: the body's cell of its name x that its annotation scopes read (see closures.cpp))
+                        auto const key = name.starts_with("_k__nc_") ? name.substr(7u) : name.substr(3u);
                         append(result, py_runtime_call("python::ns_cell", { type::Object, type::String, type::Object }, type::Void,
-                            { local_value(dict, type::Object), py_string(name.substr(3u)), value }));
+                            { local_value(dict, type::Object), py_string(key), value }));
+                    }
                 }
                 else
                 {
@@ -7745,21 +7800,9 @@ namespace neos::compilers::python
         // (exec: the names that its top level binds are its namespace's (its locals'))
         if (aImplicit && py_exec_mode() && implicit_entry() && !declaration_pass())
         {
+            // (the names that it binds are its namespace's as they are bound (see py_bind_name); the functions that it defines (hoisted): 
+            // at its end)
             auto stores = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
-            for (auto const& name : py_function().pyBindingOrder)
-            {
-                if (synthetic_name(name) || name.starts_with("_k_"))
-                    continue;
-                auto* const symbol = find_symbol(current_scope(), neolib::string_view{ neolib::string{ name } });
-                if (symbol == nullptr || symbol->type() == type::Function)
-                    continue;
-                fragment value;
-                put_local(value, is_global(*symbol) ? opcode::GlobalGet : opcode::LocalGet, symbol->index());
-                value.valueType = symbol->type();
-                if (symbol->type() != type::Object)
-                    value = py_object(operand_type{ symbol_reference{ current_scope(), neolib::string{ name } } });
-                append(stores, py_runtime_call("python::exec_store", { type::String, type::Object }, type::Void, { py_string(name), value }));
-            }
             for (auto const& name : iPyExecDefs)
                 append(stores, py_runtime_call("python::exec_store", { type::String, type::Object }, type::Void, { py_string(name), py_name(name) }));
             auto result = py_release_variables(true);
@@ -9076,7 +9119,8 @@ namespace neos::compilers::python
                 names.push_back(n);
         for (auto const& name : names)
         {
-            if (synthetic_name(name) || name == "__class__")
+            // (a comprehension's variables (_qN_name, and a generator expression's _qit): not the function's (see statements.cpp's comprehension_rewriter))
+            if (synthetic_name(name) || name == "__class__" || numbered_name(name, 'q', true) || name == "_qit")
                 continue;
             auto* const symbol = find_symbol(current_scope(), neolib::string_view{ neolib::string{ name } }, true);
             if (symbol == nullptr || is_global(*symbol) || symbol->type() == type::Function)
@@ -9155,7 +9199,11 @@ namespace neos::compilers::python
             return result(py_owned(py_runtime_call("python::global_read", { type::String, type::String, type::Object }, type::Object, 
                 { py_string(py_module_name()), py_string(std::string{ unprefixed(name) }), fragment{ aValue } })));
         // (exec: a name of the module that is not bound is its namespaces')
-        if (py_exec_mode() && module)
+        // (in a function: its globals', then a builtin; a name that is not its namespace's (e.g. a comprehension's variable): the variable's)
+        bool const execName = py_exec_mode() && module && py_exec_namespace_name(name, global);
+        if (execName && !py_exec_top_level(name))
+            return result(py_owned(py_runtime_call("python::exec_global_lookup", { type::String }, type::Object, { py_string(name) })));
+        if (execName)
             return result(py_owned(py_runtime_call("python::exec_read", { type::String, type::Object }, type::Object, { py_string(name), fragment{ aValue } })));
         bool const deleted = module ? iInference.pyDeletedGlobals.contains(name) :
             (iInference.pyDeleted.contains(current_function_name()) && iInference.pyDeleted.at(current_function_name()).contains(name));
@@ -9369,6 +9417,20 @@ namespace neos::compilers::python
     void compiler::loop_variable_range(neolib::i_string_view const& aName, std::int64_t aLow, std::int64_t aHigh)
     {
         py_bound(aName.to_std_string(), interval{ aLow, aHigh });
+    }
+
+    i_fragment const* compiler::loop_variable_bound(neolib::i_string_view const& aName, std::uint32_t aVariable, bool aGlobal)
+    {
+        // (exec: a name of its module's is its namespace's as it is bound (see py_bind_name))
+        auto const name = aName.to_std_string();
+        auto const* const symbol = find_symbol(current_scope(), neolib::string_view{ neolib::string{ name } });
+        if (symbol == nullptr || symbol->type() != type::Object || !py_exec_namespace_name(name, aGlobal))
+            return nullptr;
+        fragment bound;
+        put_local(bound, aGlobal ? opcode::GlobalGet : opcode::LocalGet, aVariable);
+        bound.valueType = type::Object;
+        return result(py_runtime_call(py_exec_top_level(name) ? "python::exec_store" : "python::exec_global_store", { type::String, type::Object }, type::Void, 
+            { py_string(name), bound }));
     }
 
     i_fragment const* compiler::release_integer(std::uint32_t aVariable, bool aGlobal)
@@ -10181,6 +10243,22 @@ namespace neos::compilers::python
                             bool const module = implicit_entry() || global;
                             if (module ? iInference.pyDeletedGlobals.insert(target.name).second : iInference.pyDeleted[current_function_name()].insert(target.name).second)
                                 set_changed();
+                            // (exec: a name of its module's: deleted from its namespace (NameError if it has none), and its variable unbound)
+                            if ((symbol == nullptr && py_exec_mode() && !py_current_module() && (!in_function() || implicit_entry())) || 
+                                (symbol != nullptr && symbol->type() == type::Object && py_exec_namespace_name(target.name, global)))
+                            {
+                                ensure_function();
+                                append(statement, py_runtime_call(py_exec_top_level(target.name) ? "python::exec_delete" : "python::exec_global_delete", { type::String }, type::Void, 
+                                    { py_string(target.name) }));
+                                if (symbol != nullptr)
+                                {
+                                    put_local(statement, global ? opcode::GlobalGet : opcode::LocalGet, symbol->index());
+                                    emit_call_to(statement, runtime_function("neos::object_release", { type::Object }, type::Void));
+                                    put_i32(statement, 0);
+                                    put_local(statement, global ? opcode::GlobalSet : opcode::LocalSet, symbol->index());
+                                }
+                                break;
+                            }
                             if (symbol == nullptr)
                             {
                                 append(statement, py_runtime_call("python::unbound", { type::String, type::I32 }, type::Void, { py_string(target.name), [&]() { fragment k; put_i32(k, module ? 0 : 1); k.valueType = type::I32; return k; }() }));
@@ -10855,6 +10933,15 @@ namespace neos::compilers::python
                     bool const module = implicit_entry() || global;
                     if (module ? iInference.pyDeletedGlobals.insert(*aConstruct.handlerNames[i]).second : iInference.pyDeleted[current_function_name()].insert(*aConstruct.handlerNames[i]).second)
                         set_changed();
+                    // (exec: unbound in its namespace too ("name = None; del name"))
+                    if (symbol->type() == type::Object && py_exec_namespace_name(*aConstruct.handlerNames[i], global))
+                    {
+                        bool const topLevel = py_exec_top_level(*aConstruct.handlerNames[i]);
+                        append(aStatement, py_runtime_call(topLevel ? "python::exec_store" : "python::exec_global_store", { type::String, type::Object }, type::Void, 
+                            { py_string(*aConstruct.handlerNames[i]), py_runtime_call("python::none", {}, type::Object, {}) }));
+                        append(aStatement, py_runtime_call(topLevel ? "python::exec_delete" : "python::exec_global_delete", { type::String }, type::Void, 
+                            { py_string(*aConstruct.handlerNames[i]) }));
+                    }
                     put_local(aStatement, global ? opcode::GlobalGet : opcode::LocalGet, symbol->index());
                     emit_call_to(aStatement, runtime_function("neos::object_release", { type::Object }, type::Void));
                     put_i32(aStatement, 0);

@@ -31,7 +31,7 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Objects/genericaliasobject.c, Lib/__future__.py and
-  Objects/frameobject.c (frame.clear()'s checks)), Copyright
+  Objects/frameobject.c and Python/structmember.c (frame.clear()'s checks and the trace attributes' setters)), Copyright
   (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation
   License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from C and Python to C++ for the neos Python
   runtime plugin and adapted to its object model (see runtime/python/NOTICE).
@@ -260,6 +260,9 @@ namespace neos::python_runtime
         {
             if (aCell == nullptr)
                 return;
+            // (its annotation scopes' namespace (PEP 695: the Python compiler's closures.cpp): the cell itself, which type_new sets)
+            if (std::string_view{ aName } == "__classdictcell__")
+                return fn_ns_set(aDict, aName, aCell);
             ref const value{ getattr(aCell, "cell_contents") };
             if (!value)
             {
@@ -389,12 +392,16 @@ namespace neos::python_runtime
                 object* back = nullptr;     ///< (once made)
                 object* code = nullptr;     ///< (once made)
                 object* generator = nullptr;    ///< (a generator's (gi_frame's): the generator (not a reference: null once it is destroyed))
+                object* trace = nullptr;        ///< (f_trace: null if None)
+                bool traceLines = true;         ///< (f_trace_lines)
+                bool traceOpcodes = false;      ///< (f_trace_opcodes)
                 ~frame_object()
                 {
                     if (generator != nullptr)
                         generator_frame_released(generator, &h.base);
                     release(back);
                     release(code);
+                    release(trace);
                 }
             };
 
@@ -543,18 +550,72 @@ namespace neos::python_runtime
                     }
                     if (name == "f_builtins")
                         return module_attribute("builtins", "__dict__");
-                    if (name == "f_trace" || name == "f_generator")
+                    if (name == "f_trace")
+                    {
+                        auto const trace = self.trace != nullptr ? self.trace : none();
+                        return (retain(trace), trace);
+                    }
+                    if (name == "f_generator")
                         return (retain(none()), none());
                     if (name == "f_trace_lines")
-                        return make_bool(true);
+                        return make_bool(self.traceLines);
                     if (name == "f_trace_opcodes")
-                        return make_bool(false);
+                        return make_bool(self.traceOpcodes);
                     if (name == "clear")
                     {
                         ref const function{ make_builtin(sFrameClear) };
                         return make_bound_method(function.get(), aSelf);
                     }
                     return error("AttributeError", std::string{ "'frame' object has no attribute '" } + aName + "'");
+                };
+                // (its attributes that can be set (Objects/frameobject.c's): f_trace (None: none), f_trace_lines (a member: bool) and f_trace_opcodes 
+                // (bool); f_lineno only by a trace function (there are none); the others are read-only)
+                type.setattr = [](neos_py_context*, object* aSelf, char const* aName, object* aValue) -> int
+                {
+                    auto& self = as_frame(aSelf);
+                    std::string_view const name{ aName };
+                    if (name == "f_trace")
+                    {
+                        auto const trace = aValue == nullptr || aValue == none() ? nullptr : aValue;
+                        retain(trace);
+                        release(self.trace);
+                        self.trace = trace;
+                        return 0;
+                    }
+                    if (name == "f_trace_lines" || name == "f_trace_opcodes")
+                    {
+                        if (aValue == nullptr)
+                        {
+                            if (name == "f_trace_lines")
+                                error("TypeError", "can't delete numeric/char attribute");
+                            else
+                                error("AttributeError", "cannot delete attribute f_trace_opcodes");
+                            return -1;
+                        }
+                        if (kind_of(aValue) != NEOS_PY_BOOL)
+                        {
+                            error("TypeError", "attribute value type must be bool");
+                            return -1;
+                        }
+                        (name == "f_trace_lines" ? self.traceLines : self.traceOpcodes) = aValue == &sTrue.base;
+                        return 0;
+                    }
+                    if (name == "f_lineno")
+                    {
+                        if (aValue == nullptr)
+                            error("AttributeError", "cannot delete attribute");
+                        else
+                            error("ValueError", "f_lineno can only be set by a trace function");
+                        return -1;
+                    }
+                    if (name == "f_back" || name == "f_code" || name == "f_globals" || name == "f_locals" || name == "f_builtins" || name == "f_lasti" || 
+                        name == "f_generator")
+                    {
+                        error("AttributeError", std::string{ "attribute '" } + aName + "' of 'frame' objects is not writable");
+                        return -1;
+                    }
+                    error("AttributeError", std::string{ "'frame' object has no attribute '" } + aName + "' and no __dict__ for setting new attributes");
+                    return -1;
                 };
                 return type;
             }
@@ -914,6 +975,16 @@ namespace neos::python_runtime
                         } };
                     if (auto const method = reduce_method(aSelf, aName, sReduce))
                         return method;
+                    // (a base of a class (PEP 560): its origin (CPython's ga_mro_entries))
+                    static builtin_entry const sMroEntries{ "__mro_entries__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            if (aArgs.size() != 2u)
+                                return error("TypeError", "__mro_entries__() takes exactly one argument");
+                            auto const& alias = *reinterpret_cast<generic_alias_object*>(aArgs[0]);
+                            return make_tuple({ new_reference(alias.origin) });
+                        } };
+                    if (std::strcmp(aName, "__mro_entries__") == 0)
+                        return make_function("__mro_entries__", call_builtin, const_cast<builtin_entry*>(&sMroEntries), aSelf);
                     return getattr(g.origin, aName);
                 };
                 type.call = [](neos_py_context*, object* aSelf, object* aArgs, object* aKwargs) -> object*

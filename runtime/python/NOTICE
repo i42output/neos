@@ -260,16 +260,20 @@ names the CPython sources it is derived from.
   subprocess_docs.hpp  Lib/subprocess.py (its docstrings, generated)
   *_docs.hpp of the modules above
                        their docstrings, generated
-  support.cpp          Objects/genericaliasobject.c, Lib/__future__.py and
-                       Objects/frameobject.c (frame.clear()'s checks)
+  support.cpp          Objects/genericaliasobject.c, Lib/__future__.py,
+                       Objects/frameobject.c and Python/structmember.c
+                       (frame.clear()'s checks and the trace attributes'
+                       setters)
   sys.cpp              Python/stdlib_module_names.h (sys.stdlib_module_names),
                        Python/sysmodule.c (the asynchronous generators' hooks)
                        and Python/errors.c (the default unraisable hook)
   tarfile.cpp          Lib/tarfile.py (Copyright (C) 2002 Lars Gustaebel; MIT
                        license: see below)
   text.cpp             Lib/textwrap.py
-  textmodules.cpp      Lib/string.py (Template's pattern) and Modules/binascii.c
-                       (a2b_qp, b2a_qp, a2b_uu and b2a_uu)
+  textmodules.cpp      Lib/string.py (Template's pattern), Modules/binascii.c
+                       (a2b_qp, b2a_qp, a2b_uu, b2a_uu and a2b_base64) and
+                       Lib/base64.py (_b32decode, _85encode, _b85decode,
+                       a85encode and _input_type_check)
   threads.cpp          Lib/threading.py, Lib/_threading_local.py,
                        Modules/_threadmodule.c, Python/thread_pthread.h and
                        Python/thread_nt.h (the stack size's validation)
@@ -284,7 +288,8 @@ names the CPython sources it is derived from.
   tokenize.cpp         Lib/tokenize.py
   _tokenize.cpp        CPython 3.11's Lib/tokenize.py (its regular expressions and
                        its tokenizer), adapted to give CPython 3.13's C
-                       tokenizer's tokens
+                       tokenizer's tokens, and CPython 3.13's Parser/lexer/lexer.c
+                       (its number scanning and identifier verification)
   traceback.cpp        Lib/linecache.py, Lib/traceback.py, Lib/_colorize.py and
                        Python/suggestions.c
   tty.cpp              Lib/tty.py

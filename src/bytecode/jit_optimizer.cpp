@@ -816,6 +816,35 @@ namespace neos
                                 return &iInlines.back();
                             }
                             // --- the code
+                            // (a loop whose first iteration is made ahead of it: one with no loop within it, no result, whose code ends 
+                            // with a branch (its end is not reached), of at most MaxPeeledTokens tokens; not within another's. Larger 
+                            // loops' copies cost more to optimize than the loops then save)
+                            static constexpr std::size_t MaxPeeledTokens = 200u;
+                            bool peeled(std::size_t aBegin, std::size_t aEnd, std::uint64_t aType) const
+                            {
+                                if (iPeeling != 0u || aType != 0x40u)
+                                    return false;
+                                std::uint8_t last = 0u;
+                                std::size_t nest = 0u;
+                                std::size_t tokens = 0u;
+                                for (auto q = aBegin; q < aEnd;)
+                                {
+                                    auto const o = static_cast<std::uint8_t>(iTokens[q]);
+                                    if (o == 0x03u || ++tokens > MaxPeeledTokens)
+                                        return false;
+                                    if (o == 0x02u || o == 0x04u)
+                                        ++nest;
+                                    else if (o == 0x0Bu)
+                                    {
+                                        if (nest != 0u)
+                                            --nest;
+                                    }
+                                    else if (nest == 0u)
+                                        last = o;
+                                    q += 1u + immediates(o, iTokens, q);
+                                }
+                                return last == 0x0Cu;
+                            }
                             std::size_t end_of(std::size_t aPosition, std::size_t aEnd) const
                             {
                                 // (aPosition: after a block, loop or if: the position of its end)
@@ -1021,7 +1050,7 @@ namespace neos
                                 }
                             }
                             // (returns whether the code's end is reached)
-                            bool process(std::size_t aBegin, std::size_t aEnd, inline_context* aInline, std::vector<std::uint32_t> const& aLocals)
+                            bool process(std::size_t aBegin, std::size_t aEnd, inline_context* aInline, std::vector<std::uint32_t> const& aLocals, bool aPart = false)
                             {
                                 // (the code's blocks' ends (its function's), while it is processed)
                                 struct ends_scope
@@ -1032,7 +1061,8 @@ namespace neos
                                     ~ends_scope() { r.iEnds = ends; r.iEndsBase = base; }
                                 } const endsScope{ *this, iEnds, iEndsBase };
                                 iEnds = iOptions.blockEnds ? iOptions.blockEnds(aInline != nullptr ? aInline->callee : iFunction) : nullptr;
-                                iEndsBase = aBegin;
+                                iEndsBase = iEndsBaseNext ? *iEndsBaseNext : aBegin;    // (a part of a function's code (a loop's): its function's)
+                                iEndsBaseNext.reset();
                                 auto const depthBase = iFrames.size();  // (the frames of this code: those above its own (the function's, or the inlined call's))
                                 for (std::size_t p = aBegin; p < aEnd;)
                                 {
@@ -1075,17 +1105,48 @@ namespace neos
                                     case 0x03:
                                         {
                                             auto const loopEnd = end_of(p, aEnd);
-                                            loop_writes(p, loopEnd, aLocals);
-                                            // (its start can be reached again after its effects)
-                                            for (auto q = p; q < loopEnd;)
+                                            auto const loop_start = [&]()
                                             {
-                                                auto const o = static_cast<std::uint8_t>(iTokens[q]);
-                                                if ((o >= 0x36u && o <= 0x3Eu) || o == 0x24u || o == 0x10u || o == 0x11u || o == 0xFEu)
+                                                loop_writes(p, loopEnd, aLocals);
+                                                // (its start can be reached again after its effects)
+                                                for (auto q = p; q < loopEnd;)
                                                 {
-                                                    effect();
+                                                    auto const o = static_cast<std::uint8_t>(iTokens[q]);
+                                                    if ((o >= 0x36u && o <= 0x3Eu) || o == 0x24u || o == 0x10u || o == 0x11u || o == 0xFEu)
+                                                    {
+                                                        effect();
+                                                        break;
+                                                    }
+                                                    q += 1u + immediates(o, iTokens, q);
+                                                }
+                                            };
+                                            loop_start();
+                                            if (peeled(p, loopEnd, imm(0)))
+                                            {
+                                                // (its first iteration, ahead of it (a block of its code: a branch to the loop's start is one 
+                                                // to the block's end, where the loop is; its other branches are as they are): what that 
+                                                // iteration loads and tests is then known in the loop (see ssa's number_values: a loop's head 
+                                                // keeps the memory that the loop does not change), where each iteration would do it again)
+                                                emit(0x02u);
+                                                emit(imm(0));
+                                                begin_frame(frame::Block, block_type(imm(0)));
+                                                iEndsBaseNext = iEndsBase;
+                                                ++iPeeling;
+                                                auto const origin = iOrigin;    // (the loop's own token's: see ssa's osr_path)
+                                                process(p, loopEnd, aInline, aLocals, true);
+                                                iOrigin = origin;
+                                                --iPeeling;
+                                                bool const ended = iReachable;
+                                                iReachable = true;
+                                                emit(0x0Bu);
+                                                end_frame(ended);
+                                                if (!iReachable)
+                                                {
+                                                    // (nothing branches to its start: the loop's code runs once)
+                                                    p = loopEnd + 1u;
                                                     break;
                                                 }
-                                                q += 1u + immediates(o, iTokens, q);
+                                                loop_start();
                                             }
                                             emit(op);
                                             emit(imm(0));
@@ -1460,6 +1521,8 @@ namespace neos
                                         break;
                                     }
                                 }
+                                if (aPart)
+                                    return iReachable;  // (a part of a function's code (a loop's: see peeled): no end of its own)
                                 throw cannot_optimize{ "unterminated code" };
                             }
                             void load(std::uint8_t aOp, std::uint64_t aMemarg, std::uint64_t aOffset)
@@ -1616,6 +1679,30 @@ namespace neos
                                     if (inline_call(aCallee, aInline != nullptr ? callPosition : aPosition, aPosition))
                                         return;
                                     restore(before);
+                                }
+                                if (aInline != nullptr && !iInlines.empty() && !iModule.functions[iInlines.back().callee].frameless &&
+                                    iOptions.deopt && iOptions.coldCall && !iOptions.noDeopt.contains(iInlines.front().call))
+                                {
+                                    // (a call that its code has never made (see options::coldCall), in the code of an inlined function with
+                                    // a frame of its own, the outermost inlined call in a loop of the function's own code, with no effect 
+                                    // since that call began: the function's own code makes that call instead (the code leaves: the loop then
+                                    // has no call there whose path joins the others', so what is known of memory at the loop's head holds 
+                                    // around it: see ssa's number_values))
+                                    bool ownLoop = iPeeling != 0u;  // (a loop's first iteration, made ahead of it (see peeled), is its loop's code)
+                                    for (auto const& enclosing : iFrames)
+                                    {
+                                        if (enclosing.kind == frame::Inline)
+                                            break;
+                                        if (enclosing.kind == frame::Loop)
+                                            ownLoop = true;
+                                    }
+                                    if (ownLoop && iOptions.coldCall(aPosition) && can_deopt(iInlines.front(), effect_free(iInlines.front())))
+                                    {
+                                        emit_deopt(iInlines.front(), false);
+                                        unwind();
+                                        iReachable = false;
+                                        return;
+                                    }
                                 }
                                 if (aInline != nullptr && !iInlines.empty() && iModule.functions[iInlines.back().callee].frameless &&
                                     !iOptions.noDeopt.contains(iInlines.front().call) &&
@@ -2060,6 +2147,8 @@ namespace neos
                             std::vector<std::uint8_t> iDeleted;  // (bytes, not bits: read for each token)
                             std::uint32_t const* iEnds = nullptr;       ///< (the blocks' ends of the code being processed (see options::blockEnds))
                             std::size_t iEndsBase = 0u;                 ///< (its function's code's start)
+                            std::optional<std::size_t> iEndsBaseNext;   ///< (the next process() call's code is part of this function's code: its ends' base)
+                            std::size_t iPeeling = 0u;                  ///< (within a loop's first iteration made ahead of it: see peeled)
                             std::vector<std::size_t> iDeletions;        ///< (the tokens deleted, in order (see restore))
                             std::size_t iOrigin = 0u;
                             std::vector<std::uint8_t> iLocalTypes;

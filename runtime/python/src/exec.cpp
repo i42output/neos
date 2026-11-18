@@ -675,6 +675,19 @@ namespace neos::python_runtime
                 set("__builtins__", builtins.release_ownership());
                 if (std::strcmp(aName, "__main__") == 0)
                     set("__cached__", (retain(none()), none()));
+                // (a source module's file (its __file__, and its __cached__: none))
+                else if (modules_imported(aName))
+                {
+                    ref const module{ fn_import(aName) };
+                    ref file{ module ? getattr(module.get(), "__file__") : nullptr };
+                    if (file && kind_of(file.get()) == NEOS_PY_STR && !as<str_object>(file.get())->value.empty())
+                    {
+                        set("__file__", file.release_ownership());
+                        set("__cached__", (retain(none()), none()));
+                    }
+                    else
+                        clear_error();
+                }
             }
             if (aGetter == nullptr || kind_of(aGetter) == NEOS_PY_NONE)
             {
@@ -832,17 +845,79 @@ namespace neos::python_runtime
         // python::exec_lookup(name): a name of code that exec runs (in its locals, its globals, then the builtins)
         object* fn_exec_lookup(char const* aName)
         {
+            return exec_lookup(aName, true);
+        }
+
+        // python::exec_global_lookup(name): a name that a function of code that exec runs reads (in its globals, then the builtins)
+        object* fn_exec_global_lookup(char const* aName)
+        {
+            return exec_lookup(aName, false);
+        }
+
+        namespace
+        {
+            // (a module's namespace (globals(): a dict whose binder is the module's getter): a name of the module's (its getter's) is its 
+            // variable's, which the dict's item is the value of only as of the last globals(): its value (null: unbound, or an exception), 
+            // else (not one of the module's names) false)
+            bool module_namespace_value(object* aNamespace, char const* aName, object*& aValue)
+            {
+                if (kind_of(aNamespace) != NEOS_PY_DICT || as<dict_object>(aNamespace)->binder == nullptr)
+                    return false;
+                auto const getter = as<dict_object>(aNamespace)->binder;
+                // (the getters' names: by their indexes (the getters are the modules', which stay))
+                static std::mutex sMutex;
+                static std::map<object*, std::map<std::string, long long, std::less<>>> sIndexes;
+                std::map<std::string, long long, std::less<>> const* indexes = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock{ sMutex };
+                    if (auto const existing = sIndexes.find(getter); existing != sIndexes.end())
+                        indexes = &existing->second;
+                }
+                if (indexes == nullptr)
+                {
+                    ref const names{ call_module_getter(getter, -1) };
+                    if (!names || kind_of(names.get()) != NEOS_PY_TUPLE)
+                    {
+                        clear_error();
+                        return false;
+                    }
+                    std::map<std::string, long long, std::less<>> made;
+                    auto const& items = as<tuple_object>(names.get())->items;
+                    for (std::size_t i = 0u; i < items.size(); ++i)
+                        if (kind_of(items[i]) == NEOS_PY_STR)
+                            made.emplace(as<str_object>(items[i])->value, static_cast<long long>(i));
+                    std::lock_guard<std::mutex> lock{ sMutex };
+                    retain(getter);
+                    indexes = &sIndexes.emplace(getter, std::move(made)).first->second;
+                }
+                auto const index = indexes->find(std::string_view{ aName });
+                if (index == indexes->end())
+                    return false;
+                aValue = call_module_getter(getter, index->second);
+                return true;
+            }
+        }
+
+        // (a name of code that exec runs: in its locals (aLocals: its top level's), its globals (a module's namespace: its variables), then 
+        // the builtins)
+        object* exec_lookup(char const* aName, bool aLocals)
+        {
             if (!tNamespaces.empty())
             {
                 auto const& ns = tNamespaces.back();
-                if (ns.locals != nullptr)
+                if (aLocals && ns.locals != nullptr)
                 {
                     if (auto const value = mapping_find(ns.locals, aName))
                         return value;
                     if (failed())
                         return nullptr;
                 }
-                if (auto const value = mapping_find(ns.globals, aName))
+                if (object* value = nullptr; module_namespace_value(ns.globals, aName, value))
+                {
+                    if (value != nullptr || failed())
+                        return value;
+                }
+                else if (auto const value = mapping_find(ns.globals, aName))
                     return value;
                 if (failed())
                     return nullptr;
@@ -873,10 +948,12 @@ namespace neos::python_runtime
             return tNamespaces.back().globals;
         }
 
-        // python::exec_read(name, value): a variable of code that exec runs (unbound (null): its namespaces')
+        // python::exec_read(name, value): a variable of code that exec runs: its namespaces' (they are its names', which its bindings bind as 
+        // they bind them (python::exec_store): what else binds or deletes in them is seen), else the builtins; the variable's value (aValue) 
+        // only without them (code that exec does not run)
         object* fn_exec_read(char const* aName, object* aValue)
         {
-            if (aValue != nullptr)
+            if (aValue != nullptr && tNamespaces.empty())
             {
                 retain(aValue);
                 return aValue;
@@ -900,12 +977,51 @@ namespace neos::python_runtime
         // python::exec_store(name, value): a name that code that exec runs binds (its locals', or its globals')
         void fn_exec_store(char const* aName, object* aValue)
         {
+            exec_store(aName, aValue, true);
+        }
+
+        // python::exec_global_store(name, value): a name of its module that a function of code that exec runs binds (global name): its globals'
+        void fn_exec_global_store(char const* aName, object* aValue)
+        {
+            exec_store(aName, aValue, false);
+        }
+
+        void exec_store(char const* aName, object* aValue, bool aLocals)
+        {
             if (aValue == nullptr || tNamespaces.empty())
                 return;
             auto const& ns = tNamespaces.back();
-            auto const target = ns.locals != nullptr ? ns.locals : ns.globals;
+            auto const target = aLocals && ns.locals != nullptr ? ns.locals : ns.globals;
             ref const key{ make_str(aName) };
             setitem(target, key.get(), aValue);
+        }
+
+        // python::exec_delete(name): a name that code that exec runs deletes (del name): its locals', or its globals' (NameError if it has none)
+        void fn_exec_delete(char const* aName)
+        {
+            exec_delete(aName, true);
+        }
+
+        // python::exec_global_delete(name): a name of its module that a function of code that exec runs deletes (global name): its globals'
+        void fn_exec_global_delete(char const* aName)
+        {
+            exec_delete(aName, false);
+        }
+
+        void exec_delete(char const* aName, bool aLocals)
+        {
+            if (tNamespaces.empty())
+                return;
+            auto const& ns = tNamespaces.back();
+            auto const target = aLocals && ns.locals != nullptr ? ns.locals : ns.globals;
+            ref const key{ make_str(aName) };
+            if (setitem(target, key.get(), nullptr) == 0)
+                return;
+            if (std::string_view{ error_text() }.starts_with("KeyError"))
+            {
+                clear_error();
+                error("NameError", "name '" + std::string{ aName } + "' is not defined");
+            }
         }
 
         // __exec_result(value): eval's result

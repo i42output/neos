@@ -2334,12 +2334,21 @@ namespace neos::python_runtime::detail
                         isType = true;
                 if (!isType)
                 {
-                    // (obj.__init__ is object.__init__ and obj.__new__ is object.__new__: none of its classes but object defines them (a builtin 
-                    // type other than object (e.g. dict) has its own))
+                    // (obj.__init__ is object.__init__ and obj.__new__ is object.__new__ (unwrapped, if wrapper chains are followed: e.g. a 
+                    // deprecated class's __new__); a builtin type other than object (e.g. dict) has its own)
                     bool own = false;
                     for (auto const& base : mro)
-                        if (!base.is(builtin("object")) && (is_type_object(base.get()) || dict_of(base).contains(py{ "__init__" }) || dict_of(base).contains(py{ "__new__" })))
+                        if (!base.is(builtin("object")) && is_type_object(base.get()))
                             own = true;
+                    py objectInit = aObject.attr("__init__");
+                    py objectNew = aObject.attr("__new__");
+                    if (aOptions.followWrapperChains)
+                    {
+                        objectInit = unwrap(objectInit, {});
+                        objectNew = unwrap(objectNew, {});
+                    }
+                    if (!objectInit.is(builtin("object").attr("__init__")) || !objectNew.is(builtin("object").attr("__new__")))
+                        own = true;
                     if (!own)
                         return aOptions.sigcls.attr("from_callable")(builtin("object"));
                     py_raise("ValueError", "no signature found for builtin type " + aObject.repr());

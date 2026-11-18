@@ -50,6 +50,7 @@
 #include <map>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -618,7 +619,8 @@ namespace neos::python_runtime
         }
 
         // --- memoryview (CPython 3.13's memoryobject.c: a one-dimensional view of an exporter's buffer (bytes, bytearray or a provider's object): its 
-        // items [start, start + count * stride), of a native struct format)
+        // items [start, start + count * stride), of a native struct format; or a view of other than one dimension (cast's, of a shape, and slices
+        // of it): its items at start + the sum of their indexes * its dimensions' strides (count: their number))
 
         namespace
         {
@@ -656,6 +658,10 @@ namespace neos::python_runtime
                 bool counted = true;        ///< (an export of its exporter's buffer (a restricted view is not))
                 object* wrapperView = nullptr;      ///< (a view of the view that a class's __buffer__ returned: that view (CPython's _PyBufferWrapper's mv))
                 object* wrapperObject = nullptr;    ///< (and the object whose __buffer__ it is (its obj))
+                bool multi = false;                 ///< (a view of other than one dimension: its shape and strides (none: 0 dimensions))
+                std::vector<std::size_t> shape;
+                std::vector<long long> strides;
+                std::size_t ndim() const { return multi ? shape.size() : 1u; }
                 void unexport()
                 {
                     if (released)
@@ -737,31 +743,88 @@ namespace neos::python_runtime
                 return native_format(aFormat, code) != 0u && (code == 'B' || code == 'b' || code == 'c');
             }
 
-            // (the view's exporter's buffer, and the number of the view's items that are in it (a bytearray can have been resized))
+            // (the view's exporter's buffer, and the number of the view's items that are in it (a bytearray can have been resized); of a view 
+            // of other than one dimension: all of them, or none)
             std::size_t view_buffer(memoryview_object const& aView, buffer_info& aBuffer)
             {
                 if (!exporter_buffer(aView.base, aBuffer))
                     return 0u;
                 if (aView.count == 0u || aView.start + aView.itemsize > aBuffer.size)
                     return 0u;
+                if (aView.multi)
+                {
+                    long long low = static_cast<long long>(aView.start);
+                    long long high = low;
+                    for (std::size_t d = 0u; d < aView.shape.size(); ++d)
+                        (aView.strides[d] < 0 ? low : high) += static_cast<long long>(aView.shape[d] - 1u) * aView.strides[d];
+                    return low >= 0 && high + static_cast<long long>(aView.itemsize) <= static_cast<long long>(aBuffer.size) ? aView.count : 0u;
+                }
                 if (aView.stride > 0)
                     return std::min(aView.count, (aBuffer.size - aView.start - aView.itemsize) / static_cast<std::size_t>(aView.stride) + 1u);
                 return std::min(aView.count, aView.start / static_cast<std::size_t>(-aView.stride) + 1u);
             }
 
-            bool view_contiguous(memoryview_object const& aView)
+            // (C-contiguous (aFortran: Fortran-contiguous): its items are its buffer's bytes, in order (CPython's _IsCContiguous and _IsFortranContiguous))
+            bool view_contiguous(memoryview_object const& aView, bool aFortran = false)
             {
-                return aView.count <= 1u || aView.stride == static_cast<long long>(aView.itemsize);
+                if (!aView.multi)
+                    return aView.count <= 1u || aView.stride == static_cast<long long>(aView.itemsize);
+                if (aView.count == 0u)
+                    return true;
+                auto sd = static_cast<long long>(aView.itemsize);
+                auto const n = aView.shape.size();
+                for (std::size_t i = 0u; i < n; ++i)
+                {
+                    auto const d = aFortran ? i : n - 1u - i;
+                    if (aView.shape[d] > 1u && aView.strides[d] != sd)
+                        return false;
+                    sd *= static_cast<long long>(aView.shape[d]);
+                }
+                return true;
             }
 
-            // (its bytes (C order))
-            std::string_view view_data(memoryview_object& aView)
+            // (the offsets of the items of a view of other than one dimension, in C order (aFortran: Fortran order))
+            template <typename F>
+            void for_each_offset(memoryview_object const& aView, F aFunction, bool aFortran = false)
+            {
+                auto const n = aView.shape.size();
+                if (aView.count == 0u)
+                    return;
+                std::vector<std::size_t> index(n, 0u);
+                for (;;)
+                {
+                    auto offset = static_cast<long long>(aView.start);
+                    for (std::size_t d = 0u; d < n; ++d)
+                        offset += static_cast<long long>(index[d]) * aView.strides[d];
+                    aFunction(offset);
+                    // (the next index: its last dimension's (aFortran: its first's) first)
+                    std::size_t i = 0u;
+                    for (; i < n; ++i)
+                    {
+                        auto const d = aFortran ? i : n - 1u - i;
+                        if (++index[d] < aView.shape[d])
+                            break;
+                        index[d] = 0u;
+                    }
+                    if (i == n)
+                        return;
+                }
+            }
+
+            // (its bytes (C order; aFortran: Fortran order))
+            std::string_view view_data(memoryview_object& aView, bool aFortran = false)
             {
                 buffer_info buffer;
                 auto const n = view_buffer(aView, buffer);
-                if (view_contiguous(aView))
+                if (view_contiguous(aView, aFortran && aView.multi))
                     return n == 0u ? std::string_view{} : std::string_view{ buffer.data + aView.start, n * aView.itemsize };
                 aView.gathered.clear();
+                if (aView.multi)
+                {
+                    if (n != 0u)
+                        for_each_offset(aView, [&](long long aOffset) { aView.gathered.append(buffer.data + aOffset, aView.itemsize); }, aFortran);
+                    return aView.gathered;
+                }
                 for (std::size_t i = 0u; i < n; ++i)
                     aView.gathered.append(buffer.data + static_cast<long long>(aView.start) + static_cast<long long>(i) * aView.stride, aView.itemsize);
                 return aView.gathered;
@@ -778,6 +841,17 @@ namespace neos::python_runtime
             object* make_view(memoryview_object const& aView, std::size_t aStart, std::size_t aCount, long long aStride)
             {
                 return make_view(aView.base, aStart, aCount, aStride, aView.format, aView.itemsize, aView.readonly);
+            }
+
+            // (a view of the same items (and dimensions) as a view's)
+            object* copy_view(memoryview_object const& aView, bool aReadonly)
+            {
+                auto const result = make_view(aView.base, aView.start, aView.count, aView.stride, aView.format, aView.itemsize, aReadonly);
+                auto& copy = as_memoryview(result);
+                copy.multi = aView.multi;
+                copy.shape = aView.shape;
+                copy.strides = aView.strides;
+                return result;
             }
 
             // --- the buffer protocol of Python classes (PEP 688: __buffer__ and __release_buffer__; CPython 3.13's typeobject.c 
@@ -838,6 +912,9 @@ namespace neos::python_runtime
                 retain(aView.base);
                 auto const restricted = new memoryview_object{ { { &sMemoryviewType.base } }, aView.base, aView.start, aView.count, aView.stride, aView.format, 
                     aView.itemsize, aView.readonly };
+                restricted->multi = aView.multi;
+                restricted->shape = aView.shape;
+                restricted->strides = aView.strides;
                 restricted->restricted = true;
                 restricted->counted = false;
                 ref const view{ &restricted->h.base };
@@ -857,7 +934,7 @@ namespace neos::python_runtime
                         return nullptr;
                     if (writable && view.readonly)
                         return error("BufferError", "memoryview: underlying buffer is not writable");
-                    return make_view(view, view.start, view.count, view.stride);
+                    return copy_view(view, view.readonly);
                 }
                 if (ref const method{ is_instance(aObject) ? special_method(aObject, "__buffer__") : nullptr })
                 {
@@ -878,7 +955,7 @@ namespace neos::python_runtime
                     }
                     if (writable && inner.readonly)
                         return error("BufferError", "memoryview: underlying buffer is not writable");
-                    auto const outer = make_view(inner, inner.start, inner.count, inner.stride);
+                    auto const outer = copy_view(inner, inner.readonly);
                     as_memoryview(outer).wrapperView = new_reference(result.get());
                     as_memoryview(outer).wrapperObject = new_reference(aObject);
                     return outer;
@@ -1073,6 +1150,27 @@ namespace neos::python_runtime
             {
                 buffer_info buffer;
                 auto const n = view_buffer(aView, buffer);
+                if (aView.multi)
+                {
+                    // (its items in C order)
+                    bool ok = true;
+                    if (n != 0u)
+                        for_each_offset(aView, [&](long long aOffset)
+                        {
+                            auto const item = ok ? unpack_item(buffer.data + aOffset, aView.format) : nullptr;
+                            if (item == nullptr)
+                                ok = false;
+                            else
+                                aItems.push_back(item);
+                        });
+                    if (!ok)
+                    {
+                        for (auto v : aItems)
+                            release(v);
+                        aItems.clear();
+                    }
+                    return ok;
+                }
                 for (std::size_t i = 0u; i < n; ++i)
                 {
                     auto const item = unpack_item(buffer.data + static_cast<long long>(aView.start) + static_cast<long long>(i) * aView.stride, aView.format);
@@ -1095,6 +1193,9 @@ namespace neos::python_runtime
                 if (!view_contiguous(aView))
                     return error("TypeError", "memoryview: casts are restricted to C-contiguous views");
                 std::size_t dimensions = 1u;
+                // (no zeros in its shape (a view of other than one dimension's, or one cast to a shape))
+                if ((aShape != nullptr || aView.ndim() != 1u) && (aView.multi ? std::find(aView.shape.begin(), aView.shape.end(), 0u) != aView.shape.end() : aView.count == 0u))
+                    return error("TypeError", "memoryview: cannot cast view with zeros in shape or strides");
                 if (aShape != nullptr)
                 {
                     if (kind_of(aShape) != NEOS_PY_LIST && kind_of(aShape) != NEOS_PY_TUPLE)
@@ -1102,6 +1203,8 @@ namespace neos::python_runtime
                     dimensions = static_cast<std::size_t>(length(aShape));
                     if (dimensions > 64u)
                         return error("ValueError", "memoryview: number of dimensions must not exceed 64");
+                    if (aView.ndim() != 1u && dimensions != 1u)
+                        return error("TypeError", "memoryview: cast must be 1D -> ND or ND -> 1D");
                 }
                 std::string const format = as<str_object>(aFormat)->value;
                 char destination = 0;
@@ -1114,15 +1217,18 @@ namespace neos::python_runtime
                 auto const bytes = view_buffer(aView, buffer) * aView.itemsize;
                 if (bytes % itemsize != 0u)
                     return error("TypeError", "memoryview: length is not a multiple of itemsize");
+                std::vector<std::size_t> shape;
                 if (aShape != nullptr)
                 {
                     std::vector<object*> items;
                     if (!collect(aShape, items))
                         return nullptr;
+                    std::vector<ref> owners;
+                    for (auto i : items)
+                        owners.emplace_back(i);
                     std::size_t total = itemsize;
                     for (auto i : items)
                     {
-                        ref const owner{ i };
                         long long x = 0;
                         if (kind_of(i) != NEOS_PY_INT)
                             return error("TypeError", "memoryview.cast(): elements of shape must be integers");
@@ -1131,15 +1237,29 @@ namespace neos::python_runtime
                         if (x <= 0)
                             return error("ValueError", "memoryview.cast(): elements of shape must be integers > 0");
                         total *= static_cast<std::size_t>(x);
+                        shape.push_back(static_cast<std::size_t>(x));
                     }
                     if (dimensions == 0u)
                         total = itemsize;
                     if (total != bytes)
                         return error("TypeError", "memoryview: product(shape) * itemsize != buffer size");
-                    if (dimensions != 1u)
-                        return error("NotImplementedError", "memoryview: only one-dimensional views are supported");
                 }
-                return make_view(aView.base, aView.start, bytes / itemsize, static_cast<long long>(itemsize), format, itemsize, aView.readonly);
+                auto const result = make_view(aView.base, aView.start, bytes / itemsize, static_cast<long long>(itemsize), format, itemsize, aView.readonly);
+                // (of other than one dimension: C-contiguous)
+                if (aShape != nullptr && dimensions != 1u)
+                {
+                    auto& view = as_memoryview(result);
+                    view.multi = true;
+                    view.shape = std::move(shape);
+                    view.strides.assign(view.shape.size(), 0);
+                    auto sd = static_cast<long long>(itemsize);
+                    for (std::size_t d = view.shape.size(); d-- > 0u;)
+                    {
+                        view.strides[d] = sd;
+                        sd *= static_cast<long long>(view.shape[d]);
+                    }
+                }
+                return result;
             }
 
             object* view_method(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
@@ -1183,6 +1303,9 @@ namespace neos::python_runtime
                             return error("TypeError", std::string{ "tobytes() argument 'order' must be str or None, not " } + type_name(a[0]));
                         if (*order != "C" && *order != "F" && *order != "A")
                             return error("ValueError", "order must be 'C', 'F' or 'A'");
+                        // (Fortran order; 'A': Fortran order if it is Fortran-contiguous and not C-contiguous)
+                        if (*order == "F" || (*order == "A" && view.multi && view_contiguous(view, true) && !view_contiguous(view)))
+                            return make_bytes(std::string{ view_data(view, true) });
                     }
                     return make_bytes(std::string{ view_data(view) });
                 }
@@ -1193,7 +1316,20 @@ namespace neos::python_runtime
                     std::vector<object*> values;
                     if (!view_items(view, values))
                         return nullptr;
-                    return make_list(std::move(values));
+                    if (!view.multi)
+                        return make_list(std::move(values));
+                    // (of other than one dimension: nested lists (of 0 dimensions: its item))
+                    if (view.shape.empty())
+                        return values.empty() ? make_list() : values[0];
+                    std::size_t next = 0u;
+                    std::function<object*(std::size_t)> nested = [&](std::size_t aDimension) -> object*
+                    {
+                        std::vector<object*> list;
+                        for (std::size_t i = 0u; i < view.shape[aDimension]; ++i)
+                            list.push_back(aDimension + 1u == view.shape.size() ? (next < values.size() ? values[next++] : (retain(none()), none())) : nested(aDimension + 1u));
+                        return make_list(std::move(list));
+                    };
+                    return nested(0u);
                 }
                 if (name == "hex")
                 {
@@ -1211,7 +1347,7 @@ namespace neos::python_runtime
                         return nullptr;
                     if (!unrestricted(view))
                         return nullptr;
-                    return make_view(view.base, view.start, view.count, view.stride, view.format, view.itemsize, true);
+                    return copy_view(view, true);
                 }
                 // (cast)
                 if (!parse_arguments(qualified.c_str(), rest, aKwargs, { "format", "shape" }, 1u, 0u, a))
@@ -1221,8 +1357,8 @@ namespace neos::python_runtime
                 return view_cast(view, a[0], a[1]);
             }
 
-            // (another object's buffer as a view's: its format, items and their bytes)
-            bool other_buffer(object* aObject, std::string& aFormat, std::size_t& aItemsize, std::size_t& aCount, std::string& aBytes)
+            // (another object's buffer as a view's: its format, items and their bytes (C order), and its shape (aShape, if wanted))
+            bool other_buffer(object* aObject, std::string& aFormat, std::size_t& aItemsize, std::size_t& aCount, std::string& aBytes, std::vector<std::size_t>* aShape = nullptr)
             {
                 if (is_memoryview(aObject))
                 {
@@ -1234,6 +1370,8 @@ namespace neos::python_runtime
                     aFormat = other.format;
                     aItemsize = other.itemsize;
                     aBytes = std::string{ view_data(other) };
+                    if (aShape != nullptr)
+                        *aShape = other.multi ? other.shape : std::vector<std::size_t>{ aCount };
                     return true;
                 }
                 buffer_info buffer;
@@ -1242,11 +1380,140 @@ namespace neos::python_runtime
                 aFormat = buffer.format;
                 aItemsize = buffer.itemsize;
                 aCount = buffer.size / buffer.itemsize;
+                if (aShape != nullptr)
+                    *aShape = { aCount };
                 aBytes = std::string{ buffer.data == nullptr ? std::string_view{} : std::string_view{ buffer.data, buffer.size } };
                 return true;
             }
 
             std::string bare_format(std::string const& aFormat) { return !aFormat.empty() && aFormat[0] == '@' ? aFormat.substr(1u) : aFormat; }
+
+            // (the offset of the item of a view of other than one dimension at a tuple of indexes (CPython's ptr_from_tuple and lookup_dimension): 
+            // false if it has none)
+            bool multi_offset(memoryview_object const& aView, std::vector<object*> const& aIndexes, long long& aOffset)
+            {
+                if (aIndexes.size() > aView.shape.size())
+                    return (error("TypeError", "cannot index " + std::to_string(aView.shape.size()) + "-dimension view with " + std::to_string(aIndexes.size()) + 
+                        "-element tuple"), false);
+                aOffset = static_cast<long long>(aView.start);
+                for (std::size_t d = 0u; d < aIndexes.size(); ++d)
+                {
+                    long long index = 0;
+                    if (!view_index(aIndexes[d], index))
+                        return false;
+                    auto const n = static_cast<long long>(aView.shape[d]);
+                    if (index < 0)
+                        index += n;
+                    if (index < 0 || index >= n)
+                        return (error("IndexError", "index out of bounds on dimension " + std::to_string(d + 1u)), false);
+                    aOffset += index * aView.strides[d];
+                }
+                return true;
+            }
+
+            bool multi_slice(object* aKey)
+            {
+                if (kind_of(aKey) != NEOS_PY_TUPLE)
+                    return false;
+                auto const& keys = as<tuple_object>(aKey)->items;
+                return !keys.empty() && std::all_of(keys.begin(), keys.end(), [](object* k) { return kind_of(k) == NEOS_PY_SLICE; });
+            }
+
+            // (an item of a view of other than one dimension (memory_subscript's): of 0 dimensions, its item (()) or itself (...); a slice: a
+            // view of its first dimension's; a tuple of all of its indexes: an item)
+            object* multi_item(object* aSelf, object* aKey)
+            {
+                auto& view = as_memoryview(aSelf);
+                if (view.shape.empty())
+                {
+                    if (kind_of(aKey) == NEOS_PY_TUPLE && as<tuple_object>(aKey)->items.empty())
+                    {
+                        buffer_info buffer;
+                        if (view_buffer(view, buffer) == 0u)
+                            return error("IndexError", "index out of bounds on dimension 1");
+                        return unpack_item(buffer.data + view.start, view.format);
+                    }
+                    if (kind_of(aKey) == NEOS_PY_ELLIPSIS)
+                        return (retain(aSelf), aSelf);
+                    return error("TypeError", "invalid indexing of 0-dim memory");
+                }
+                if (index_key(aKey))
+                {
+                    long long index = 0;
+                    if (!view_index(aKey, index) || !view_checked(view))
+                        return nullptr;
+                    return error("NotImplementedError", "multi-dimensional sub-views are not implemented");
+                }
+                if (kind_of(aKey) == NEOS_PY_SLICE)
+                {
+                    if (!unrestricted(view))
+                        return nullptr;
+                    long long start = 0, stop = 0, step = 0;
+                    if (!slice_indices(aKey, static_cast<long long>(view.shape[0]), start, stop, step))
+                        return nullptr;
+                    auto const result = copy_view(view, view.readonly);
+                    auto& sliced = as_memoryview(result);
+                    sliced.start = static_cast<std::size_t>(static_cast<long long>(view.start) + start * view.strides[0]);
+                    sliced.shape[0] = slice_count(start, stop, step);
+                    sliced.strides[0] = view.strides[0] * step;
+                    sliced.count = 1u;
+                    for (auto d : sliced.shape)
+                        sliced.count *= d;
+                    return result;
+                }
+                if (kind_of(aKey) == NEOS_PY_TUPLE && std::all_of(as<tuple_object>(aKey)->items.begin(), as<tuple_object>(aKey)->items.end(), index_key))
+                {
+                    auto const& keys = as<tuple_object>(aKey)->items;
+                    if (keys.size() < view.shape.size())
+                        return error("NotImplementedError", "sub-views are not implemented");
+                    long long offset = 0;
+                    if (!multi_offset(view, keys, offset) || !view_checked(view))
+                        return nullptr;
+                    buffer_info buffer;
+                    if (view_buffer(view, buffer) == 0u)
+                        return error("IndexError", "index out of bounds on dimension 1");
+                    return unpack_item(buffer.data + offset, view.format);
+                }
+                if (multi_slice(aKey))
+                    return error("NotImplementedError", "multi-dimensional slicing is not implemented");
+                return error("TypeError", "memoryview: invalid slice key");
+            }
+
+            // (an item of a view of other than one dimension set (memory_ass_sub's))
+            int set_multi_item(object* aSelf, object* aKey, object* aValue)
+            {
+                auto& view = as_memoryview(aSelf);
+                ref const self{ ref::borrowed(aSelf) };
+                long long offset = static_cast<long long>(view.start);
+                if (view.shape.empty())
+                {
+                    if (kind_of(aKey) != NEOS_PY_ELLIPSIS && !(kind_of(aKey) == NEOS_PY_TUPLE && as<tuple_object>(aKey)->items.empty()))
+                        return (error("TypeError", "invalid indexing of 0-dim memory"), -1);
+                }
+                else if (index_key(aKey))
+                    return (error("NotImplementedError", "sub-views are not implemented"), -1);
+                else if (kind_of(aKey) == NEOS_PY_TUPLE && std::all_of(as<tuple_object>(aKey)->items.begin(), as<tuple_object>(aKey)->items.end(), index_key))
+                {
+                    auto const& keys = as<tuple_object>(aKey)->items;
+                    if (keys.size() < view.shape.size())
+                        return (error("NotImplementedError", "sub-views are not implemented"), -1);
+                    if (!multi_offset(view, keys, offset))
+                        return -1;
+                }
+                else if (kind_of(aKey) == NEOS_PY_SLICE || multi_slice(aKey))
+                    return (error("NotImplementedError", "memoryview slice assignments are currently restricted to ndim = 1"), -1);
+                else
+                    return (error("TypeError", "memoryview: invalid slice key"), -1);
+                // (the value's code (__index__, __float__, ...) can release it: then nothing is written)
+                std::string value(view.itemsize, '\0');
+                if (!pack_item(value.data(), aValue, view.format) || !view_checked(view))
+                    return -1;
+                buffer_info buffer;
+                if (view_buffer(view, buffer) == 0u)
+                    return (error("IndexError", "index out of bounds on dimension 1"), -1);
+                std::memcpy(buffer.data + offset, value.data(), view.itemsize);
+                return 0;
+            }
 
             neos_py_type make_memoryview_type()
             {
@@ -1277,17 +1544,28 @@ namespace neos::python_runtime
                     if (name == "itemsize")
                         return make_int(static_cast<long long>(view.itemsize));
                     if (name == "ndim")
-                        return make_int(1);
+                        return make_int(static_cast<long long>(view.ndim()));
                     if (name == "format")
                         return make_str(view.format);
+                    if (view.multi && (name == "shape" || name == "strides"))
+                    {
+                        std::vector<object*> values;
+                        for (std::size_t d = 0u; d < view.shape.size(); ++d)
+                            values.push_back(make_int(name == "shape" ? static_cast<long long>(view.shape[d]) : view.strides[d]));
+                        return make_tuple(std::move(values));
+                    }
                     if (name == "shape")
                         return make_tuple({ make_int(n) });
                     if (name == "strides")
                         return make_tuple({ make_int(view.stride) });
                     if (name == "suboffsets")
                         return make_tuple();
-                    if (name == "c_contiguous" || name == "f_contiguous" || name == "contiguous")
+                    if (name == "c_contiguous")
                         return make_bool(view_contiguous(view));
+                    if (name == "f_contiguous")
+                        return make_bool(view_contiguous(view, true));
+                    if (name == "contiguous")
+                        return make_bool(view_contiguous(view) || view_contiguous(view, true));
                     return error("AttributeError", std::string{ "'memoryview' object has no attribute '" } + aName + "'");
                 };
                 type.length = [](neos_py_context*, object* aSelf) -> long long
@@ -1295,6 +1573,16 @@ namespace neos::python_runtime
                     auto const& view = as_memoryview(aSelf);
                     if (!view_checked(view))
                         return -1;
+                    // (its first dimension's; 0 dimensions: none)
+                    if (view.multi)
+                    {
+                        if (view.shape.empty())
+                        {
+                            error("TypeError", "0-dim memory has no length");
+                            return -1;
+                        }
+                        return static_cast<long long>(view.shape[0]);
+                    }
                     buffer_info buffer;
                     return static_cast<long long>(view_buffer(view, buffer));
                 };
@@ -1305,6 +1593,8 @@ namespace neos::python_runtime
                     auto const& view = as_memoryview(aSelf);
                     if (!view_checked(view))
                         return nullptr;
+                    if (view.multi)
+                        return multi_item(aSelf, aKey);
                     if (kind_of(aKey) == NEOS_PY_SLICE)
                     {
                         buffer_info buffer;
@@ -1367,6 +1657,8 @@ namespace neos::python_runtime
                         error("TypeError", "cannot delete memory");
                         return -1;
                     }
+                    if (view.multi)
+                        return set_multi_item(aSelf, aKey, aValue);
                     // (memory_ass_sub's, of a one-dimensional view; code that the key or the value runs (__index__, __float__, ...) can 
                     // release it: then nothing is written (CHECK_RELEASED_INT_AGAIN))
                     ref const self{ ref::borrowed(aSelf) };
@@ -1375,10 +1667,16 @@ namespace neos::python_runtime
                         // (the rvalue is an exporter (its buffer first, as PyObject_GetBuffer's))
                         std::string format, bytes;
                         std::size_t itemsize = 0u, items = 0u;
-                        if (!other_buffer(aValue, format, itemsize, items, bytes))
+                        std::vector<std::size_t> shape;
+                        if (!other_buffer(aValue, format, itemsize, items, bytes, &shape))
                         {
                             if (!failed())
                                 error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(aValue) + "'");
+                            return -1;
+                        }
+                        if (shape.size() != 1u)
+                        {
+                            error("ValueError", "memoryview assignment: lvalue and rvalue have different structures");
                             return -1;
                         }
                         buffer_info buffer;
@@ -1468,6 +1766,8 @@ namespace neos::python_runtime
                     auto& view = as_memoryview(aSelf);
                     if (!view_checked(view))
                         return nullptr;
+                    if (view.multi)
+                        return view.shape.empty() ? error("TypeError", "invalid indexing of 0-dim memory") : error("NotImplementedError", "multi-dimensional sub-views are not implemented");
                     std::vector<object*> values;
                     if (!view_items(view, values))
                         return nullptr;
@@ -1486,14 +1786,16 @@ namespace neos::python_runtime
                         return make_bool((aLhs == aRhs) == eq);
                     std::string format, bytes;
                     std::size_t itemsize = 0u, count = 0u;
-                    if (!other_buffer(aRhs, format, itemsize, count, bytes))
+                    std::vector<std::size_t> shape;
+                    if (!other_buffer(aRhs, format, itemsize, count, bytes, &shape))
                     {
                         clear_error();
                         return not_implemented();
                     }
                     buffer_info buffer;
                     auto const n = view_buffer(view, buffer);
-                    if (n != count)
+                    // (their shapes (CPython's equiv_shape), then their items)
+                    if (n != count || (view.multi ? view.shape : std::vector<std::size_t>{ n }) != shape)
                         return make_bool(!eq);
                     std::vector<object*> mine;
                     if (!view_items(view, mine))

@@ -813,9 +813,6 @@ namespace neos::python_runtime::detail
                 for (auto const& base : aClass.attr("__orig_bases__").items())
                     if (is_generic_alias(base) && base.attr("__origin__").is(obj("Generic")))
                     {
-                        // (class C[T, ...]: its type parameters (see __generic_base))
-                        if (base.attr("__dict__").contains(py{ "__type_params__" }))
-                            aClass.set_attr("__type_params__", base.attr("__dict__")[py{ "__type_params__" }]);
                         if (!gvars.empty())
                             py_raise("TypeError", "Cannot inherit from Generic[...] multiple times.");
                         gvars = base.attr("__parameters__");
@@ -1202,7 +1199,35 @@ namespace neos::python_runtime::detail
 
         py has_default_method(char const* aClass)
         {
-            return method(aClass, "has_default", {}, [](std::vector<py> const& a) { return boolean(!a[0].attr("__default__").is(state().noDefault)); });
+            return method(aClass, "has_default", {}, [](std::vector<py> const& a)
+            {
+                return boolean(!a[0].attr("_default_evaluator").is_none() || !a[0].attr("_default").is(state().noDefault));
+            });
+        }
+
+        // (a type parameter's __bound__, __constraints__ or __default__ (its _bound, _constraints or _default): a PEP 695 type parameter's
+        // is evaluated (its _bound_evaluator, ...: a function of no arguments) when it is first read (CPython's typevar_bound, ...))
+        py lazy_attribute(char const* aClass, char const* aName, char const* aSlot)
+        {
+            std::string const slot = aSlot;
+            std::string const evaluator = slot + "_evaluator";
+            return property_of(aClass, aName, [slot, evaluator](py const& self) -> py
+            {
+                py const e = self.attr(evaluator.c_str());
+                if (!e.is_none())
+                {
+                    py const value = e.call({});
+                    self.set_attr(slot.c_str(), value);
+                    self.set_attr(evaluator.c_str(), none());
+                    return value;
+                }
+                return self.attr(slot.c_str());
+            });
+        }
+        void init_lazy(py const& aSelf, char const* aSlot, py const& aValue)
+        {
+            aSelf.set_attr(aSlot, aValue);
+            aSelf.set_attr((std::string{ aSlot } + "_evaluator").c_str(), none());
         }
 
         void make_typing_core_classes()
@@ -1407,12 +1432,15 @@ namespace neos::python_runtime::detail
                         if (constraints.size() > 0 && !bound.is_none())
                             py_raise("TypeError", "Constraints cannot be combined with bound=...");
                         self.set_attr("__name__", a[1]);
-                        self.set_attr("__bound__", bound);
-                        self.set_attr("__constraints__", constraints);
-                        self.set_attr("__default__", a[6]);
+                        init_lazy(self, "_bound", bound);
+                        init_lazy(self, "_constraints", constraints);
+                        init_lazy(self, "_default", a[6]);
                         set_caller_module(self);
                         return none();
                     }, true) },
+                { "__bound__", lazy_attribute("TypeVar", "__bound__", "_bound") },
+                { "__constraints__", lazy_attribute("TypeVar", "__constraints__", "_constraints") },
+                { "__default__", lazy_attribute("TypeVar", "__default__", "_default") },
                 { "__init_subclass__", final_init_subclass("TypeVar") },
                 { "__repr__", method("TypeVar", "__repr__", {}, [](std::vector<py> const& a) { return variance_repr(a[0]); }) },
                 { "__typing_subst__", method("TypeVar", "__typing_subst__", { py_positional("arg") }, [](std::vector<py> const& a) { return typevar_subst(a[0], a[1]); }) },
@@ -1471,11 +1499,13 @@ namespace neos::python_runtime::detail
                         if (!bound.is_none())
                             bound = type_check(bound, "Bound must be a type.");
                         self.set_attr("__name__", a[1]);
-                        self.set_attr("__bound__", bound);
-                        self.set_attr("__default__", a[6]);
+                        init_lazy(self, "_bound", bound);
+                        init_lazy(self, "_default", a[6]);
                         set_caller_module(self);
                         return none();
                     }) },
+                { "__bound__", lazy_attribute("ParamSpec", "__bound__", "_bound") },
+                { "__default__", lazy_attribute("ParamSpec", "__default__", "_default") },
                 { "__init_subclass__", final_init_subclass("ParamSpec") },
                 { "args", property_of("ParamSpec", "args", [](py const& self) { return cls("ParamSpecArgs")(self); }) },
                 { "kwargs", property_of("ParamSpec", "kwargs", [](py const& self) { return cls("ParamSpecKwargs")(self); }) },
@@ -1498,10 +1528,11 @@ namespace neos::python_runtime::detail
                     {
                         check_name("typevartuple", a[1]);
                         a[0].set_attr("__name__", a[1]);
-                        a[0].set_attr("__default__", a[2]);
+                        init_lazy(a[0], "_default", a[2]);
                         set_caller_module(a[0]);
                         return none();
                     }) },
+                { "__default__", lazy_attribute("TypeVarTuple", "__default__", "_default") },
                 { "__init_subclass__", final_init_subclass("TypeVarTuple") },
                 { "__iter__", method("TypeVarTuple", "__iter__", {}, [](std::vector<py> const& a) { return builtin("iter")(py_list({ obj("Unpack")[a[0]] })); }) },
                 { "__repr__", method("TypeVarTuple", "__repr__", {}, [](std::vector<py> const& a) { return a[0].attr("__name__"); }) },
@@ -1538,7 +1569,7 @@ namespace neos::python_runtime::detail
                         py const evaluator = self.attr("_evaluator");
                         if (!evaluator.is_none())
                         {
-                            self.set_attr("_value", evaluator.call(self.attr("__type_params__").items()));
+                            self.set_attr("_value", evaluator.call({}));
                             self.set_attr("_evaluator", none());
                         }
                         return self.attr("_value");
@@ -3383,18 +3414,26 @@ namespace neos::python_runtime::detail
 
     // --- type parameters (PEP 695: TypeVar, TypeVarTuple, ParamSpec) and type aliases (TypeAliasType): typing's
 
-    // __type_param(name, kind) (kind 0: TypeVar, 1: TypeVarTuple, 2: ParamSpec)
+    // __type_param(cell, name, kind, bound, constraints, default) (kind 0: TypeVar, 1: TypeVarTuple, 2: ParamSpec; bound, constraints 
+    // and default: their evaluators (functions of no arguments), or None): a PEP 695 type parameter (its cell's value)
     object* b_type_param(std::vector<object*> const& aArgs, object*)
     {
-        if (aArgs.size() != 2u || kind_of(aArgs[0]) != NEOS_PY_STR)
-            return error("SystemError", "__type_param(name, kind)");
+        if (aArgs.size() != 6u || kind_of(aArgs[1]) != NEOS_PY_STR)
+            return error("SystemError", "__type_param(cell, name, kind, bound, constraints, default)");
         return py_guarded([&]()
         {
             py{ fn_import("typing") };
-            py const name = py::borrowed(aArgs[0]);
-            long long const kind = py::borrowed(aArgs[1]).as_index();
+            py const name = py::borrowed(aArgs[1]);
+            long long const kind = py::borrowed(aArgs[2]).as_index();
             py const parameter = kind == 1 ? cls("TypeVarTuple")(name) : cls(kind == 2 ? "ParamSpec" : "TypeVar").call({ name }, { { "infer_variance", boolean(true) } });
             parameter.set_attr("__module__", py{ "typing" });
+            if (kind == 0)
+            {
+                parameter.set_attr("_bound_evaluator", py::borrowed(aArgs[3]));
+                parameter.set_attr("_constraints_evaluator", py::borrowed(aArgs[4]));
+            }
+            parameter.set_attr("_default_evaluator", py::borrowed(aArgs[5]));
+            py::borrowed(aArgs[0]).set_attr("cell_contents", parameter);
             return parameter;
         });
     }
@@ -3434,8 +3473,7 @@ namespace neos::python_runtime::detail
         });
     }
 
-    // __generic_base(parameters): class C[T, ...](bases)'s last positional base: Generic[T, ...] (a TypeVarTuple unpacked) (whose 
-    // __type_params__ are the class's)
+    // __generic_base(parameters): class C[T, ...](bases)'s last positional base: Generic[T, ...] (a TypeVarTuple unpacked)
     object* b_generic_base(std::vector<object*> const& aArgs, object*)
     {
         if (aArgs.size() != 1u || kind_of(aArgs[0]) != NEOS_PY_TUPLE)
@@ -3447,9 +3485,7 @@ namespace neos::python_runtime::detail
             std::vector<py> arguments;
             for (auto const& p : parameters.items())
                 arguments.push_back(is_instance_of(p, "TypeVarTuple") ? obj("Unpack")[p] : p);
-            py const base = obj("Generic")[py_tuple(arguments)];
-            base.set_attr("__type_params__", parameters);
-            return base;
+            return obj("Generic")[py_tuple(arguments)];
         });
     }
 
@@ -3466,11 +3502,11 @@ namespace neos::python_runtime::detail
         });
     }
 
-    // __type_alias(name, maker, parameters) (its value: maker(*parameters), when it is first read)
+    // __type_alias(name, evaluator, parameters) (its value: evaluator(), when it is first read)
     object* b_type_alias(std::vector<object*> const& aArgs, object*)
     {
         if (aArgs.size() != 3u || kind_of(aArgs[0]) != NEOS_PY_STR || kind_of(aArgs[2]) != NEOS_PY_TUPLE)
-            return error("SystemError", "__type_alias(name, maker, parameters)");
+            return error("SystemError", "__type_alias(name, evaluator, parameters)");
         return py_guarded([&]()
         {
             py{ fn_import("typing") };

@@ -599,6 +599,16 @@ namespace neos::compilers::python
                     else if (count(l) < 3u || (tok(l, 0u).kind != token::Name && !is_op(l, 0u, "(") && !is_op(l, 0u, "[")) || 
                         keywords().contains(text(l, 0u)))
                         continue;
+                    else if (is_name(l, 0u, "case"))
+                    {
+                        // (a match statement's case clause (its header's line: the match's, before it with less indent), whose body can be 
+                        // on its line: not an annotation)
+                        auto h = l;
+                        while (h > 0u && iLines[h - 1u].indent >= indent)
+                            --h;
+                        if (h > 0u && is_name(h - 1u, 0u, "match") && is_op(h - 1u, count(h - 1u) - 1u, ":"))
+                            continue;
+                    }
                     for (auto const& statement : split(l, start, count(l), ";"))
                     {
                         auto const b = statement.first;
@@ -735,104 +745,56 @@ namespace neos::compilers::python
                         iEdits.push_back({ at, at, "__annotations__ = {}; " });
                 }
             }
-            // --- type statements and type parameters: "type X[T] = v" is "X = __type_alias('X', lambda T: (v), (__type_param('T', 0),))";
-            // a def's or a class's type parameters are removed
-            std::string type_parameter_list(std::size_t aLine, std::size_t aOpen, std::size_t aClose, std::string& aNames) const
-            {
-                std::string result;
-                for (auto const& p : split(aLine, aOpen + 1u, aClose))
-                {
-                    auto t = p.first;
-                    int kind = 0;
-                    if (is_op(aLine, t, "*"))
-                    {
-                        kind = 1;
-                        ++t;
-                    }
-                    else if (is_op(aLine, t, "**"))
-                    {
-                        kind = 2;
-                        ++t;
-                    }
-                    if (t >= p.second || tok(aLine, t).kind != token::Name)
-                        continue;
-                    std::string const name{ text(aLine, t) };
-                    aNames += (aNames.empty() ? "" : ", ") + (kind == 1 ? "*" + name : kind == 2 ? "**" + name : name);
-                    result += "__type_param('" + name + "', " + std::to_string(kind) + "), ";
-                }
-                return "(" + result + ")";
-            }
+            // --- type statements and type parameters (PEP 695): "type X[T] = v" is "def _yN_X[T](): return (v)" (closures.cpp makes it
+            // "X = __type_alias('X', <its value's evaluator>, (<its type parameters>))", in an annotation scope of its type parameters); 
+            // a class's type parameters are kept ("class C[T](bases):", for closures.cpp's annotation scope), and its last positional 
+            // base is Generic of them ("class C[T](bases, __generic_base((T,)))")
             void type_parameters()
             {
+                std::size_t aliases = 0u;
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                 {
                     // (type X[...] = value)
                     if (is_name(l, 0u, "type") && count(l) >= 4u && tok(l, 1u).kind == token::Name && (is_op(l, 2u, "=") || is_op(l, 2u, "[")))
                     {
-                        std::string names;
-                        std::string parameters = "()";
                         auto equals = 2u;
                         if (is_op(l, 2u, "["))
                         {
                             auto const close = matching(l, 2u);
                             if (close >= count(l))
                                 continue;
-                            parameters = type_parameter_list(l, 2u, close, names);
                             equals = close + 1u;
                         }
                         if (!is_op(l, equals, "=") || equals + 1u >= count(l))
                             continue;
-                        // (the parameters' kinds are the lambda's: a TypeVarTuple is an item (*Ts: Ts))
-                        std::string lambdaParameters;
-                        {
-                            std::string plain;
-                            std::size_t start = 0u;
-                            while (start < names.size())
-                            {
-                                auto end = names.find(", ", start);
-                                auto n = names.substr(start, end == std::string::npos ? std::string::npos : end - start);
-                                n.erase(0u, n.find_first_not_of('*'));
-                                plain += (plain.empty() ? "" : ", ") + n;
-                                if (end == std::string::npos)
-                                    break;
-                                start = end + 2u;
-                            }
-                            lambdaParameters = plain;
-                        }
                         std::string const name{ text(l, 1u) };
-                        replace(l, 0u, count(l), name + " = __type_alias('" + name + "', lambda" + (lambdaParameters.empty() ? "" : " " + lambdaParameters) + ": (" +
-                            source(l, equals + 1u, count(l)) + "), " + parameters + ")");
+                        replace(l, 0u, count(l), "def _y" + std::to_string(++aliases) + "_" + name + source(l, 2u, equals) + "(): return (" +
+                            source(l, equals + 1u, count(l)) + ")");
                         continue;
                     }
-                    // (class C[...](bases): its type parameters are bound (where it is defined) and its last positional base is Generic 
-                    // of them ("class C(bases, __generic_base(((T := __type_param('T', 0)), ...)))"); a def's are its closure's (see closures.cpp))
+                    // (class C[...](bases): Generic of its type parameters is its last positional base (before its keyword arguments))
                     auto const f = first(l);
                     if (is_name(l, f, "class") && f + 2u < count(l) && tok(l, f + 1u).kind == token::Name && is_op(l, f + 2u, "["))
                     {
                         auto const close = matching(l, f + 2u);
                         if (close >= count(l))
                             continue;
-                        std::string bindings;
+                        std::string names;
                         for (auto const& p : split(l, f + 3u, close))
                         {
                             auto t = p.first;
-                            int kind = 0;
-                            if (is_op(l, t, "*"))
-                                kind = 1, ++t;
-                            else if (is_op(l, t, "**"))
-                                kind = 2, ++t;
+                            if (is_op(l, t, "*") || is_op(l, t, "**"))
+                                ++t;
                             if (t >= p.second || tok(l, t).kind != token::Name)
                                 continue;
-                            std::string const name{ text(l, t) };
-                            bindings += "(" + name + " := __type_param('" + name + "', " + std::to_string(kind) + ")), ";
+                            names += std::string{ text(l, t) } + ", ";
                         }
-                        std::string const base = "__generic_base((" + bindings + "))";
+                        std::string const base = "__generic_base((" + names + "))";
                         if (!is_op(l, close + 1u, "("))
                         {
-                            replace(l, f + 2u, close + 1u, "(" + base + ")");
+                            iEdits.push_back({ tok(l, close).end, tok(l, close).end, "(" + base + ")" });
                             continue;
                         }
-                        // (before its keyword arguments)
                         auto const closeParen = matching(l, close + 1u);
                         if (closeParen >= count(l))
                             continue;
@@ -849,7 +811,6 @@ namespace neos::compilers::python
                             }
                             any = true;
                         }
-                        replace(l, f + 2u, close + 1u, std::string{});
                         if (insertAt == closeParen)
                             iEdits.push_back({ tok(l, closeParen).begin, tok(l, closeParen).begin, (any ? ", " : "") + base });
                         else
@@ -1340,6 +1301,87 @@ namespace neos::compilers::python
             {
                 iEdits.push_back({ tok(aLine, aBegin).begin, tok(aLine, aEnd - 1u).end, std::move(aText) });
             }
+            // (the bracket that closes the one at aOpen: the line's token count if none)
+            std::size_t matching(std::size_t aLine, std::size_t aOpen) const
+            {
+                int depth = 0;
+                for (auto t = aOpen; t < count(aLine); ++t)
+                    if (tok(aLine, t).kind == token::Op)
+                    {
+                        if (opening(text(aLine, t))) ++depth;
+                        else if (closing(text(aLine, t)) && --depth == 0)
+                            return t;
+                    }
+                return count(aLine);
+            }
+            // (the type parameters of a def's or class's header (PEP 695: "[T, *Ts, **P]" at aOpen), if it has them: their names and the
+            // tokens that are their names)
+            struct type_parameter_list
+            {
+                std::set<std::string> names;
+                std::set<std::size_t> tokens;
+            };
+            std::optional<type_parameter_list> type_parameter_names(std::size_t aLine, std::size_t aOpen) const
+            {
+                if (!is_op(aLine, aOpen, "["))
+                    return std::nullopt;
+                auto const close = matching(aLine, aOpen);
+                type_parameter_list result;
+                int depth = 0;
+                bool start = true;
+                for (auto t = aOpen + 1u; t < close; ++t)
+                {
+                    if (tok(aLine, t).kind == token::Op)
+                    {
+                        auto const op = text(aLine, t);
+                        if (opening(op))
+                            ++depth;
+                        else if (closing(op))
+                            --depth;
+                        else if (op == "," && depth == 0)
+                        {
+                            start = true;
+                            continue;
+                        }
+                        else if (depth == 0 && start && (op == "*" || op == "**"))
+                            continue;
+                        start = false;
+                        continue;
+                    }
+                    if (start && depth == 0 && tok(aLine, t).kind == token::Name)
+                    {
+                        result.names.emplace(text(aLine, t));
+                        result.tokens.insert(t);
+                    }
+                    start = false;
+                }
+                return result;
+            }
+            // (a private name (__x, not __x__): mangled in a class (_C__x))
+            static bool mangleable(std::string_view aName)
+            {
+                return aName.size() > 2u && aName.starts_with("__") && !aName.ends_with("__") && aName.find('.') == std::string_view::npos;
+            }
+            // (the source of tokens [aBegin, aEnd) of a generic class's header, its type parameters' names in it (but not those that are
+            // the type parameters) mangled with its name (aOwner))
+            std::string mangled_source(std::size_t aLine, std::size_t aBegin, std::size_t aEnd, type_parameter_list const& aParameters, std::string const& aOwner) const
+            {
+                auto const stripped = aOwner.find_first_not_of('_');
+                if (aBegin >= aEnd || stripped == std::string::npos)
+                    return source(aLine, aBegin, aEnd);
+                std::string result;
+                auto position = tok(aLine, aBegin).begin;
+                for (auto t = aBegin; t < aEnd; ++t)
+                {
+                    auto const& k = tok(aLine, t);
+                    if (k.kind != token::Name || aParameters.tokens.contains(t) || !aParameters.names.contains(std::string{ text(aLine, t) }) || 
+                        !mangleable(text(aLine, t)) || (t > 0u && is_op(aLine, t - 1u, ".")))
+                        continue;
+                    result += iText.substr(position, k.begin - position) + "_" + aOwner.substr(stripped) + std::string{ text(aLine, t) };
+                    position = k.end;
+                }
+                return result + iText.substr(position, tok(aLine, aEnd - 1u).end - position);
+            }
             // (names that are not mangled: the runtime's (e.g. __closure) and the compiler's)
             static bool unmangled(std::string_view aName)
             {
@@ -1379,15 +1421,20 @@ namespace neos::compilers::python
                     auto const colon = header_colon(l, 2u);
                     if (colon >= count(l))
                         continue;
+                    // (its type parameters (PEP 695: kept, for closures.cpp's annotation scope), and the names in its header that are theirs:
+                    // mangled (with its name, as CPython's type parameter scope's names are: only its type parameters'))
+                    auto const typeParameters = type_parameter_names(l, 2u);
+                    auto const open = typeParameters ? matching(l, 2u) + 1u : 2u;
+                    auto const src = [&](std::size_t aBegin, std::size_t aEnd) { return typeParameters ? mangled_source(l, aBegin, aEnd, *typeParameters, name) : source(l, aBegin, aEnd); };
                     // (its bases and keywords)
                     std::string bases;
                     std::string keywords;
-                    if (is_op(l, 2u, "("))
+                    if (is_op(l, open, "("))
                     {
                         int depth = 0;
-                        std::size_t start = 3u;
+                        std::size_t start = open + 1u;
                         std::size_t close = colon;
-                        for (auto t = 2u; t < colon; ++t)
+                        for (auto t = open; t < colon; ++t)
                         {
                             if (tok(l, t).kind != token::Op)
                                 continue;
@@ -1401,7 +1448,7 @@ namespace neos::compilers::python
                             }
                             else if (op == "," && depth == 1)
                             {
-                                auto const item = source(l, start, t);
+                                auto const item = src(start, t);
                                 bool const keyword = (t > start + 1u && tok(l, start).kind == token::Name && is_op(l, start + 1u, "=")) || is_op(l, start, "**");
                                 if (!item.empty())
                                     (keyword ? keywords : bases) += item + ", ";
@@ -1410,14 +1457,14 @@ namespace neos::compilers::python
                         }
                         if (start < close)
                         {
-                            auto const item = source(l, start, close);
+                            auto const item = src(start, close);
                             bool const keyword = (close > start + 1u && tok(l, start).kind == token::Name && is_op(l, start + 1u, "=")) || is_op(l, start, "**");
                             (keyword ? keywords : bases) += item + ", ";
                         }
                     }
                     auto const function = "_b" + std::to_string(++number) + "_" + name;
-                    std::string header = "def " + function + "(_cb_bases=(" + bases + "), _cb_kw=" + (keywords.empty() ? std::string{ "None" } : "dict(" + keywords + ")") +
-                        ", __class__=None):";
+                    std::string header = "def " + function + (typeParameters ? src(2u, open) : std::string{}) + "(_cb_bases=(" + bases + "), _cb_kw=" + 
+                        (keywords.empty() ? std::string{ "None" } : "dict(" + keywords + ")") + ", __class__=None):";
                     replace(l, 0u, colon + 1u, header);
                     iClassLines.insert(l);
                 }
@@ -1467,9 +1514,14 @@ namespace neos::compilers::python
                     if (stripped == std::string::npos)
                         continue;
                     owner = owner.substr(stripped);
+                    // (a def's type parameters' names are not (closures.cpp mangles them: their names are as written))
+                    std::set<std::size_t> typeParameters;
+                    if (auto const d = def_at(l); d && !iClassLines.contains(l))
+                        if (auto const p = type_parameter_names(l, *d + 2u))
+                            typeParameters = p->tokens;
                     for (std::size_t t = iClassLines.contains(l) ? header_colon(l, 2u) + 1u : 0u; t < count(l); ++t)
                     {
-                        if (tok(l, t).kind != token::Name)
+                        if (tok(l, t).kind != token::Name || typeParameters.contains(t))
                             continue;
                         auto const n = text(l, t);
                         if (n.size() > 2u && n.starts_with("__") && !n.ends_with("__") && !unmangled(n))
@@ -1657,6 +1709,7 @@ namespace neos::compilers::python
             {
                 // (the classes' bodies (_bN_ functions, see rewrite_classes): their lines)
                 std::vector<bool> classBody(iLines.size(), false);
+                iFunctionLines.assign(iLines.size(), false);
                 {
                     std::vector<std::pair<std::size_t, bool>> open;     // (indent, class body)
                     for (std::size_t l = 0u; l < iLines.size(); ++l)
@@ -1665,6 +1718,8 @@ namespace neos::compilers::python
                             open.pop_back();
                         if (!open.empty())
                             classBody[l] = open.back().second;
+                        // (within a function (not a class's body))
+                        iFunctionLines[l] = std::any_of(open.begin(), open.end(), [](auto const& o) { return !o.second; });
                         auto const f = is_name(l, 0u, "async") ? 1u : 0u;
                         if (is_name(l, f, "def") || is_name(l, f, "class"))
                         {
@@ -1750,7 +1805,14 @@ namespace neos::compilers::python
                 }
                 if (!sConsumers.contains(name) || (aOpen >= 2u && is_op(l, aOpen - 2u, ".")))
                     return std::nullopt;
-                if (!iUnbound.contains(std::string{ name }))
+                if (!only_called(name))
+                    return std::nullopt;
+                return name;
+            }
+            // (the module does not bind a name (anything but calls of it: e.g. "sum = f", "def f(sum):", "import *"))
+            bool only_called(std::string_view aName) const
+            {
+                if (!iUnbound.contains(std::string{ aName }))
                 {
                     bool unbound = true;
                     for (std::size_t m = 0u; m < iLines.size() && unbound; ++m)
@@ -1758,16 +1820,14 @@ namespace neos::compilers::python
                         {
                             if (is_op(m, t, "*") && t > 0u && is_name(m, t - 1u, "import"))
                                 unbound = false;
-                            else if (is_name(m, t, name) && !(t > 0u && is_op(m, t - 1u, ".")) && !is_op(m, t + 1u, "("))
+                            else if (is_name(m, t, aName) && !(t > 0u && is_op(m, t - 1u, ".")) && !is_op(m, t + 1u, "("))
                                 unbound = false;
-                            else if (is_name(m, t, name) && t > 0u && (is_name(m, t - 1u, "def") || is_name(m, t - 1u, "class")))
+                            else if (is_name(m, t, aName) && t > 0u && (is_name(m, t - 1u, "def") || is_name(m, t - 1u, "class")))
                                 unbound = false;
                         }
-                    iUnbound[std::string{ name }] = unbound;
+                    iUnbound[std::string{ aName }] = unbound;
                 }
-                if (!iUnbound.at(std::string{ name }))
-                    return std::nullopt;
-                return name;
+                return iUnbound.at(std::string{ aName });
             }
             std::size_t matching(std::size_t aLine, std::size_t aToken) const
             {
@@ -1849,6 +1909,7 @@ namespace neos::compilers::python
                 auto const l = aLine;
                 // (the targets of its for clauses, and the extent of its first iterable)
                 std::set<std::string> targets;
+                std::vector<std::pair<std::size_t, std::vector<std::string>>> clauseTargets;    // (its for clauses' positions and targets, in order)
                 std::optional<std::pair<std::size_t, std::size_t>> firstIterable;
                 for (std::size_t c = 0u; c < aClauses.size(); ++c)
                 {
@@ -1870,9 +1931,14 @@ namespace neos::compilers::python
                         else if (depth == 0 && is_name(l, in, "in"))
                             break;
                     }
+                    clauseTargets.emplace_back(t, std::vector<std::string>{});
                     for (auto u = t + 1u; u < in; ++u)
                         if (tok(l, u).kind == token::Name && !keywords().contains(text(l, u)))
+                        {
                             targets.insert(std::string{ text(l, u) });
+                            if (std::find(clauseTargets.back().second.begin(), clauseTargets.back().second.end(), text(l, u)) == clauseTargets.back().second.end())
+                                clauseTargets.back().second.emplace_back(text(l, u));
+                        }
                     if (!firstIterable)
                         firstIterable = std::make_pair(in + 1u, clauseEnd);
                 }
@@ -1927,6 +1993,29 @@ namespace neos::compilers::python
                     if (wrapped && inFirst)
                         continue;
                     auto const n = std::string{ text(l, t) };
+                    // (locals(), vars() and dir() (sorted) within it (PEP 709's): its variables bound so far (in its element: all; else those of the for clauses before it) too, as their 
+                    // names; of a generator expression: its iterator too ('.0'); at a module's level and in a class's body: just its own)
+                    if (!renamed && k.kind == token::Name && !inFirst && (n == "locals" || n == "vars" || n == "dir") && is_op(l, t + 1u, "(") && 
+                        is_op(l, t + 2u, ")") && !(t > 0u && is_op(l, t - 1u, ".")) && only_called(n) && (n != "dir" || only_called("sorted")))
+                    {
+                        bool lambda = false;
+                        for (std::size_t u = 0u; u < aOpen && !lambda; ++u)
+                            lambda = is_name(l, u, "lambda");
+                        bool const own = aClassBody || (!iFunctionLines[l] && !lambda);
+                        std::string entries;
+                        if (generator)
+                            entries += "'.0': _qit, **locals()";
+                        else if (!own)
+                            entries += "**locals()";
+                        for (auto const& clause : clauseTargets)
+                            if (t < aClauses[0] || clause.first < t)
+                                for (auto const& name : clause.second)
+                                    entries += (entries.empty() ? "'" : ", '") + name + "': " + prefix + name;
+                        comprehension += n == "dir" ? "sorted({" + entries + "})" : "{" + entries + "}";
+                        position = tok(l, t + 2u).end;
+                        t += 2u;
+                        continue;
+                    }
                     bool const rename = !renamed && k.kind == token::Name && !inFirst && targets.contains(n) && !(t > 0u && is_op(l, t - 1u, ".")) &&
                         !(is_op(l, t + 1u, "=") && t > 0u && (is_op(l, t - 1u, "(") || is_op(l, t - 1u, ",")));
                     comprehension += rename ? prefix + n : n;
@@ -1966,6 +2055,7 @@ namespace neos::compilers::python
             std::size_t& iNumber;
             bool const iBuiltins;
             mutable std::map<std::string, bool> iUnbound;  ///< (consuming_builtin's: the names that the module only calls)
+            std::vector<bool> iFunctionLines;   ///< (rewrite's: the lines within functions)
         };
     }
 

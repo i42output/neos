@@ -56,12 +56,116 @@ namespace neos::python_runtime
         {
             object* sRegistry = nullptr;        // (the program's __warningregistry__)
 
-            object* warnings_attribute(char const* aName) { return module_attribute("warnings", aName); }
+            // (the state of the C module _warnings (CPython's WarningsState): its filters, onceregistry and default action (which the module 
+            // warnings that uses it has as its own: see warnings_module), and the version of its filters)
+            struct c_state
+            {
+                object* filters = nullptr;
+                object* onceRegistry = nullptr;
+                object* defaultAction = nullptr;
+                long long filtersVersion = 1;
+            };
+            object* default_filters()
+            {
+                // (CPython's, of a release build)
+                std::vector<object*> filters;
+                filters.push_back(make_tuple({ make_str("default"), new_reference(none()), exception_class("DeprecationWarning"), make_str("__main__"), make_int(0) }));
+                for (auto c : { "DeprecationWarning", "PendingDeprecationWarning", "ImportWarning", "ResourceWarning" })
+                    filters.push_back(make_tuple({ make_str("ignore"), new_reference(none()), exception_class(c), new_reference(none()), make_int(0) }));
+                return make_list(std::move(filters));
+            }
+            c_state& state()
+            {
+                static c_state sState = []()
+                {
+                    c_state s;
+                    s.filters = default_filters();
+                    s.onceRegistry = make_dict();
+                    s.defaultAction = make_str("default");
+                    return s;
+                }();
+                return sState;
+            }
+
+            // (the module warnings that the functions use: sys.modules's (as CPython's _warnings's get_warnings_attr: e.g. a test's 
+            // import_fresh_module's), else the runtime's)
+            object* current_module()
+            {
+                {
+                    ref const modules{ imported_modules() };
+                    ref const key{ make_str("warnings") };
+                    auto const d = modules ? builtin_value(modules.get()) : nullptr;
+                    if (d != nullptr && kind_of(d) == NEOS_PY_DICT)
+                    {
+                        auto const position = dict_find(d, key.get());
+                        if (position >= 0)
+                        {
+                            auto const m = as<dict_object>(d)->items[static_cast<std::size_t>(position)].second;
+                            if (kind_of(m) != NEOS_PY_NONE)
+                                return new_reference(m);
+                        }
+                        else if (position == -2)
+                            return nullptr;
+                    }
+                }
+                return fn_import("warnings");
+            }
+
+            // (the module is the pure Python module (CPython's warnings.py without _warnings: see warnings_module))
+            bool pure_module()
+            {
+                ref const module{ current_module() };
+                ref const defaults{ module ? getattr(module.get(), "_warnings_defaults") : nullptr };
+                if (!defaults)
+                    return (clear_error(), false);
+                return truth(defaults.get()) == 0;
+            }
+
+            object* warnings_attribute(char const* aName)
+            {
+                ref const module{ current_module() };
+                return module ? getattr(module.get(), aName) : nullptr;
+            }
 
             int set_warnings_attribute(char const* aName, object* aValue)
             {
-                ref const module{ fn_import("warnings") };
+                ref const module{ current_module() };
                 return module ? setattr(module.get(), aName, aValue) : -1;
+            }
+
+            // (the module's filters, onceregistry or defaultaction, else (it has none) the C module's (CPython's get_filters, get_once_registry 
+            // and get_default_action: its filters are then the module's, if they are a list))
+            object* state_attribute(char const* aName)
+            {
+                auto& s = state();
+                auto& value = std::strcmp(aName, "filters") == 0 ? s.filters : std::strcmp(aName, "onceregistry") == 0 ? s.onceRegistry : s.defaultAction;
+                ref attribute{ warnings_attribute(aName) };
+                if (!attribute)
+                {
+                    ref const e{ take_exception() };
+                    if (!exception_is(e.get(), "AttributeError"))
+                        return (reraise_exception(e.get()), nullptr);
+                    return new_reference(value);
+                }
+                if (std::strcmp(aName, "filters") == 0 && kind_of(attribute.get()) == NEOS_PY_LIST && attribute.get() != value)
+                {
+                    release(value);
+                    value = new_reference(attribute.get());
+                }
+                return attribute.release_ownership();
+            }
+
+            // (the version of the filters: the module's _filters_version (the pure Python module's: see warnings_module), else the C 
+            // module's)
+            object* filters_version()
+            {
+                ref const module{ current_module() };
+                if (!module)
+                    return nullptr;
+                if (ref version{ getattr(module.get(), "_filters_version") })
+                    return version.release_ownership();
+                clear_error();
+                return make_int(state().filtersVersion);
             }
 
             object* call_warnings(char const* aName, std::vector<object*> aArgs, object* aKwargs = nullptr)  // (steals the arguments)
@@ -166,12 +270,19 @@ namespace neos::python_runtime
 
             bool filters_mutated()
             {
-                ref const version{ warnings_attribute("_filters_version") };
-                if (!version)
+                ref const module{ current_module() };
+                if (!module)
                     return false;
+                ref const version{ getattr(module.get(), "_filters_version") };
+                if (!version)
+                {
+                    clear_error();
+                    ++state().filtersVersion;
+                    return true;
+                }
                 ref const one{ make_int(1) };
                 ref const next{ binary(NEOS_PY_ADD, version.get(), one.get(), false) };
-                return next && set_warnings_attribute("_filters_version", next.get()) >= 0;
+                return next && setattr(module.get(), "_filters_version", next.get()) >= 0;
             }
 
             // (_add_filter(*item, append))
@@ -365,8 +476,145 @@ namespace neos::python_runtime
                 return m ? truth(m.get()) : -1;
             }
 
+            // (a warning's source line from its module's globals: its loader's get_source (CPython's get_source_line and importlib's 
+            // _bless_my_loader); null with no error if there is none)
+            object* source_line_of(object* aGlobals, long long aLine)
+            {
+                auto const item = [&](char const* aKey, bool& aPresent) -> object*
+                {
+                    ref const key{ make_str(aKey) };
+                    auto const position = dict_find(aGlobals, key.get());
+                    aPresent = position >= 0;
+                    return aPresent ? as<dict_object>(aGlobals)->items[static_cast<std::size_t>(position)].second : nullptr;
+                };
+                bool present = false;
+                auto loader = item("__loader__", present);
+                if (loader != nullptr && kind_of(loader) == NEOS_PY_NONE)
+                    loader = nullptr;
+                bool hasSpec = false;
+                auto const spec = item("__spec__", hasSpec);
+                if (loader == nullptr)
+                {
+                    if (!hasSpec)
+                        return nullptr;
+                    if (kind_of(spec) == NEOS_PY_NONE)
+                        return error("ValueError", "Module globals is missing a __spec__.loader");
+                }
+                ref specLoader{ hasSpec ? getattr(spec, "loader") : nullptr };
+                bool const specLoaderMissing = !specLoader;
+                if (specLoaderMissing && hasSpec)
+                {
+                    ref const e{ take_exception() };
+                    if (!exception_is(e.get(), "AttributeError"))
+                        return (reraise_exception(e.get()), nullptr);
+                }
+                ref const deprecation{ exception_class("DeprecationWarning") };
+                if (specLoaderMissing || kind_of(specLoader.get()) == NEOS_PY_NONE)
+                {
+                    if (loader == nullptr)
+                        return error(specLoaderMissing ? "AttributeError" : "ValueError", "Module globals is missing a __spec__.loader");
+                    ref const text{ make_str("Module globals is missing a __spec__.loader") };
+                    ref const warned{ call_warnings("warn", { new_reference(text.get()), new_reference(deprecation.get()) }) };
+                    if (!warned)
+                        return nullptr;
+                    specLoader = ref{ new_reference(loader) };
+                }
+                if (loader != nullptr && loader != specLoader.get())
+                {
+                    auto const same = equal(loader, specLoader.get());
+                    if (same < 0)
+                        return nullptr;
+                    if (same == 0)
+                    {
+                        ref const text{ make_str("Module globals; __loader__ != __spec__.loader") };
+                        ref const warned{ call_warnings("warn", { new_reference(text.get()), new_reference(deprecation.get()) }) };
+                        if (!warned)
+                            return nullptr;
+                    }
+                }
+                // (its name: its spec's (__name__ is "__main__" for the program's module), else its __name__)
+                ref name;
+                if (hasSpec && kind_of(spec) != NEOS_PY_NONE)
+                {
+                    name = ref{ getattr(spec, "name") };
+                    if (!name)
+                    {
+                        ref const e{ take_exception() };
+                        if (!exception_is(e.get(), "AttributeError"))
+                            return (reraise_exception(e.get()), nullptr);
+                    }
+                    else if (kind_of(name.get()) == NEOS_PY_NONE)
+                        name = ref{};
+                }
+                if (!name)
+                {
+                    auto const n = item("__name__", present);
+                    if (n == nullptr)
+                        return nullptr;
+                    name = ref{ new_reference(n) };
+                }
+                ref const getSource{ getattr(specLoader.get(), "get_source") };
+                if (!getSource)
+                    return (clear_error(), nullptr);
+                ref const source{ invoke(getSource.get(), { new_reference(name.get()) }) };
+                if (!source)
+                {
+                    ref const e{ take_exception() };
+                    if (!exception_is(e.get(), "ImportError"))
+                        reraise_exception(e.get());
+                    return nullptr;
+                }
+                if (kind_of(source.get()) == NEOS_PY_NONE)
+                    return nullptr;
+                // (its lines: str's splitlines (not a subclass's, as CPython's PyUnicode_Splitlines))
+                ref const str{ fn_builtin("str") };
+                ref const splitlines{ str ? getattr(str.get(), "splitlines") : nullptr };
+                ref const lines{ splitlines ? invoke(splitlines.get(), { new_reference(source.get()) }) : nullptr };
+                if (!lines)
+                    return nullptr;
+                if (kind_of(lines.get()) != NEOS_PY_LIST || aLine < 1 || aLine > static_cast<long long>(as<list_object>(lines.get())->items.size()))
+                    return nullptr;
+                return new_reference(as<list_object>(lines.get())->items[static_cast<std::size_t>(aLine - 1)]);
+            }
+
+            // (C's show_warning: the warning written to sys.stderr, as _warnings writes it when warnings has no _showwarnmsg)
+            object* c_show_warning(object* aFilename, object* aLineno, object* aText, object* aCategory, object* aSourceLine)
+            {
+                ref const file{ module_attribute("sys", "stderr") };
+                if (!file)
+                    return nullptr;
+                if (kind_of(file.get()) == NEOS_PY_NONE)
+                    return new_reference(none());
+                ref const name{ getattr(aCategory, "__name__") };
+                if (!name)
+                    return nullptr;
+                std::string filename, line, text;
+                if (!str_of(aFilename, filename) || !str_of(aLineno, line) || !str_of(aText, text))
+                    return nullptr;
+                std::string result = filename + ":" + line + ": " + text_of(name.get()) + ": " + text + "\n";
+                std::string sourceLine;
+                if (aSourceLine != nullptr && kind_of(aSourceLine) != NEOS_PY_NONE)
+                {
+                    if (!str_of(aSourceLine, sourceLine))
+                        return nullptr;
+                }
+                else
+                {
+                    long long n = 0;
+                    if (to_index(aLineno, n))
+                        sourceLine = source_line(filename, n);
+                    clear_error();
+                }
+                if (!sourceLine.empty())
+                    result += "  " + stripped(sourceLine) + "\n";
+                ref const value{ make_str(result) };
+                ref const written{ call_method_named(file.get(), "write", { new_reference(value.get()) }) };
+                return written ? new_reference(none()) : nullptr;
+            }
+
             // (warn_explicit(message, category, filename, lineno, module, registry, module_globals, source))
-            object* warn_explicit(object* aMessage, object* aCategory, object* aFilename, object* aLineno, object* aModule, object* aRegistry, object* aSource)
+            object* warn_explicit(object* aMessage, object* aCategory, object* aFilename, object* aLineno, object* aModule, object* aRegistry, object* aSource,
+                object* aModuleGlobals = nullptr)
             {
                 ref const intFunction{ fn_builtin("int") };
                 ref const lineno{ invoke(intFunction.get(), { new_reference(aLineno) }) };
@@ -390,8 +638,25 @@ namespace neos::python_runtime
                 }
                 else
                     module = ref{ new_reference(aModule) };
+                // (its source line: its module's (module_globals: the C module's; the pure Python module's is linecache's, from the file))
+                ref sourceLine;
+                bool const pure = pure_module();
+                if (aModuleGlobals != nullptr && kind_of(aModuleGlobals) != NEOS_PY_NONE)
+                {
+                    if (kind_of(aModuleGlobals) != NEOS_PY_DICT)
+                        return error("TypeError", std::string{ "module_globals must be a dict, not '" } + type_name(aModuleGlobals) + "'");
+                }
+                if (!pure && aModuleGlobals != nullptr && kind_of(aModuleGlobals) == NEOS_PY_DICT)
+                {
+                    long long n = 0;
+                    if (!to_index(lineno.get(), n))
+                        return nullptr;
+                    sourceLine = ref{ source_line_of(aModuleGlobals, n) };
+                    if (!sourceLine && failed())
+                        return nullptr;
+                }
                 ref registry{ aRegistry != nullptr && kind_of(aRegistry) != NEOS_PY_NONE ? new_reference(aRegistry) : make_dict() };
-                ref const version{ warnings_attribute("_filters_version") };
+                ref const version{ filters_version() };
                 if (!version)
                     return nullptr;
                 {
@@ -443,7 +708,7 @@ namespace neos::python_runtime
                         return new_reference(none());
                 }
                 // (the first filter that matches: its action; else defaultaction)
-                ref const filters{ warnings_attribute("filters") };
+                ref const filters{ state_attribute("filters") };
                 if (!filters)
                     return nullptr;
                 if (kind_of(filters.get()) != NEOS_PY_LIST)
@@ -480,7 +745,7 @@ namespace neos::python_runtime
                 }
                 if (!action)
                 {
-                    action = ref{ warnings_attribute("defaultaction") };
+                    action = ref{ state_attribute("defaultaction") };
                     if (!action)
                         return nullptr;
                 }
@@ -498,7 +763,7 @@ namespace neos::python_runtime
                     if (dict_set(registry.get(), key.get(), one.get()) < 0)
                         return nullptr;
                     ref const onceKey{ make_tuple({ new_reference(text.get()), new_reference(category.get()) }) };
-                    ref const once{ warnings_attribute("onceregistry") };
+                    ref const once{ state_attribute("onceregistry") };
                     if (!once)
                         return nullptr;
                     auto const seen = registry_get(once.get(), onceKey.get());
@@ -532,10 +797,21 @@ namespace neos::python_runtime
                 }
                 else
                     return error("RuntimeError", "Unrecognized action (" + repr_text(action.get()) + ") in warnings.filters:\n " + text_of(item.get()));
-                ref const msg{ warning_message(message.get(), category.get(), aFilename, lineno.get(), nullptr, nullptr, aSource) };
+                // (shown: its WarningMessage by warnings's _showwarnmsg, else (it has none) as C's show_warning (CPython's call_show_warning))
+                ref const show{ warnings_attribute("_showwarnmsg") };
+                if (!show)
+                {
+                    ref const e{ take_exception() };
+                    if (pure || !exception_is(e.get(), "AttributeError"))
+                        return (reraise_exception(e.get()), nullptr);
+                    return c_show_warning(aFilename, lineno.get(), text.get(), category.get(), sourceLine.get());
+                }
+                if (!is_callable(show.get()))
+                    return error("TypeError", "warnings._showwarnmsg() must be set to a callable");
+                ref const msg{ warning_message(message.get(), category.get(), aFilename, lineno.get(), nullptr, sourceLine.get(), aSource) };
                 if (!msg)
                     return nullptr;
-                ref const shown{ call_warnings("_showwarnmsg", { new_reference(msg.get()) }) };
+                ref const shown{ invoke(show.get(), { new_reference(msg.get()) }) };
                 return shown ? new_reference(none()) : nullptr;
             }
 
@@ -975,6 +1251,18 @@ namespace neos::python_runtime
                         return nullptr;
                     if (setattr(aArg, "__deprecated__", msg.get()) < 0)
                         clear_error();
+                    // (a coroutine function's: marked as one (inspect.markcoroutinefunction))
+                    ref const iscoroutinefunction{ module_attribute("inspect", "iscoroutinefunction") };
+                    ref const coroutine{ iscoroutinefunction ? invoke(iscoroutinefunction.get(), { new_reference(aArg) }) : nullptr };
+                    if (!coroutine)
+                        return nullptr;
+                    if (truth(coroutine.get()) == 1)
+                    {
+                        ref const mark{ module_attribute("inspect", "markcoroutinefunction") };
+                        ref const marked{ mark ? invoke(mark.get(), { new_reference(wrapper.get()) }) : nullptr };
+                        if (!marked)
+                            return nullptr;
+                    }
                     return new_reference(wrapper.get());
                 }
                 return error("TypeError", "@deprecated decorator with non-None category must be applied to a class or callable, not " + repr_text(aArg));
@@ -1058,7 +1346,7 @@ namespace neos::python_runtime
                             return error("TypeError", "catch_warnings.__init__() takes 1 positional argument but " + std::to_string(aArgs.size()) + " were given");
                         auto const self = aArgs[0];
                         ref const record{ a[0] != nullptr ? new_reference(a[0]) : make_bool(false) };
-                        ref const module{ a[1] != nullptr && kind_of(a[1]) != NEOS_PY_NONE ? new_reference(a[1]) : fn_import("warnings") };
+                        ref const module{ a[1] != nullptr && kind_of(a[1]) != NEOS_PY_NONE ? new_reference(a[1]) : current_module() };
                         if (!module)
                             return nullptr;
                         ref filter{ new_reference(none()) };
@@ -1079,7 +1367,7 @@ namespace neos::python_runtime
                         if (record == 1)
                             args.push_back("record=True");
                         ref const module{ getattr(self, "_module") };
-                        ref const warnings{ fn_import("warnings") };
+                        ref const warnings{ current_module() };
                         if (!module || !warnings)
                             return nullptr;
                         if (module.get() != warnings.get())
@@ -1205,7 +1493,7 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         if (!parse_arguments("warn_explicit", aArgs, aKwargs, { "message", "category", "filename", "lineno", "module", "registry", "module_globals", "source" }, 4u, 0u, a))
                             return nullptr;
-                        return warn_explicit(a[0], a[1], a[2], a[3], a[4], a[5], a[7] != nullptr ? a[7] : none());
+                        return warn_explicit(a[0], a[1], a[2], a[3], a[4], a[5], a[7] != nullptr ? a[7] : none(), a[6]);
                     } },
                 { "_filters_mutated", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1389,44 +1677,6 @@ namespace neos::python_runtime
                         if (!parse_arguments("_getcategory", aArgs, aKwargs, { "category" }, 1u, 0u, a) || !str_of(a[0], category))
                             return nullptr;
                         return get_category(category);
-                    } },
-                { "_deprecated", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
-                    {
-                        std::vector<object*> a;
-                        if (!parse_arguments("_deprecated", aArgs, aKwargs, { "name", "message", "remove", "_version" }, 1u, 0u, a))
-                            return nullptr;
-                        if (a[2] == nullptr)
-                            return error("TypeError", "_deprecated() missing 1 required keyword-only argument: 'remove'");
-                        ref version{ a[3] != nullptr ? new_reference(a[3]) : module_attribute("sys", "version_info") };
-                        ref const zero{ make_int(0) };
-                        ref const one{ make_int(1) };
-                        ref const major{ getitem(a[2], zero.get()) };
-                        ref const minor{ major ? getitem(a[2], one.get()) : nullptr };
-                        if (!minor || !version)
-                            return nullptr;
-                        auto const removeText = text_of(major.get()) + "." + text_of(minor.get());
-                        ref const slice{ fn_builtin("slice") };
-                        ref const two{ invoke(slice.get(), { make_int(2) }) };
-                        ref const head{ two ? getitem(version.get(), two.get()) : nullptr };
-                        ref const headTuple{ head ? fn_tuple_of(head.get()) : nullptr };
-                        ref const removeTuple{ headTuple ? fn_tuple_of(a[2]) : nullptr };
-                        ref const after{ removeTuple ? compare(NEOS_PY_GT, headTuple.get(), removeTuple.get()) : nullptr };
-                        ref const same{ after ? compare(NEOS_PY_EQ, headTuple.get(), removeTuple.get()) : nullptr };
-                        ref const three{ make_int(3) };
-                        ref const level{ same ? getitem(version.get(), three.get()) : nullptr };
-                        if (!level)
-                            return nullptr;
-                        if (truth(after.get()) == 1 || (truth(same.get()) == 1 && text_of(level.get()) != "alpha"))
-                            return error("RuntimeError", repr_text(a[0]) + " was slated for removal after Python " + removeText + " alpha");
-                        ref const message{ a[1] != nullptr ? new_reference(a[1]) : make_str("{name!r} is deprecated and slated for removal in Python {remove}") };
-                        ref const format{ getattr(message.get(), "format") };
-                        ref const removeValue{ make_str(removeText) };
-                        ref const kw{ keywords({ { "name", a[0] }, { "remove", removeValue.get() } }) };
-                        ref const msg{ format ? invoke(format.get(), {}, kw.get()) : nullptr };
-                        if (!msg)
-                            return nullptr;
-                        ref const category{ exception_class("DeprecationWarning") };
-                        return warn(msg.get(), category.get(), 2, none(), nullptr);   // (the caller of the function that called it (it has no frame))
                     } }
             };
 
@@ -1453,25 +1703,53 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("catch_warnings", new_reference(catchWarnings.get()));
                 aAttributes.emplace_back("deprecated", new_reference(deprecated.get()));
                 aAttributes.emplace_back("_OptionError", new_reference(optionError.get()));
+                // (the C module _warnings's filters, onceregistry, default action and functions (warn, warn_explicit, _filters_mutated), unless 
+                // sys.modules blocks it (None: e.g. import_fresh_module's): then (the pure Python module, as CPython's warnings.py without it) 
+                // its own)
+                bool pure = false;
+                {
+                    ref const modules{ imported_modules() };
+                    ref const key{ make_str("_warnings") };
+                    auto const d = modules ? builtin_value(modules.get()) : nullptr;
+                    if (d != nullptr && kind_of(d) == NEOS_PY_DICT)
+                        if (auto const position = dict_find(d, key.get()); position >= 0)
+                            pure = kind_of(as<dict_object>(d)->items[static_cast<std::size_t>(position)].second) == NEOS_PY_NONE;
+                    clear_error();
+                }
+                ref c;
+                if (!pure)
+                {
+                    c = ref{ fn_import("_warnings") };
+                    if (!c)
+                        return false;
+                }
                 for (auto const& f : sWarningsFunctions)
                 {
-                    auto const function = make_builtin(f);
+                    bool const accelerated = !pure && (std::strcmp(f.name, "warn") == 0 || std::strcmp(f.name, "warn_explicit") == 0 || std::strcmp(f.name, "_filters_mutated") == 0);
+                    auto const function = accelerated ? getattr(c.get(), f.name) : make_builtin(f);
+                    if (function == nullptr)
+                        return false;
                     if (std::strcmp(f.name, "showwarning") == 0)
                         aAttributes.emplace_back("_showwarning_orig", new_reference(function));
                     if (std::strcmp(f.name, "formatwarning") == 0)
                         aAttributes.emplace_back("_formatwarning_orig", new_reference(function));
                     aAttributes.emplace_back(f.name, function);
                 }
-                // (the default filters (CPython's, of a release build): sys.warnoptions's are added when the module has been made)
-                std::vector<object*> filters;
-                filters.push_back(make_tuple({ make_str("default"), new_reference(none()), exception_class("DeprecationWarning"), make_str("__main__"), make_int(0) }));
-                for (auto c : { "DeprecationWarning", "PendingDeprecationWarning", "ImportWarning", "ResourceWarning" })
-                    filters.push_back(make_tuple({ make_str("ignore"), new_reference(none()), exception_class(c), new_reference(none()), make_int(0) }));
-                aAttributes.emplace_back("filters", make_list(std::move(filters)));
-                aAttributes.emplace_back("defaultaction", make_str("default"));
-                aAttributes.emplace_back("onceregistry", make_dict());
-                aAttributes.emplace_back("_filters_version", make_int(1));
-                aAttributes.emplace_back("_DEPRECATED_MSG", make_str("{name!r} is deprecated and slated for removal in Python {remove}"));
+                if (pure)
+                {
+                    aAttributes.emplace_back("filters", default_filters());
+                    aAttributes.emplace_back("defaultaction", make_str("default"));
+                    aAttributes.emplace_back("onceregistry", make_dict());
+                    aAttributes.emplace_back("_filters_version", make_int(1));
+                }
+                else
+                {
+                    auto const& st = state();
+                    aAttributes.emplace_back("filters", new_reference(st.filters));
+                    aAttributes.emplace_back("defaultaction", new_reference(st.defaultAction));
+                    aAttributes.emplace_back("onceregistry", new_reference(st.onceRegistry));
+                }
+                aAttributes.emplace_back("_warnings_defaults", make_bool(!pure));
                 aAttributes.emplace_back("_DEPRECATED_MSG", make_str(sDeprecatedMessage));
                 aAttributes.emplace_back("__all__", make_list({ make_str("warn"), make_str("warn_explicit"), make_str("showwarning"), make_str("formatwarning"),
                     make_str("filterwarnings"), make_str("simplefilter"), make_str("resetwarnings"), make_str("catch_warnings"), make_str("deprecated") }));
@@ -1479,22 +1757,17 @@ namespace neos::python_runtime
             }
 
             inline bool const sWarnings = register_module("warnings", warnings_module);
-            // (CPython's C module _warnings: the objects that warnings takes from it (filters, _defaultaction, _onceregistry, warn, warn_explicit,
-            // _filters_mutated): warnings's)
+            // (CPython's C module _warnings: its state (filters, _defaultaction and _onceregistry: see state) and functions (warn, warn_explicit, 
+            // _filters_mutated), which warnings has as its own (see warnings_module))
             inline bool const sWarningsC = register_module("_warnings", [](std::vector<std::pair<std::string, object*>>& aAttributes)
             {
-                ref const m{ fn_import("warnings") };
-                if (!m)
-                    return false;
-                for (auto const& [name, from] : { std::pair{ "filters", "filters" }, std::pair{ "_defaultaction", "defaultaction" }, 
-                    std::pair{ "_onceregistry", "onceregistry" }, std::pair{ "warn", "warn" }, std::pair{ "warn_explicit", "warn_explicit" }, 
-                    std::pair{ "_filters_mutated", "_filters_mutated" } })
-                {
-                    auto const value = getattr(m.get(), from);
-                    if (value == nullptr)
-                        return false;
-                    aAttributes.emplace_back(name, value);
-                }
+                auto const& st = state();
+                aAttributes.emplace_back("filters", new_reference(st.filters));
+                aAttributes.emplace_back("_defaultaction", new_reference(st.defaultAction));
+                aAttributes.emplace_back("_onceregistry", new_reference(st.onceRegistry));
+                for (auto const& f : sWarningsFunctions)
+                    if (std::strcmp(f.name, "warn") == 0 || std::strcmp(f.name, "warn_explicit") == 0 || std::strcmp(f.name, "_filters_mutated") == 0)
+                        aAttributes.emplace_back(f.name, make_builtin(f));
                 return true;
             });
         }

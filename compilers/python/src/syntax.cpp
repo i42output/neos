@@ -252,6 +252,14 @@ namespace neos::compilers::python
                             issue.endOffset = 0;
                             return issue;
                         }
+                        // (at most 100 levels (CPython's MAXINDENT))
+                        if (indents.size() >= 100u)
+                        {
+                            auto issue = make_issue(aSource, syntax_issue::Tokenizer, "too many levels of indentation", begin, begin, "IndentationError");
+                            issue.offset = 1;
+                            issue.endOffset = 0;
+                            return issue;
+                        }
                         indents.push_back({ column, alternative });
                     }
                     else

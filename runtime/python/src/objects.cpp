@@ -9358,6 +9358,9 @@ namespace neos::python_runtime
                     return new_reference(none());
                 if (std::strcmp(aName, "__dict__") == 0)
                     return builtin_type_dict(aSelf);
+                // (a builtin type's type parameters (PEP 695): none)
+                if (std::strcmp(aName, "__type_params__") == 0)
+                    return make_tuple();
                 // (a struct sequence's type: n_fields, n_sequence_fields, n_unnamed_fields, __match_args__)
                 if (auto const attribute = structseq_type_attribute(as<type_object>(aSelf)->qualifiedName, aName))
                     return attribute;
@@ -15623,6 +15626,14 @@ namespace neos::python_runtime
                     return nullptr;
                 return annotations.release_ownership();
             }
+            // (its type parameters (PEP 695): its own (its namespace's __type_params__), else none (CPython's type_get_type_params))
+            if (name == "__type_params__" && (cls.metaclass == nullptr || class_lookup(cls.metaclass, name) == nullptr))
+            {
+                for (auto const& a : cls.attributes)
+                    if (a.first == name)
+                        return new_reference(a.second);
+                return make_tuple();
+            }
             if (auto const attribute = class_lookup(aSelf, name))
                 return bind_attribute(attribute, nullptr, aSelf);
             if (name == "__new__")
@@ -16234,6 +16245,24 @@ namespace neos::python_runtime
             auto* const cls = new class_object{ { { &sClassType.base } }, aName, {}, {}, {}, {} };
             ref result{ &cls->h.base };
             std::vector<std::string> exceptionBases;    // (all of its bases that are exception classes (e.g. class E(ValueError, IndexError)))
+            // (object before another base: no MRO (object is in each of their linearizations' tails: CPython's set_mro_error))
+            {
+                auto const& bases = tuple_items(aBases);
+                auto const is_object = [](object* b) { return is_type_object(b) && as<type_object>(b)->qualifiedName == "object"; };
+                auto const objectBase = std::find_if(bases.begin(), bases.end(), is_object);
+                if (objectBase != bases.end() && std::any_of(objectBase + 1, bases.end(), [&](object* b) { return !is_object(b); }))
+                {
+                    std::string message = "Cannot create a consistent method resolution order (MRO) for bases object";
+                    std::vector<object*> shown;
+                    for (auto b = objectBase + 1; b != bases.end(); ++b)
+                        if (!is_object(*b) && std::find(shown.begin(), shown.end(), *b) == shown.end())
+                        {
+                            shown.push_back(*b);
+                            message += ", " + (is_class(*b) ? as<class_object>(*b)->name : is_type_object(*b) ? as<type_object>(*b)->name : class_name(*b));
+                        }
+                    return error("TypeError", message);
+                }
+            }
             for (auto b : tuple_items(aBases))
             {
                 if (is_class(b))
@@ -16458,6 +16487,7 @@ namespace neos::python_runtime
             if (!ns)
                 return nullptr;
             auto const cell = dict_pop(ns.get(), "__classcell__");
+            auto const classDictCell = dict_pop(ns.get(), "__classdictcell__");
             auto const qualname = dict_pop(ns.get(), "__qualname__");
             // (a class that defines __eq__ but not __hash__: its __hash__ is None (type_new's: it is unhashable))
             {
@@ -16471,6 +16501,9 @@ namespace neos::python_runtime
                 if (p < 0) { clear_error(); return nullptr; } auto const v = as<dict_object>(ns.get())->items[static_cast<std::size_t>(p)].second; retain(v); return v; }() };
             ref cls{ fn_class(aName.c_str(), aBases, ns.get()) };
             if (!cls)
+                return nullptr;
+            // (its annotation scopes' namespace (PEP 695: __classdict_lookup's): now its __dict__ (CPython's type_new_set_classdictcell))
+            if (classDictCell && setattr(classDictCell.get(), "cell_contents", cls.get()) < 0)
                 return nullptr;
             auto& c = *as<class_object>(cls.get());
             if (qualname && kind_of(qualname.get()) == NEOS_PY_STR)
@@ -16575,6 +16608,63 @@ namespace neos::python_runtime
         };
         thread_local std::vector<class_namespace> tClassNamespaces;
 
+        // __classdict(): the namespace of the class body being run: the value of its annotation scopes' __classdictcell__ (PEP 695: see 
+        // the Python compiler's closures.cpp), until the class is made (then the class: see type_new)
+        object* b_classdict(std::vector<object*> const& aArgs, object*)
+        {
+            if (!aArgs.empty() || tClassNamespaces.empty())
+                return error("SystemError", "__classdict()");
+            return new_reference(tClassNamespaces.back().ns);
+        }
+
+        // __classdict_lookup(cell, name, fallback[, local]): a name that an annotation scope in a class's body reads (CPython's 
+        // LOAD_FROM_DICT_OR_DEREF and LOAD_FROM_DICT_OR_GLOBALS): the class's (its __dict__'s, once it is made (cell: the class)), else 
+        // the namespace's of its body (cell: the namespace; local: the body's cell of the name, if it binds it), else the fallback's (a 
+        // cell's value, or the result of a function of no arguments (that reads the global))
+        object* b_classdict_lookup(std::vector<object*> const& aArgs, object*)
+        {
+            if ((aArgs.size() != 3u && aArgs.size() != 4u) || aArgs[0]->type != &sCellType.base || kind_of(aArgs[1]) != NEOS_PY_STR)
+                return error("SystemError", "__classdict_lookup(cell, name, fallback[, local])");
+            auto const& name = as<str_object>(aArgs[1])->value;
+            // (an item of a mapping: null (and no error) if it has none (KeyError))
+            auto const item = [](object* aMapping, object* aKey, bool& aFailed) -> object*
+            {
+                aFailed = false;
+                ref value{ getitem(aMapping, aKey) };
+                if (value)
+                    return value.release_ownership();
+                ref const e{ take_exception() };
+                if (!exception_is(e.get(), "KeyError"))
+                {
+                    reraise_exception(e.get());
+                    aFailed = true;
+                }
+                return nullptr;
+            };
+            bool failed = false;
+            if (auto const ns = as<cell_object>(aArgs[0])->value; ns != nullptr)
+            {
+                if (is_class(ns))
+                {
+                    for (auto const& a : as<class_object>(ns)->attributes)
+                        if (a.first == name)
+                            return new_reference(a.second);
+                }
+                else
+                {
+                    if (aArgs.size() == 4u && aArgs[3]->type == &sCellType.base && as<cell_object>(aArgs[3])->value != nullptr)
+                        return new_reference(as<cell_object>(aArgs[3])->value);
+                    if (auto const value = item(ns, aArgs[1], failed); value != nullptr || failed)
+                        return value;
+                }
+            }
+            auto const fallback = aArgs[2];
+            if (fallback->type == &sCellType.base)
+                return fn_cell_get(fallback);
+            ref const noArgs{ make_tuple() };
+            return call(fallback, noArgs.get(), nullptr);
+        }
+
         // __ns_bind(name, value): a class body's assignment of a name: its namespace's item (a namespace that is not a dict's (e.g. 
         // an enumeration's EnumDict) can make another value), and the value the name is bound to
         object* b_ns_bind(std::vector<object*> const& aArgs, object*)
@@ -16598,8 +16688,8 @@ namespace neos::python_runtime
 
         object* b_build_class(std::vector<object*> const& aArgs, object*)
         {
-            if (aArgs.size() != 1u || aArgs[0]->type != &sScriptFunctionType.base)
-                return error("SystemError", "__build_class(body)");
+            if ((aArgs.size() != 1u && aArgs.size() != 2u) || aArgs[0]->type != &sScriptFunctionType.base || (aArgs.size() == 2u && kind_of(aArgs[1]) != NEOS_PY_TUPLE))
+                return error("SystemError", "__build_class(body[, type_params])");
             auto const& body = *as<script_function_object>(aArgs[0]);
             object* bases = nullptr;
             object* keywords = nullptr;
@@ -16709,6 +16799,13 @@ namespace neos::python_runtime
                         if (!set(docKey.get(), a.second))
                             return nullptr;
                     }
+                // (a generic class's type parameters (PEP 695: its annotation scope's, see the Python compiler's closures.cpp))
+                if (aArgs.size() == 2u)
+                {
+                    ref const key{ make_str("__type_params__") };
+                    if (!set(key.get(), aArgs[1]))
+                        return nullptr;
+                }
             }
             // (the body: the names it binds (except those it bound through its namespace))
             ref const noArgs{ make_tuple() };
@@ -17927,7 +18024,7 @@ namespace neos::python_runtime
             { "hex", b_hex }, { "input", b_input }, { "isinstance", b_isinstance }, { "iter", b_iter }, { "len", b_len },
             { "max", b_max }, { "min", b_min }, { "next", b_next }, { "aiter", b_aiter }, { "anext", b_anext }, { "oct", b_oct }, { "ord", b_ord }, { "pow", b_pow }, { "print", b_print },
             { "repr", b_repr }, { "round", b_round_of }, { "setattr", b_setattr }, { "delattr", b_delattr }, { "vars", b_vars }, { "dir", b_dir }, { "ascii", b_ascii }, { "sorted", b_sorted }, { "sum", b_sum },
-            { "__class", b_class }, { "__build_class", b_build_class }, { "__ns_bind", b_ns_bind },
+            { "__class", b_class }, { "__build_class", b_build_class }, { "__ns_bind", b_ns_bind }, { "__classdict", b_classdict }, { "__classdict_lookup", b_classdict_lookup },
             { "super", b_super }, { "issubclass", b_issubclass }, { "hash", b_hash }, { "id", b_id }, { "__bytes", b_bytes_literal }, { "__cell", b_cell },
             { "__closure", b_closure }, { "__generator", b_generator }, { "open", b_open }, { "__yield", b_yield }, { "__yield_from", b_yield_from },
             { "__with_items", b_with_items }, { "__match", b_match },
@@ -21249,7 +21346,7 @@ namespace neos::python_runtime
                 { "binascii", {} }, { "struct", {} }, { "select", {} }, { "posix", {} }, { "nt", {} }, { "array", {} }, { "bisect", {} }, { "_string", {} },
                 { "zlib", {} }, { "_csv", {} }, { "_suggestions", {} }, { "sys", {} }, { "_socket", {} }, { "_struct", {} }, { "_signal", {} }, { "marshal", {} }, { "_locale", {} },
                 { "heapq", { "heappush", "heappop", "heapify", "heapreplace", "heappushpop" } }, { "functools", { "reduce", "cmp_to_key" } },
-                { "warnings", { "warn", "warn_explicit", "_filters_mutated" } }, { "io", { "open", "open_code" } },
+                { "warnings", { "warn", "warn_explicit", "_filters_mutated" } }, { "_warnings", {} }, { "io", { "open", "open_code" } },
                 { "keyword", { "iskeyword", "issoftkeyword" } } };
             // (a module's functions: their __module__ (functions that other modules made are theirs))
             static std::set<std::string, std::less<>> sModuleNames;
@@ -21420,13 +21517,24 @@ namespace neos::python_runtime
                     }
             }
             // (a module made before that sys.modules no longer has (e.g. test.support's import_fresh_module removed it): there again, as
-            // CPython's import puts the module it makes there (not if sys.modules has None for it: its import is blocked))
+            // CPython's import puts the module it makes there (not if sys.modules has None for it: its import is blocked)); a module whose 
+            // import makes a module of its own each time (warnings: CPython's is a source module, whose state is its own (e.g. 
+            // import_fresh_module's of it, without the C module _warnings: the pure Python module)): a new module
             if (!made)
                 if (ref const modules{ imported_modules() }; modules && kind_of(builtin_value(modules.get())) == NEOS_PY_DICT)
                 {
                     ref const key{ make_str(aName) };
                     auto const position = dict_find(builtin_value(modules.get()), key.get());
-                    if (position == -2 || (position == -1 && dict_set(builtin_value(modules.get()), key.get(), m) != 0))
+                    if (position == -2)
+                        return nullptr;
+                    if (position == -1 && (name == "warnings" || name == "_warnings"))
+                    {
+                        ref fresh{ make_module(aName) };
+                        if (!fresh || dict_set(builtin_value(modules.get()), key.get(), fresh.get()) != 0)
+                            return nullptr;
+                        return fresh.release_ownership();
+                    }
+                    if (position == -1 && dict_set(builtin_value(modules.get()), key.get(), m) != 0)
                         return nullptr;
                 }
             retain(m);
@@ -22235,6 +22343,10 @@ namespace neos::python_runtime
             { "exec_read", NEOS_RT_FUNCTION(fn_exec_read), OBJ, 2u, { STR, OBJ }, 0u },
             { "global_read", NEOS_RT_FUNCTION(fn_global_read), OBJ, 3u, { STR, STR, OBJ }, 0u },
             { "exec_store", NEOS_RT_FUNCTION(fn_exec_store), VOID, 2u, { STR, OBJ }, 0u },
+            { "exec_delete", NEOS_RT_FUNCTION(fn_exec_delete), VOID, 1u, { STR }, 0u },
+            { "exec_global_lookup", NEOS_RT_FUNCTION(fn_exec_global_lookup), OBJ, 1u, { STR }, 0u },
+            { "exec_global_store", NEOS_RT_FUNCTION(fn_exec_global_store), VOID, 2u, { STR, OBJ }, 0u },
+            { "exec_global_delete", NEOS_RT_FUNCTION(fn_exec_global_delete), VOID, 1u, { STR }, 0u },
             { "sorted_keys", NEOS_RT_FUNCTION(fn_sorted_keys), OBJ, 1u, { OBJ }, 0u },
             { "raise_import_error", NEOS_RT_FUNCTION(fn_raise_import_error), VOID, 1u, { STR }, 0u },
             { "reraise", NEOS_RT_FUNCTION(fn_reraise), VOID, 0u, {}, 0u },

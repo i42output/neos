@@ -37,12 +37,20 @@
 
 #include <cctype>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace neos::compilers::python::tokens
 {
+    // (a syntax error that a rewrite finds (e.g. closures.cpp's): its line (0-based) of the rewrite's text)
+    struct rewrite_error : std::runtime_error
+    {
+        std::size_t line;
+        rewrite_error(std::size_t aLine, std::string const& aMessage) : std::runtime_error{ aMessage }, line{ aLine } {}
+    };
+
     struct token
     {
         enum kind_t { Name, Number, String, Op } kind;

@@ -737,6 +737,13 @@ namespace neos::python_runtime
         object* fn_exec_globals();
         object* fn_exec_read(char const* aName, object* aValue);
         void fn_exec_store(char const* aName, object* aValue);
+        void fn_exec_delete(char const* aName);
+        object* fn_exec_global_lookup(char const* aName);
+        void fn_exec_global_store(char const* aName, object* aValue);
+        void fn_exec_global_delete(char const* aName);
+        object* exec_lookup(char const* aName, bool aLocals);
+        void exec_store(char const* aName, object* aValue, bool aLocals);
+        void exec_delete(char const* aName, bool aLocals);
         object* fn_sorted_keys(object* aMapping);
         object* b_exec_result(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_compile(std::vector<object*> const& aArgs, object* aKwargs);

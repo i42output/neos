@@ -152,6 +152,8 @@ namespace neos::language
         virtual i_fragment const* small_integers(neolib::i_vector<std::uint32_t> const& aLocals) = 0; ///< (a check that their values are small)
         virtual void loop_variable_range(neolib::i_string_view const& aName, std::int64_t aLow, std::int64_t aHigh) = 0;
         virtual i_fragment const* release_integer(std::uint32_t aVariable, bool aGlobal) = 0;
+        virtual i_fragment const* loop_variable_bound(neolib::i_string_view const& aName, std::uint32_t aVariable, bool aGlobal) = 0; ///< (its variable 
+                                                                ///< has been bound (each iteration): a statement that follows, if any)
         // frames (see neos_rt_host::frames)
     public:
         virtual std::uint32_t source_line(i_source_fragment const& aFragment, std::size_t aPosition) = 0; ///< (the line (1-based) of a position 
@@ -162,6 +164,13 @@ namespace neos::language
         virtual bool linked_function(neolib::i_string_view const& aName) const = 0; ///< (a function that the language's code defines (its 
                                                                 ///< qualified name) that the code of a linked program's other translation units calls 
                                                                 ///< by its name (see bytecode::LinksSection))
+        virtual bool references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const = 0; ///< (of 
+                                                                ///< the program compiled last: where else in one of its source files (aSourcePath's: its 
+                                                                ///< source as written) the name at aPosition (a byte of it: a declaration's defining name, 
+                                                                ///< e.g. a subprogram's) denotes what is declared there (the first byte of each: its uses, 
+                                                                ///< and its other declarations, e.g. its body's), as the language resolves its names (e.g. 
+                                                                ///< not another declaration of the same name); false: not known (e.g. the language's 
+                                                                ///< compiler does not record what its names denote))
         // interface
     public:
         static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("6A3B5D0E-2C47-4C1F-9E58-7B1D2A90C3F4"); return sId; }

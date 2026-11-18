@@ -382,7 +382,6 @@ namespace neos
                         std::uint32_t entries = 0u;
                     };
                     std::unordered_map<std::uint64_t, osr_state> osrLoops;
-                    std::unordered_map<std::size_t, bool> inLoop;       ///< (positions of functions' own code: whether each is within a loop (see deopt_taken))
                     // (deoptimization: optimized code that leaves for the function's own code (its frame made as the baseline's is, where a
                     // call (of an inlinable function: an inlined call of the optimized code's) is made): each function's frame, and each such
                     // call's (by its token): the code that makes the call (its arguments in the outgoing area) and the operand stack's slots
@@ -9684,8 +9683,10 @@ namespace neos
                     constexpr std::uint32_t DeoptStrikes = 2u;              ///< (an inlined call whose deopts made the function optimized again this often:
                                                                             ///< its code calls rather than deopts (e.g. a cache's miss: optimized again, 
                                                                             ///< the code knows the cache's new entry; again: it calls))
-                    constexpr std::uint64_t CallsPerSeldomDeopt = 1000u;    ///< (an optimized function's calls per deopt (at least) that do not make it
-                                                                            ///< optimized again)
+                    constexpr std::uint64_t CallsPerSeldomDeopt = 10u;      ///< (an optimized function's calls per deopt (at least) that do not make it
+                                                                            ///< optimized again: a call that left for the baseline's code costs a
+                                                                            ///< few of its calls there; optimizing it again, and code whose rare 
+                                                                            ///< paths call (and join the others) rather than leave, cost more)
 
                     // (the optimizer, on any thread (an optimization's job runs it in the background, while the program runs): it reads 
                     // the module's code (which does not change), and the program's memory and globals (each word's value is one that it
@@ -10607,33 +10608,6 @@ namespace neos
                         }
                     }
 
-                    // (a position of a function's code that is within one of its loops)
-                    bool in_loop(module_description const& aModule, std::uint32_t aFunction, std::size_t aPosition)
-                    {
-                        auto const& f = aModule.functions[aFunction];
-                        auto const& tokens = *aModule.tokens;
-                        if (aPosition < f.codeBegin || aPosition >= f.codeEnd)
-                            return false;
-                        std::vector<bool> loops;   // (the open blocks: whether each is a loop)
-                        std::size_t open = 0u;      // (... and the loops among them)
-                        for (std::size_t p = f.codeBegin; p < aPosition;)
-                        {
-                            auto const op = static_cast<std::uint8_t>(tokens[p]);
-                            if (op == 0x02u || op == 0x03u || op == 0x04u)
-                            {
-                                loops.push_back(op == 0x03u);
-                                open += op == 0x03u ? 1u : 0u;
-                            }
-                            else if (op == 0x0Bu && !loops.empty())
-                            {
-                                open -= loops.back() ? 1u : 0u;
-                                loops.pop_back();
-                            }
-                            p += 1u + immediate_count(op, tokens, p);
-                        }
-                        return open != 0u;
-                    }
-
                     void deopt_taken(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aDeopt) noexcept
                     {
                         // (the optimized code left for the baseline's: a call that is left at again is not inlined; the function's own code
@@ -10652,19 +10626,10 @@ namespace neos
                             // from one, see tier_loop))
                             if (m.loopCounters[f] == NotAgain)
                                 m.loopCounters[f] = m.loopIterations;
-                            // (a deopt within a loop of the function's code: its call's remaining iterations are the baseline's (its code is
-                            // not entered again until its next call): optimized again at once, the call that left made (not left at))
-                            bool looping = false;
+                            // (a deopt within a loop of the function's code is counted as any other: its call's remaining iterations are
+                            // the baseline's (or continue in optimized code from the loop, see tier_loop), and the loop's code keeps no
+                            // call whose path joins the others')
                             if (!d.guard)
-                            {
-                                // (found once for each position)
-                                auto const position = d.frames.empty() ? d.call : d.frames.front().position;
-                                auto [known, added] = m.inLoop.try_emplace(position, false);
-                                if (added)
-                                    known->second = in_loop(m.description, f, position);
-                                looping = known->second;
-                            }
-                            if (!d.guard && !looping)
                             {
                                 ++aVersion->deoptCounts[aDeopt];
                                 if (++aVersion->deoptsTaken < DeoptsBeforeReoptimizing)
@@ -10690,11 +10655,6 @@ namespace neos
                             for (std::size_t k = 0u; k < aVersion->deopts.size(); ++k)
                                 if (!aVersion->deopts[k].guard && aVersion->deoptCounts[k] >= 1u)
                                     struck.insert(aVersion->deopts[k].call);
-                            if (looping)
-                            {
-                                ++aVersion->deoptCounts[aDeopt];
-                                m.noDeopt[f].insert(d.call);
-                            }
                             m.struck[f].clear();
                             for (auto const call : struck)
                                 if (++m.deoptStrikes[f][call] >= DeoptStrikes)

@@ -47,7 +47,8 @@
 
 namespace neos::compilers::python
 {
-    // (nested functions, closures and decorated functions: the module's source rewritten (closures.cpp))
+    // (nested functions, closures and decorated functions: the module's source rewritten (closures.cpp; a syntax error: tokens.hpp's 
+    // rewrite_error))
     std::string rewrite_nested_functions(std::string const& aText, bool& aChanged, std::map<std::string, std::vector<std::pair<std::string, std::string>>>* aAnnotations = nullptr,
         std::vector<std::size_t>* aLines = nullptr, bool aStubReturnTypes = false);   ///< (aLines: the line of aText (0-based) that each line of the result 
                                                         ///< is; aStubReturnTypes: a stub's return annotation (its type: None) is kept if it is the grammar's)
@@ -277,6 +278,7 @@ namespace neos::compilers::python
         bool declare_loop_variable(neolib::i_string_view const& aName, i_symbol_table_entry const* aSymbol) override;
         i_fragment const* small_integers(neolib::i_vector<std::uint32_t> const& aLocals) override;
         void loop_variable_range(neolib::i_string_view const& aName, std::int64_t aLow, std::int64_t aHigh) override;
+        i_fragment const* loop_variable_bound(neolib::i_string_view const& aName, std::uint32_t aVariable, bool aGlobal) override;
         i_fragment const* release_integer(std::uint32_t aVariable, bool aGlobal) override;
         std::uint32_t source_line(i_source_fragment const& aFragment, std::size_t aPosition) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
@@ -333,6 +335,8 @@ namespace neos::compilers::python
         void py_bind(fragment_state::py_target const& aTarget, operand_type const& aValue, fragment& aStatement);
         void py_bind_targets(std::vector<fragment_state::py_target> const& aTargets, operand_type const& aValue, fragment& aStatement);
         void py_declare_targets(std::vector<fragment_state::py_target> const& aTargets);
+        bool py_exec_namespace_name(std::string const& aName, bool aGlobal);
+        bool py_exec_top_level(std::string const& aName);
         void py_bind_name(std::string const& aName, operand_type const& aValue, fragment& aStatement);
         i_symbol_table_entry& py_variable(std::string const& aName, type aType);
         void py_kind_change(std::string const& aName);

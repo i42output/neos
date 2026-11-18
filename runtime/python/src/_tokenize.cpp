@@ -34,7 +34,8 @@
   _tokenize), Copyright (c) 2001-2023 Python Software Foundation; All Rights Reserved. They are used under the Python
   Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: the tokenizer gives tokens as CPython
   3.13's C tokenizer (Parser/tokenizer.c) gives them to its tokenize module (f-strings' FSTRING_START, FSTRING_MIDDLE and
-  FSTRING_END tokens, and its errors); translated from Python to C++ for the neos Python runtime plugin and adapted to its
+  FSTRING_END tokens, and its errors), with CPython 3.13's Parser/lexer/lexer.c's number scanning (verify_end_of_number) and
+  identifier verification (Copyright (c) 2001-2024 Python Software Foundation); translated from Python to C++ for the neos Python runtime plugin and adapted to its
   object model (see runtime/python/NOTICE).
 */
 
@@ -42,8 +43,10 @@
 // by py2neos, a Python-to-C++ translator): its classes are made (by type)
 // of closures (pyclass.hpp), so a program's subclasses override their methods.
 
+#include <cstdio>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "python.hpp"
 #include "objects.hpp"
@@ -158,6 +161,306 @@ namespace neos::python_runtime::detail::_tokenize_module
             (void)aModule;
             return sWriter;
         }
+        // --- CPython 3.13's C tokenizer's numbers and identifiers (Parser/lexer/lexer.c: its number scanning, verify_end_of_number and 
+        // verify_identifier)
+
+        // (a line's code points)
+        std::u32string code_points(py const& aLine)
+        {
+            std::u32string result;
+            for (py const& c : iterate{ aLine })
+                result.push_back(static_cast<char32_t>(B<"ord">()(c).as_index()));
+            return result;
+        }
+
+        bool potential_identifier_char(char32_t c)
+        {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c >= 128;
+        }
+
+        // (a number's token: its end (the index after it), else its error (its message and offset: the C tokenizer's position after the
+        // character it is at); and the warnings that it is followed by a keyword (SyntaxWarning: "invalid decimal literal", ...); a 
+        // number of the tokenizer with extra tokens (tokenize's) is not checked for what follows it (as CPython's))
+        struct number_scan
+        {
+            std::size_t end = 0u;
+            std::string error;
+            std::size_t offset = 0u;
+            std::vector<std::pair<std::string, std::size_t>> warnings;     ///< (their messages and offsets)
+        };
+        number_scan scan_number(std::u32string const& aLine, std::size_t aStart, bool aExtraTokens)
+        {
+            number_scan result;
+            std::size_t cur = aStart;
+            auto const nextc = [&]() -> char32_t { auto const c = cur < aLine.size() ? aLine[cur] : U'\0'; ++cur; return c; };
+            auto const backup = [&]() { --cur; };
+            auto const digit = [](char32_t c) { return c >= '0' && c <= '9'; };
+            auto const xdigit = [&](char32_t c) { return digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); };
+            auto const fail = [&](std::string aMessage) { result.error = std::move(aMessage); result.offset = cur; return false; };
+            // (lookahead: the characters that follow are aText, and then not an identifier's)
+            auto const lookahead = [&](std::u32string_view aText)
+            {
+                auto const at = cur;
+                bool matched = true;
+                for (auto t : aText)
+                    if (nextc() != t)
+                    {
+                        matched = false;
+                        break;
+                    }
+                bool const result = matched && !potential_identifier_char(nextc());
+                cur = at;
+                return result;
+            };
+            auto const verify_end = [&](char32_t c, char const* aKind) -> bool
+            {
+                if (aExtraTokens)
+                    return true;
+                bool r = false;
+                if (c == 'a')
+                    r = lookahead(U"nd");
+                else if (c == 'e')
+                    r = lookahead(U"lse");
+                else if (c == 'f')
+                    r = lookahead(U"or");
+                else if (c == 'i')
+                {
+                    auto const c2 = nextc();
+                    r = c2 == 'f' || c2 == 'n' || c2 == 's';
+                    backup();
+                }
+                else if (c == 'o')
+                    r = lookahead(U"r");
+                else if (c == 'n')
+                    r = lookahead(U"ot");
+                if (r)
+                {
+                    backup();
+                    result.warnings.emplace_back(std::string{ "invalid " } + aKind + " literal", cur);
+                    nextc();
+                }
+                else if (c < 128 && c != 0 && potential_identifier_char(c))
+                {
+                    backup();
+                    return fail(std::string{ "invalid " } + aKind + " literal");
+                }
+                return true;
+            };
+            auto const decimal_tail = [&]() -> char32_t
+            {
+                for (;;)
+                {
+                    char32_t c;
+                    do
+                        c = nextc();
+                    while (digit(c));
+                    if (c != '_')
+                        return c;
+                    c = nextc();
+                    if (!digit(c))
+                    {
+                        backup();
+                        fail("invalid decimal literal");
+                        return 0;
+                    }
+                }
+            };
+            auto const digit_text = [](char32_t c) { return std::string(1u, static_cast<char>(c)); };
+            auto const finish = [&](char32_t) { backup(); result.end = cur; return result; };
+            char32_t c = nextc();
+            // (a fraction's or an exponent's or an imaginary number's part: 0 the number, 1 its fraction, 2 its exponent, 3 its j)
+            int part = 0;
+            if (c == '.')
+            {
+                c = nextc();
+                part = 1;
+            }
+            else if (c == '0')
+            {
+                c = nextc();
+                if (c == 'x' || c == 'X')
+                {
+                    c = nextc();
+                    do
+                    {
+                        if (c == '_')
+                            c = nextc();
+                        if (!xdigit(c))
+                        {
+                            backup();
+                            return (fail("invalid hexadecimal literal"), result);
+                        }
+                        do
+                            c = nextc();
+                        while (xdigit(c));
+                    } while (c == '_');
+                    if (!verify_end(c, "hexadecimal"))
+                        return result;
+                    return finish(c);
+                }
+                if (c == 'o' || c == 'O' || c == 'b' || c == 'B')
+                {
+                    bool const octal = c == 'o' || c == 'O';
+                    auto const valid = [&](char32_t d) { return octal ? d >= '0' && d < '8' : d == '0' || d == '1'; };
+                    char const* const kind = octal ? "octal" : "binary";
+                    c = nextc();
+                    do
+                    {
+                        if (c == '_')
+                            c = nextc();
+                        if (!valid(c))
+                        {
+                            if (digit(c))
+                                return (fail("invalid digit '" + digit_text(c) + "' in " + kind + " literal"), result);
+                            backup();
+                            return (fail(std::string{ "invalid " } + kind + " literal"), result);
+                        }
+                        do
+                            c = nextc();
+                        while (valid(c));
+                    } while (c == '_');
+                    if (digit(c))
+                        return (fail("invalid digit '" + digit_text(c) + "' in " + kind + " literal"), result);
+                    if (!verify_end(c, kind))
+                        return result;
+                    return finish(c);
+                }
+                // (maybe an old-style octal: in any case, 0)
+                bool nonzero = false;
+                for (;;)
+                {
+                    if (c == '_')
+                    {
+                        c = nextc();
+                        if (!digit(c))
+                        {
+                            backup();
+                            return (fail("invalid decimal literal"), result);
+                        }
+                    }
+                    if (c != '0')
+                        break;
+                    c = nextc();
+                }
+                if (digit(c))
+                {
+                    nonzero = true;
+                    c = decimal_tail();
+                    if (c == 0 && !result.error.empty())
+                        return result;
+                }
+                if (c == '.')
+                {
+                    c = nextc();
+                    part = 1;
+                }
+                else if (c == 'e' || c == 'E')
+                    part = 2;
+                else if (c == 'j' || c == 'J')
+                    part = 3;
+                else
+                {
+                    if (nonzero && !aExtraTokens)
+                    {
+                        backup();
+                        result.error = "leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers";
+                        result.offset = aStart + 1u;
+                        return result;
+                    }
+                    if (!verify_end(c, "decimal"))
+                        return result;
+                    return finish(c);
+                }
+            }
+            else
+            {
+                c = decimal_tail();
+                if (c == 0 && !result.error.empty())
+                    return result;
+                if (c == '.')
+                {
+                    c = nextc();
+                    part = 1;
+                }
+                else if (c == 'e' || c == 'E')
+                    part = 2;
+                else if (c == 'j' || c == 'J')
+                    part = 3;
+            }
+            // (its fraction)
+            if (part == 1)
+            {
+                if (digit(c))
+                {
+                    c = decimal_tail();
+                    if (c == 0 && !result.error.empty())
+                        return result;
+                }
+                if (c == 'e' || c == 'E')
+                    part = 2;
+                else if (c == 'j' || c == 'J')
+                    part = 3;
+            }
+            // (its exponent)
+            if (part == 2)
+            {
+                auto const e = c;
+                c = nextc();
+                if (c == '+' || c == '-')
+                {
+                    c = nextc();
+                    if (!digit(c))
+                    {
+                        backup();
+                        return (fail("invalid decimal literal"), result);
+                    }
+                }
+                else if (!digit(c))
+                {
+                    backup();
+                    if (!verify_end(e, "decimal"))
+                        return result;
+                    backup();
+                    result.end = cur;
+                    return result;
+                }
+                c = decimal_tail();
+                if (c == 0 && !result.error.empty())
+                    return result;
+                if (c == 'j' || c == 'J')
+                    part = 3;
+            }
+            // (its imaginary part)
+            if (part == 3)
+            {
+                c = nextc();
+                if (!verify_end(c, "imaginary"))
+                    return result;
+                return finish(c);
+            }
+            if (!verify_end(c, "decimal"))
+                return result;
+            return finish(c);
+        }
+
+        // (an identifier of the C tokenizer (not tokenize's: it has extra tokens): its first character that is not an identifier's (an 
+        // error: "invalid character", or "invalid non-printable character"), if any (CPython's verify_identifier))
+        void verify_identifier(py const& aName, py const& aLnum, std::size_t aStart, py const& aLine)
+        {
+            auto const size = static_cast<std::size_t>(aName.size());
+            for (std::size_t i = 1u; i <= size; ++i)
+                if (!aName[B<"slice">()(none(), py{ static_cast<long long>(i) }, none())].method("isidentifier").truthy())
+                {
+                    py const c = aName[py{ static_cast<long long>(i - 1u) }];
+                    auto const code = B<"ord">()(c).as_index();
+                    char hex[16];
+                    std::snprintf(hex, sizeof hex, "%04llX", static_cast<long long>(code));
+                    std::string const message = c.method("isprintable").truthy() ? "invalid character '" + c.str() + "' (U+" + hex + ")" : 
+                        std::string{ "invalid non-printable character U+" } + hex;
+                    py_raise((G<"_tokenize._syntax_error">())(py{ message }, aLnum, py{ static_cast<long long>(aStart + i) }, aLine));
+                }
+        }
+
         // --- _tokenize (from CPython 3.11's Lib/tokenize.py)
 
         void make__tokenize()
@@ -396,7 +699,15 @@ namespace neos::python_runtime::detail::_tokenize_module
                         middle = none();
                         last_line = S<"">();
                         line = S<"">();
-                        while (boolean(true).truthy())
+                        // (the C tokenizer's (without extra tokens) and tokenize's: the brackets open (and their lines: the C tokenizer's errors), 
+                        // the last line is blank (or a comment's: its end's tokens' line is then none), a comment on the line (its NEWLINE 
+                        // token's text, without extra tokens))
+                        bool const extra = extra_tokens.truthy();
+                        auto const op_type = [&](py const& aToken) { return extra ? Mod<"token">().attr("OP") : (Mod<"token">().attr("EXACT_TOKEN_TYPES")).method("get", { aToken, Mod<"token">().attr("OP") }); };
+                        std::vector<std::pair<std::string, py>> brackets;
+                        bool blankLast = false;
+                        py comment = none();
+                        auto const read_line = [&]()
                         {
                             try
                             {
@@ -405,19 +716,21 @@ namespace neos::python_runtime::detail::_tokenize_module
                             }
                             catch (raised const&)
                             {
-                                pyclass::handler_scope handler14;
-                                if (matches(handler14.exception, B<"StopIteration">()))
-                                {
+                                pyclass::handler_scope handler;
+                                if (matches(handler.exception, B<"StopIteration">()))
                                     line = S<"">();
-                                }
                                 else
-                                    py_reraise(handler14.exception);
+                                    py_reraise(handler.exception);
                             }
                             if (((!encoding.is_none()) && isinstance(line, B<"bytes">())))
-                            {
                                 line = line.method("decode", { encoding });
-                            }
                             lnum = inplace(NEOS_PY_ADD, lnum, I<1>());
+                            if (line.contains(S<"\0">()))
+                                py_raise((G<"_tokenize._syntax_error">())(S<"source code cannot contain null bytes">(), lnum, I<0>(), line));
+                        };
+                        while (boolean(true).truthy())
+                        {
+                            read_line();
                             auto const items15 = unpack(py_tuple({ I<0>(), py{ line.size() } }), 2);
                             pos = items15[0];
                             max_ = items15[1];
@@ -475,37 +788,61 @@ namespace neos::python_runtime::detail::_tokenize_module
                                     break;
                                 }
                                 column = I<0>();
-                                while (pos < max_)
+                                // (a backslash's continuation line: the indentation is that of the first backslash's (CPython's lexer: it cannot 
+                                // be split over lines))
+                                py contColumn = I<0>();
+                                for (;;)
                                 {
-                                    if (line[pos] == (S<" ">()))
+                                    while (pos < max_)
                                     {
-                                        column = inplace(NEOS_PY_ADD, column, I<1>());
+                                        if (line[pos] == (S<" ">()))
+                                        {
+                                            column = inplace(NEOS_PY_ADD, column, I<1>());
+                                        }
+                                        else if (line[pos] == (S<"\t">()))
+                                        {
+                                            column = (floordiv(column, (G<"_tokenize.tabsize">())) + (I<1>())) * (G<"_tokenize.tabsize">());
+                                        }
+                                        else if (line[pos] == (S<"\f">()))
+                                        {
+                                            column = I<0>();
+                                        }
+                                        else
+                                        {
+                                            break;
+                                        }
+                                        pos = inplace(NEOS_PY_ADD, pos, I<1>());
                                     }
-                                    else if (line[pos] == (S<"\t">()))
-                                    {
-                                        column = (floordiv(column, (G<"_tokenize.tabsize">())) + (I<1>())) * (G<"_tokenize.tabsize">());
-                                    }
-                                    else if (line[pos] == (S<"\f">()))
-                                    {
-                                        column = I<0>();
-                                    }
-                                    else
-                                    {
+                                    if (!(pos < max_ && line[pos] == (S<"\\">()) && (line[B<"slice">()(pos + (I<1>()), none(), none())] == (S<"\n">()) ||
+                                        line[B<"slice">()(pos + (I<1>()), none(), none())] == (S<"\r\n">()))))
                                         break;
-                                    }
-                                    pos = inplace(NEOS_PY_ADD, pos, I<1>());
+                                    if (!contColumn.truthy())
+                                        contColumn = column;
+                                    read_line();
+                                    pos = I<0>();
+                                    max_ = py{ line.size() };
+                                    if (!line.truthy())
+                                        break;
                                 }
                                 if (pos == max_)
                                 {
-                                    // (whitespace only, at the end of the source)
+                                    // (whitespace only, at the end of the source: the end's tokens are on the line after it)
                                     if ((extra_tokens.truthy() && line.truthy()))
                                     {
                                         py_yield(py_tuple({ Mod<"token">().attr("NL"), S<"">(), py_tuple({ lnum, pos }), py_tuple({ lnum, pos + (I<1>()) }), line }));
                                     }
+                                    if (line.truthy())
+                                    {
+                                        last_line = line;
+                                        line = S<"">();
+                                        lnum = inplace(NEOS_PY_ADD, lnum, I<1>());
+                                    }
+                                    blankLast = true;
                                     break;
                                 }
                                 if ((S<"#\r\n">()).contains(line[pos]))
                                 {
+                                    blankLast = true;
                                     // (a comment, or a blank line)
                                     if (line[pos] == (S<"#">()))
                                     {
@@ -522,10 +859,20 @@ namespace neos::python_runtime::detail::_tokenize_module
                                     }
                                     continue;
                                 }
+                                blankLast = false;
+                                if (contColumn.truthy())
+                                    column = contColumn;
+                                // (INDENT and DEDENT: without extra tokens, the C tokenizer's (no text, no columns))
                                 if (column > indents[I<-1>()])
                                 {
+                                    if (py{ indents.size() } >= (I<100>()))
+                                    {
+                                        text = line.method("rstrip", { S<"\r\n">() });
+                                        py_raise((B<"IndentationError">())(S<"too many levels of indentation">(), py_tuple({ S<"<string>">(), lnum, py{ text.size() } + (I<1>()), text, none(), none() })));
+                                    }
                                     indents.method("append", { column });
-                                    py_yield(py_tuple({ Mod<"token">().attr("INDENT"), line[B<"slice">()(none(), pos, none())], py_tuple({ lnum, I<0>() }), py_tuple({ lnum, pos }), line }));
+                                    py_yield(extra ? py_tuple({ Mod<"token">().attr("INDENT"), line[B<"slice">()(none(), pos, none())], py_tuple({ lnum, I<0>() }), py_tuple({ lnum, pos }), line }) :
+                                        py_tuple({ Mod<"token">().attr("INDENT"), S<"">(), py_tuple({ lnum, I<-1>() }), py_tuple({ lnum, I<-1>() }), line }));
                                 }
                                 while (column < indents[I<-1>()])
                                 {
@@ -535,7 +882,8 @@ namespace neos::python_runtime::detail::_tokenize_module
                                         py_raise((B<"IndentationError">())(S<"unindent does not match any outer indentation level">(), py_tuple({ S<"<string>">(), lnum, py{ text.size() } + (I<1>()), text, none(), none() })));
                                     }
                                     indents = indents[B<"slice">()(none(), I<-1>(), none())];
-                                    py_yield(py_tuple({ Mod<"token">().attr("DEDENT"), S<"">(), py_tuple({ lnum, pos }), py_tuple({ lnum, pos }), line }));
+                                    py_yield(extra ? py_tuple({ Mod<"token">().attr("DEDENT"), S<"">(), py_tuple({ lnum, pos }), py_tuple({ lnum, pos }), line }) :
+                                        py_tuple({ Mod<"token">().attr("DEDENT"), S<"">(), py_tuple({ lnum, I<-1>() }), py_tuple({ lnum, I<-1>() }), line }));
                                 }
                             }
                             else
@@ -551,6 +899,7 @@ namespace neos::python_runtime::detail::_tokenize_module
                                     py_raise((G<"_tokenize._syntax_error">())(S<"unexpected EOF in multi-line statement">(), lnum - (I<1>()), py{ last_line.size() }, last_line));
                                 }
                                 continued = I<0>();
+                                blankLast = false;
                             }
                             while (pos < max_)
                             {
@@ -672,7 +1021,7 @@ namespace neos::python_runtime::detail::_tokenize_module
                                     if (c == (S<"{">()))
                                     {
                                         // (a replacement field: its expression)
-                                        py_yield(py_tuple({ Mod<"token">().attr("OP"), c, py_tuple({ lnum, pos }), py_tuple({ lnum, pos + (I<1>()) }), line }));
+                                        py_yield(py_tuple({ op_type(c), c, py_tuple({ lnum, pos }), py_tuple({ lnum, pos + (I<1>()) }), line }));
                                         pos = inplace(NEOS_PY_ADD, pos, I<1>());
                                         parenlev = inplace(NEOS_PY_ADD, parenlev, I<1>());
                                         fs.attr("fields").method("append", { py_list({ parenlev, boolean(false) }) });
@@ -683,7 +1032,7 @@ namespace neos::python_runtime::detail::_tokenize_module
                                     {
                                         py_raise((G<"_tokenize._syntax_error">())(S<"f-string: single '}' is not allowed">(), lnum, pos + (I<1>()), line));
                                     }
-                                    py_yield(py_tuple({ Mod<"token">().attr("OP"), c, py_tuple({ lnum, pos }), py_tuple({ lnum, pos + (I<1>()) }), line }));
+                                    py_yield(py_tuple({ op_type(c), c, py_tuple({ lnum, pos }), py_tuple({ lnum, pos + (I<1>()) }), line }));
                                     pos = inplace(NEOS_PY_ADD, pos, I<1>());
                                     parenlev = inplace(NEOS_PY_SUBTRACT, parenlev, I<1>());
                                     fs.attr("fields").method("pop");
@@ -728,7 +1077,7 @@ namespace neos::python_runtime::detail::_tokenize_module
                                         if (token == (S<"}">()))
                                         {
                                             // (the end of the replacement field)
-                                            py_yield(py_tuple({ Mod<"token">().attr("OP"), token, spos, epos, line }));
+                                            py_yield(py_tuple({ op_type(token), token, spos, epos, line }));
                                             parenlev = inplace(NEOS_PY_SUBTRACT, parenlev, I<1>());
                                             fs.attr("fields").method("pop");
                                             continue;
@@ -736,15 +1085,37 @@ namespace neos::python_runtime::detail::_tokenize_module
                                         if (token == (S<":">()))
                                         {
                                             // (its format spec)
-                                            py_yield(py_tuple({ Mod<"token">().attr("OP"), token, spos, epos, line }));
+                                            py_yield(py_tuple({ op_type(token), token, spos, epos, line }));
                                             fs.attr("fields")[I<-1>()].set_item(I<1>(), boolean(true));
                                             continue;
                                         }
-                                        py_yield(py_tuple({ Mod<"token">().attr("OP"), token, spos, epos, line }));
+                                        py_yield(py_tuple({ op_type(token), token, spos, epos, line }));
                                         continue;
                                     }
                                     if ((numchars.contains(initial) || ([&]() -> py { py const t = boolean(initial == (S<".">())); return !t.truthy() ? t : [&]() -> py { py const t = boolean(token != (S<".">())); return !t.truthy() ? t : boolean(token != (S<"...">())); }(); }()).truthy()))
                                     {
+                                        // (its extent and errors: the C tokenizer's (its warnings: SyntaxWarning, an error if they are made errors))
+                                        auto const scanned = scan_number(code_points(line), static_cast<std::size_t>(start.as_index()), extra);
+                                        if (!scanned.error.empty())
+                                            py_raise((G<"_tokenize._syntax_error">())(py{ scanned.error }, lnum, py{ static_cast<long long>(scanned.offset) }, line));
+                                        for (auto const& w : scanned.warnings)
+                                        {
+                                            try
+                                            {
+                                                Mod<"warnings">().attr("warn_explicit")(py{ w.first }, B<"SyntaxWarning">(), S<"<string>">(), lnum);
+                                            }
+                                            catch (raised const&)
+                                            {
+                                                pyclass::handler_scope handler;
+                                                if (matches(handler.exception, B<"SyntaxWarning">()))
+                                                    py_raise((G<"_tokenize._syntax_error">())(py{ w.first }, lnum, py{ static_cast<long long>(w.second) }, line));
+                                                py_reraise(handler.exception);
+                                            }
+                                        }
+                                        end = py{ static_cast<long long>(scanned.end) };
+                                        token = line[B<"slice">()(start, end, none())];
+                                        epos = py_tuple({ lnum, end });
+                                        pos = end;
                                         py_yield(py_tuple({ Mod<"token">().attr("NUMBER"), token, spos, epos, line }));
                                     }
                                     else if ((S<"\r\n">()).contains(initial))
@@ -756,10 +1127,18 @@ namespace neos::python_runtime::detail::_tokenize_module
                                                 py_yield(py_tuple({ Mod<"token">().attr("NL"), token, spos, epos, line }));
                                             }
                                         }
-                                        else
+                                        else if (extra)
                                         {
                                             py_yield(py_tuple({ Mod<"token">().attr("NEWLINE"), token, spos, epos, line }));
                                         }
+                                        else
+                                        {
+                                            // (the C tokenizer's: its text is to the line's \n (from the comment before it, if any))
+                                            py const from = comment.is_none() ? start : comment;
+                                            py const newline = line[B<"slice">()(from, end - (I<1>()), none())];
+                                            py_yield(py_tuple({ Mod<"token">().attr("NEWLINE"), newline, py_tuple({ lnum, from }), py_tuple({ lnum, from + py{ newline.size() } }), line }));
+                                        }
+                                        comment = none();
                                     }
                                     else if (initial == (S<"#">()))
                                     {
@@ -767,6 +1146,7 @@ namespace neos::python_runtime::detail::_tokenize_module
                                         {
                                             py_yield(py_tuple({ Mod<"token">().attr("COMMENT"), token, spos, epos, line }));
                                         }
+                                        comment = start;
                                     }
                                     else if (fstart.truthy())
                                     {
@@ -821,15 +1201,34 @@ namespace neos::python_runtime::detail::_tokenize_module
                                     }
                                     else
                                     {
+                                        // (brackets: at most 200 open; without extra tokens, a closing bracket must match the one open (the C 
+                                        // tokenizer's errors))
                                         if ((S<"([{">()).contains(initial))
                                         {
+                                            if (brackets.size() >= 200u)
+                                                py_raise((G<"_tokenize._syntax_error">())(S<"too many nested parentheses">(), lnum, start + (I<1>()), line));
+                                            brackets.emplace_back(initial.str(), lnum);
                                             parenlev = inplace(NEOS_PY_ADD, parenlev, I<1>());
                                         }
                                         else if ((S<")]}">()).contains(initial))
                                         {
-                                            parenlev = inplace(NEOS_PY_SUBTRACT, parenlev, I<1>());
+                                            if (!extra)
+                                            {
+                                                if (brackets.empty())
+                                                    py_raise((G<"_tokenize._syntax_error">())(py{ "unmatched '" + initial.str() + "'" }, lnum, start + (I<1>()), line));
+                                                auto const& [opening, at] = brackets.back();
+                                                if ((opening == "(" && initial.str() != ")") || (opening == "[" && initial.str() != "]") || (opening == "{" && initial.str() != "}"))
+                                                    py_raise((G<"_tokenize._syntax_error">())(py{ "closing parenthesis '" + initial.str() + "' does not match opening parenthesis '" + opening + "'" +
+                                                        (at != lnum ? " on line " + at.str() : std::string{}) }, lnum, start + (I<1>()), line));
+                                            }
+                                            // (an unmatched one (with extra tokens): no bracket closed)
+                                            if (!brackets.empty())
+                                            {
+                                                brackets.pop_back();
+                                                parenlev = inplace(NEOS_PY_SUBTRACT, parenlev, I<1>());
+                                            }
                                         }
-                                        py_yield(py_tuple({ (extra_tokens.truthy() ? Mod<"token">().attr("OP") : (Mod<"token">().attr("EXACT_TOKEN_TYPES")).method("get", { token, Mod<"token">().attr("OP") })), token, spos, epos, line }));
+                                        py_yield(py_tuple({ op_type(token), token, spos, epos, line }));
                                     }
                                 }
                                 else
@@ -843,6 +1242,21 @@ namespace neos::python_runtime::detail::_tokenize_module
                                     {
                                         py_raise((G<"_tokenize._syntax_error">())((S<"unterminated string literal (detected at line %d)">()) % lnum, lnum, pos + (I<1>()), line));
                                     }
+                                    if ((B<"ord">())(c) >= (I<128>()))
+                                    {
+                                        // (a name (the C tokenizer's: its characters are any that are not ASCII's, and ASCII's letters, digits and _): 
+                                        // without extra tokens, it must be an identifier)
+                                        auto const points = code_points(line);
+                                        auto e = static_cast<std::size_t>(pos.as_index());
+                                        while (e < points.size() && potential_identifier_char(points[e]))
+                                            ++e;
+                                        py const name = line[B<"slice">()(pos, py{ static_cast<long long>(e) }, none())];
+                                        if (!extra)
+                                            verify_identifier(name, lnum, static_cast<std::size_t>(pos.as_index()), line);
+                                        py_yield(py_tuple({ Mod<"token">().attr("NAME"), name, py_tuple({ lnum, pos }), py_tuple({ lnum, py{ static_cast<long long>(e) } }), line }));
+                                        pos = py{ static_cast<long long>(e) };
+                                        continue;
+                                    }
                                     if (!c.method("isprintable").truthy())
                                     {
                                         py_raise((G<"_tokenize._syntax_error">())((S<"invalid non-printable character U+%04X">()) % (B<"ord">())(c), lnum, pos + (I<1>()), line));
@@ -853,16 +1267,33 @@ namespace neos::python_runtime::detail::_tokenize_module
                                 }
                             }
                         }
-                        if ((last_line.truthy() && (!(S<"\r\n">()).contains(last_line[I<-1>()])) && (!last_line.method("strip").method("startswith", { S<"#">() }).truthy())))
+                        // (the last line's NEWLINE, if it has no line break (its line: the line; the C tokenizer's (without extra tokens) 
+                        // has no column after it)
+                        if ((last_line.truthy() && (!(S<"\r\n">()).contains(last_line[I<-1>()])) && (!last_line.method("strip").method("startswith", { S<"#">() }).truthy()) && !blankLast))
                         {
-                            py_yield(py_tuple({ Mod<"token">().attr("NEWLINE"), S<"">(), py_tuple({ lnum - (I<1>()), py{ last_line.size() } }), py_tuple({ lnum - (I<1>()), py{ last_line.size() } + (I<1>()) }), S<"">() }));
+                            py const size{ last_line.size() };
+                            if (extra)
+                                py_yield(py_tuple({ Mod<"token">().attr("NEWLINE"), S<"">(), py_tuple({ lnum - (I<1>()), size }), py_tuple({ lnum - (I<1>()), size + (I<1>()) }), last_line }));
+                            else
+                            {
+                                py const from = comment.is_none() ? size : comment;
+                                py const text = comment.is_none() ? S<"">() : last_line[B<"slice">()(from, none(), none())];
+                                py_yield(py_tuple({ Mod<"token">().attr("NEWLINE"), text, py_tuple({ lnum - (I<1>()), from }), py_tuple({ lnum - (I<1>()), from + py{ text.size() } }), last_line }));
+                            }
                         }
+                        // (the end's DEDENT and ENDMARKER tokens: on the line after the last; the C tokenizer's (without extra tokens) on 
+                        // the last, with no columns (and its line, unless it is blank), and none for no source)
+                        if (!extra && lnum == (I<1>()))
+                            return none();
+                        py const endLine = blankLast ? S<"">() : last_line;
                         for (py const& item : iterate{ indents[B<"slice">()(I<1>(), none(), none())] })
                         {
                             indent = item;
-                            py_yield(py_tuple({ Mod<"token">().attr("DEDENT"), S<"">(), py_tuple({ lnum, I<0>() }), py_tuple({ lnum, I<0>() }), S<"">() }));
+                            py_yield(extra ? py_tuple({ Mod<"token">().attr("DEDENT"), S<"">(), py_tuple({ lnum, I<0>() }), py_tuple({ lnum, I<0>() }), S<"">() }) :
+                                py_tuple({ Mod<"token">().attr("DEDENT"), S<"">(), py_tuple({ lnum - (I<1>()), I<-1>() }), py_tuple({ lnum - (I<1>()), I<-1>() }), endLine }));
                         }
-                        py_yield(py_tuple({ Mod<"token">().attr("ENDMARKER"), S<"">(), py_tuple({ lnum, I<0>() }), py_tuple({ lnum, I<0>() }), S<"">() }));
+                        py_yield(extra ? py_tuple({ Mod<"token">().attr("ENDMARKER"), S<"">(), py_tuple({ lnum, I<0>() }), py_tuple({ lnum, I<0>() }), S<"">() }) :
+                            py_tuple({ Mod<"token">().attr("ENDMARKER"), S<"">(), py_tuple({ lnum - (I<1>()), I<-1>() }), py_tuple({ lnum - (I<1>()), I<-1>() }), endLine }));
                         return none();
                     });
                 }));

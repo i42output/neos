@@ -66,7 +66,7 @@ namespace neos::compilers::python
 
         struct scope
         {
-            enum kind_t { Module, Function, Lambda } kind = Module;
+            enum kind_t { Module, Function, Lambda, TypeParams } kind = Module;  ///< (TypeParams: an annotation scope (PEP 695): see find_functions)
             scope* parent = nullptr;
             std::vector<scope*> children;
             std::string name;
@@ -81,7 +81,24 @@ namespace neos::compilers::python
             bool inlineBody = false;
             std::size_t bodyEnd = 0u;                   ///< (the line after its body)
             std::string hoisted;                        ///< (the name of the function at the end of the module)
-            std::string typeParameters;                 ///< (a def's (def f[T, *Ts](...)): their bindings ("(T := __type_param('T', 0)), ..."))
+            scope* typeParams = nullptr;                ///< (a def's (def f[T, *Ts](...)) or a class body's: the annotation scope of its type parameters)
+            // (an annotation scope's: its type parameters (their names (mangled, in a class) and the names they have, their kinds (0: 
+            // TypeVar, 1: TypeVarTuple, 2: ParamSpec), and the evaluators (annotation scopes) of their bounds (or constraints) and defaults)
+            struct type_parameter
+            {
+                std::string name;
+                std::string shown;
+                int kind = 0;
+                scope* bound = nullptr;
+                bool constraints = false;
+                scope* defaultValue = nullptr;
+            };
+            std::vector<type_parameter> typeParameters;
+            bool typeAlias = false;                     ///< (an annotation scope that is a type statement's value (_yN_X, see statements.cpp))
+            std::string aliasName;
+            bool starred = false;                       ///< (an evaluator of a TypeVarTuple's starred default: *Ts = *default)
+            scope* classScope = nullptr;                ///< (an annotation scope in a class's body (or in one that is): the class's (it sees its namespace))
+            std::set<std::string> classNames;           ///< (its names that the class binds: the class's namespace's, else the module's)
             // (a lambda: its tokens in its line)
             std::size_t line = 0u;
             std::size_t first = 0u;                     ///< (lambda)
@@ -303,6 +320,8 @@ namespace neos::compilers::python
                 find_functions();
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                     find_lambdas(l, 0u, iLines[l].tokens.size());
+                disallowed();
+                class_scopes();
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                     analyze_line(l);
                 redefined();
@@ -338,7 +357,8 @@ namespace neos::compilers::python
                 // (nothing to rewrite: no nested functions, decorators or lambdas that need closures)
                 bool needed = !iStripped.empty();
                 for (auto const& s : iScopes)
-                    if (s->kind == scope::Function ? (s->parent != &iModule || !s->decorators.empty() || s->generator || s->classBody || conditional(*s)) : (!s->frees.empty() || has_defaults(*s) || s->generator || !s->globals.empty()))
+                    if (s->kind == scope::TypeParams || (s->kind == scope::Function ? (s->parent != &iModule || !s->decorators.empty() || s->generator || s->classBody || conditional(*s)) : 
+                        (!s->frees.empty() || has_defaults(*s) || s->generator || !s->globals.empty())))
                         needed = true;
                 if (!needed)
                     return iText;
@@ -458,17 +478,28 @@ namespace neos::compilers::python
                 }
                 return (aRange.second - aRange.first) % 2u == 1u;
             }
+            // (an annotation of a def that its function's header keeps: the grammar's type, that is not one of its type parameters)
+            bool header_annotation(scope const& aFunction, std::pair<std::size_t, std::size_t> const& aRange) const
+            {
+                if (!grammar_annotation(aFunction.header, aRange))
+                    return false;
+                if (aFunction.typeParams != nullptr)
+                    for (auto t = aRange.first; t < aRange.second; ++t)
+                        if (tok(aFunction.header, t).kind == token::Name && type_parameter(*aFunction.typeParams, std::string{ text(aFunction.header, t) }))
+                            return false;
+                return true;
+            }
             // (the annotations of a def that are not the grammar's types: the tokens that they are (with their colons and arrow))
             std::vector<std::pair<std::size_t, std::size_t>> stripped_annotations(scope const& aFunction) const
             {
                 std::vector<std::pair<std::size_t, std::size_t>> result;
                 // (*args' and **kwargs' annotations are their items')
                 for (auto const& p : aFunction.parameters)
-                    if (p.annotation && (!grammar_annotation(aFunction.header, *p.annotation) || p.kind == scope::parameter::VarArgs || p.kind == scope::parameter::VarKeywords))
+                    if (p.annotation && (!header_annotation(aFunction, *p.annotation) || p.kind == scope::parameter::VarArgs || p.kind == scope::parameter::VarKeywords))
                         result.emplace_back(p.annotation->first - 1u, p.annotation->second);
                 // (a def whose body is "pass" (or "...") returns None: its return annotation is not its type (a stub's, e.g. an overload's or 
                 // a protocol's, "def f(x: int) -> int: ..."); nor is a generator's or a coroutine's (it returns a generator or coroutine object))
-                if (aFunction.returnAnnotation && (!grammar_annotation(aFunction.header, *aFunction.returnAnnotation) || (body_is(aFunction, "pass") && !iStubReturnTypes) ||
+                if (aFunction.returnAnnotation && (!header_annotation(aFunction, *aFunction.returnAnnotation) || (body_is(aFunction, "pass") && !iStubReturnTypes) ||
                     aFunction.generator))
                     result.emplace_back(aFunction.returnAnnotation->first - 1u, aFunction.returnAnnotation->second);
                 return result;
@@ -515,21 +546,23 @@ namespace neos::compilers::python
                 std::string entries;
                 std::string sources;
                 auto const l = aFunction.header;
+                auto const* const annotationScope = aFunction.typeParams != nullptr ? aFunction.typeParams : aFunction.parent;
                 for (auto const& p : aFunction.parameters)
                     if (p.annotation && p.annotation->first < p.annotation->second)
                     {
-                        entries += (entries.empty() ? "" : ", ") + ("'" + p.name + "': " + annotation_value(l, *p.annotation, aFunction.parent));
+                        entries += (entries.empty() ? "" : ", ") + ("'" + p.name + "': " + annotation_value(l, *p.annotation, annotationScope));
                         sources += "'" + p.name + "', " + quoted(source_of(l, p.annotation->first, p.annotation->second)) + ", ";
                     }
                 if (aFunction.returnAnnotation)
                 {
-                    entries += (entries.empty() ? "" : ", ") + ("'return': " + annotation_value(l, *aFunction.returnAnnotation, aFunction.parent));
+                    entries += (entries.empty() ? "" : ", ") + ("'return': " + annotation_value(l, *aFunction.returnAnnotation, annotationScope));
                     sources += "'return', " + quoted(source_of(l, aFunction.returnAnnotation->first, aFunction.returnAnnotation->second)) + ", ";
                 }
-                // (a nested function's: evaluated where it is defined (as CPython's), in its scope (whose variables they may be))
+                // (a nested function's (or a generic one's): evaluated where it is defined (as CPython's), in its scope (whose variables 
+                // they may be))
                 if (entries.empty())
                     return {};
-                return (aFunction.parent != &iModule ? "{" + entries + "}" : "lambda: {" + entries + "}") + ", (" + sources + ")";
+                return (aFunction.parent != &iModule || aFunction.typeParams != nullptr ? "{" + entries + "}" : "lambda: {" + entries + "}") + ", (" + sources + ")";
             }
 
             std::string source_of(std::size_t aLine, std::size_t aBegin, std::size_t aEnd) const
@@ -659,6 +692,180 @@ namespace neos::compilers::python
                 }
             }
 
+            // (a syntax error at a (logical) line: its first physical line)
+            [[noreturn]] void syntax_error(std::size_t aLine, std::string const& aMessage)
+            {
+                throw rewrite_error{ aLine < iLines.size() ? physical_line(iLines[aLine].begin) : 0u, aMessage };
+            }
+            // (the line of a scope's nonlocal statement of a name)
+            std::size_t nonlocal_line(scope const& aScope, std::string const& aName) const
+            {
+                for (auto const& n : iNonlocals)
+                    if (iOwners[n.first][n.second.first] == &aScope)
+                        for (auto t = n.second.first; t < n.second.second; ++t)
+                            if (is_name(n.first, t, aName))
+                                return n.first;
+                return iLines.size();
+            }
+            // (the expressions that an annotation scope cannot have (CPython's symtable: yield, await and named expressions): a SyntaxError)
+            void disallowed()
+            {
+                for (std::size_t l = 0u; l < iLines.size(); ++l)
+                    for (std::size_t t = 0u; t < iLines[l].tokens.size(); ++t)
+                    {
+                        auto const* const owner = iOwners[l][t];
+                        if (owner->kind != scope::TypeParams)
+                            continue;
+                        char const* const what = is_name(l, t, "yield") ? "yield expression" : is_name(l, t, "await") || is_name(l, t, "__await") ? "await expression" : 
+                            is_op(l, t, ":=") ? "named expression" : nullptr;
+                        if (what == nullptr)
+                            continue;
+                        bool const evaluator = owner->parent != nullptr && owner->parent->kind == scope::TypeParams;
+                        syntax_error(l, std::string{ what } + " cannot be used within " + (owner->typeAlias ? "a type alias" : evaluator ? "a TypeVar bound" : "the definition of a generic"));
+                    }
+            }
+            // (the scope that a scope's names are looked up in after its own: an annotation scope's, for a generic def or class body)
+            static scope* up(scope const* aScope) { return aScope->typeParams != nullptr ? aScope->typeParams : aScope->parent; }
+            // (the scope whose qualified name a scope's functions and lambdas are within: not an annotation scope)
+            static scope const& named(scope const& aScope)
+            {
+                auto const* s = &aScope;
+                while (s->kind == scope::TypeParams && up(s) != nullptr)
+                    s = up(s);
+                return *s;
+            }
+            // (a private name (__x, not __x__) in a class (aClass, its name): _C__x (CPython's _Py_Mangle))
+            static std::string mangle(std::string const& aName, std::string const& aClass)
+            {
+                if (aName.size() <= 2u || !aName.starts_with("__") || aName.ends_with("__") || aName.find('.') != std::string::npos)
+                    return aName;
+                auto const stripped = aClass.find_first_not_of('_');
+                return stripped == std::string::npos ? aName : "_" + aClass.substr(stripped) + aName;
+            }
+            // (a def's or class's type parameters ("[T: bound, *Ts = default, **P]", tokens [aOpen, aClose] of a line): their annotation 
+            // scope (aFunction's typeParams, a scope of aParent's), which binds them, and their bounds' (constraints') and defaults' 
+            // evaluators (annotation scopes of it) (CPython's symtable_visit_type_param and the parser's checks)
+            void type_parameters(scope& aFunction, scope& aParent, std::size_t aLine, std::size_t aOpen, std::size_t aClose)
+            {
+                auto const l = aLine;
+                auto& typeParams = new_scope(scope::TypeParams, aParent);
+                typeParams.line = l;
+                typeParams.first = aOpen;
+                typeParams.last = aClose + 1u;
+                typeParams.name = aFunction.classBody ? aFunction.className : aFunction.typeAlias ? aFunction.aliasName : aFunction.name;
+                aFunction.typeParams = &typeParams;
+                for (auto t = aOpen; t <= aClose; ++t)
+                    iOwners[l][t] = &typeParams;
+                // (the class whose private names its names are: the class's own, or the innermost that it is in)
+                std::string privateName;
+                if (aFunction.classBody)
+                    privateName = aFunction.className;
+                else
+                    for (scope const* s = &aParent; s != nullptr; s = up(s))
+                        if (s->classBody)
+                        {
+                            privateName = s->className;
+                            break;
+                        }
+                // (the evaluator of a bound or default: tokens [aBegin, aEnd))
+                auto const evaluator = [&](std::size_t aBegin, std::size_t aEnd, std::string const& aName) -> scope*
+                {
+                    if (aBegin >= aEnd)
+                        syntax_error(l, "invalid syntax");
+                    auto& e = new_scope(scope::TypeParams, typeParams);
+                    e.line = l;
+                    e.first = aBegin;
+                    e.last = aEnd;
+                    e.name = aName;
+                    for (auto t = aBegin; t < aEnd; ++t)
+                        iOwners[l][t] = &e;
+                    return &e;
+                };
+                bool defaults = false;
+                std::set<std::string> names;
+                auto t = aOpen + 1u;
+                while (t < aClose)
+                {
+                    // (one type parameter: up to a comma at its level)
+                    auto e = t;
+                    for (int depth = 0; e < aClose; ++e)
+                        if (tok(l, e).kind == token::Op)
+                        {
+                            auto const op = text(l, e);
+                            if (opening(op)) ++depth;
+                            else if (closing(op)) --depth;
+                            else if (op == "," && depth == 0) break;
+                        }
+                    scope::type_parameter parameter;
+                    auto p = t;
+                    if (is_op(l, p, "*") || is_op(l, p, "**"))
+                        parameter.kind = is_op(l, p++, "*") ? 1 : 2;
+                    if (p >= e || tok(l, p).kind != token::Name || keywords().contains(text(l, p)))
+                        syntax_error(l, "invalid syntax");
+                    parameter.shown = std::string{ text(l, p) };
+                    parameter.name = mangle(parameter.shown, privateName);
+                    if (!names.insert(parameter.name).second)
+                        syntax_error(l, "duplicate type parameter '" + parameter.shown + "'");
+                    iBinding[l][p] = true;
+                    iSkip[l][p] = true;
+                    // (its bound or constraints (a tuple's display), and its default)
+                    auto q = p + 1u;
+                    auto equals = e;
+                    for (int depth = 0, x = static_cast<int>(q); x < static_cast<int>(e); ++x)
+                        if (tok(l, static_cast<std::size_t>(x)).kind == token::Op)
+                        {
+                            auto const op = text(l, static_cast<std::size_t>(x));
+                            if (opening(op)) ++depth;
+                            else if (closing(op)) --depth;
+                            else if (op == "=" && depth == 0)
+                            {
+                                equals = static_cast<std::size_t>(x);
+                                break;
+                            }
+                        }
+                    if (is_op(l, q, ":"))
+                    {
+                        // (a tuple's display: "(a, b)", "(a,)" or "()")
+                        bool tuple = false;
+                        if (is_op(l, q + 1u, "(") && matching(l, q + 1u) + 1u == equals)
+                        {
+                            tuple = is_op(l, q + 2u, ")");
+                            for (int depth = 0, x = static_cast<int>(q + 2u); !tuple && x + 1 < static_cast<int>(equals); ++x)
+                                if (tok(l, static_cast<std::size_t>(x)).kind == token::Op)
+                                {
+                                    auto const op = text(l, static_cast<std::size_t>(x));
+                                    if (opening(op)) ++depth;
+                                    else if (closing(op)) --depth;
+                                    else if (op == "," && depth == 0) tuple = true;
+                                }
+                        }
+                        if (parameter.kind != 0)
+                            syntax_error(l, std::string{ "cannot use " } + (tuple ? "constraints" : "bound") + " with " + (parameter.kind == 1 ? "TypeVarTuple" : "ParamSpec"));
+                        parameter.bound = evaluator(q + 1u, equals, parameter.shown);
+                        parameter.constraints = tuple;
+                        q = equals;
+                    }
+                    if (q != equals)
+                        syntax_error(l, "invalid syntax");
+                    if (equals < e)
+                    {
+                        // (a starred default: a TypeVarTuple's only)
+                        if (is_op(l, equals + 1u, "*") && parameter.kind != 1)
+                            syntax_error(l, "invalid syntax");
+                        parameter.defaultValue = evaluator(equals + 1u, e, parameter.shown);
+                        parameter.defaultValue->starred = is_op(l, equals + 1u, "*");
+                        defaults = true;
+                    }
+                    else if (defaults)
+                        syntax_error(l, "non-default type parameter '" + parameter.shown + "' follows default type parameter");
+                    typeParams.bound.insert(parameter.name);
+                    typeParams.typeParameters.push_back(std::move(parameter));
+                    t = e + 1u;
+                }
+                if (typeParams.typeParameters.empty())
+                    syntax_error(l, "Type parameter list cannot be empty");
+            }
+
             void find_functions()
             {
                 // (the open functions, innermost last)
@@ -712,35 +919,29 @@ namespace neos::compilers::python
                     parent.bound.insert(f.classBody ? f.className : f.name);
                     iBinding[l][d + 1u] = true;
                     f.openParen = d + 2u;
-                    // (its type parameters: bound where it is defined (its closure is of them: see render_function))
+                    // (a type statement's value (_yN_X: see statements.cpp): an annotation scope (its evaluator), which binds X)
+                    if (f.name.size() > 3u && f.name.starts_with("_y") && std::isdigit(static_cast<unsigned char>(f.name[2])))
+                    {
+                        auto const underscore = f.name.find('_', 2u);
+                        if (underscore != std::string::npos && std::all_of(f.name.begin() + 2, f.name.begin() + static_cast<std::ptrdiff_t>(underscore),
+                            [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }))
+                        {
+                            f.typeAlias = true;
+                            f.aliasName = f.name.substr(underscore + 1u);
+                            parent.bound.erase(f.name);
+                            parent.bound.insert(f.aliasName);
+                            if (&parent == &iModule)
+                                iRebound.insert(f.aliasName);
+                        }
+                    }
+                    // (its type parameters (PEP 695): their annotation scope (CPython's), whose function is f's parent (its closure is of 
+                    // them: see render_function))
                     if (is_op(l, f.openParen, "["))
                     {
                         auto const close = matching(l, f.openParen);
-                        int kind = 0;
-                        int depth = 0;  // (the names in a bound's or a default's brackets are not parameters: e.g. "[T: (int, str)]")
-                        for (auto t = f.openParen + 1u; t < close; ++t)
-                        {
-                            if (is_op(l, t, "(") || is_op(l, t, "[") || is_op(l, t, "{"))
-                                ++depth;
-                            else if (is_op(l, t, ")") || is_op(l, t, "]") || is_op(l, t, "}"))
-                                --depth;
-                            else if (depth != 0)
-                                continue;
-                            else if (is_op(l, t, "*") || is_op(l, t, "**"))
-                                kind = is_op(l, t, "*") ? 1 : 2;
-                            else if (tok(l, t).kind == token::Name && (is_op(l, t - 1u, "[") || is_op(l, t - 1u, ",") || is_op(l, t - 1u, "*") || is_op(l, t - 1u, "**")))
-                            {
-                                std::string const name{ text(l, t) };
-                                f.typeParameters += "(" + name + " := __type_param('" + name + "', " + std::to_string(kind) + ")), ";
-                                parent.bound.insert(name);
-                                if (&parent == &iModule)
-                                    iRebound.insert(name);
-                                iBinding[l][t] = true;
-                                kind = 0;
-                            }
-                            else if (is_op(l, t, ","))
-                                kind = 0;
-                        }
+                        if (close >= line.tokens.size())
+                            syntax_error(l, "invalid syntax");
+                        type_parameters(f, parent, l, f.openParen, close);
                         if (&parent == &iModule)
                             iRebound.insert(f.name);
                         f.openParen = close + 1u;
@@ -759,6 +960,37 @@ namespace neos::compilers::python
                     f.inlineBody = f.colon + 1u < line.tokens.size();
                     for (auto t = f.colon + 1u; t < line.tokens.size(); ++t)
                         iOwners[l][t] = &f;
+                    // (a generic def's annotations are its type parameters' scope's (evaluated there), as are a generic class's bases and 
+                    // keywords (its body's function's default values, see statements.cpp))
+                    if (f.typeParams != nullptr)
+                    {
+                        if (f.classBody)
+                        {
+                            for (auto t = f.openParen + 1u; t < f.closeParen; ++t)
+                                if (iOwners[l][t] == &parent)
+                                    iOwners[l][t] = f.typeParams;
+                        }
+                        else
+                        {
+                            for (auto const& p : f.parameters)
+                                if (p.annotation)
+                                    for (auto t = p.annotation->first; t < p.annotation->second; ++t)
+                                        iOwners[l][t] = f.typeParams;
+                            if (f.returnAnnotation)
+                                for (auto t = f.returnAnnotation->first; t < f.returnAnnotation->second; ++t)
+                                    iOwners[l][t] = f.typeParams;
+                        }
+                    }
+                    // (a type statement's value: "return (value)"; its evaluator is an annotation scope)
+                    if (f.typeAlias)
+                    {
+                        f.kind = scope::TypeParams;
+                        f.line = l;
+                        f.first = f.colon + 2u;
+                        f.last = line.tokens.size();
+                        if (!f.inlineBody || !is_name(l, f.colon + 1u, "return") || f.first >= f.last)
+                            syntax_error(l, "invalid syntax");
+                    }
                     if (f.inlineBody)
                         f.bodyEnd = l + 1u;
                     else
@@ -782,6 +1014,13 @@ namespace neos::compilers::python
                     else
                         f.qualname = f.parent->qualname + ".<locals>." + shown;
                 }
+                // (an annotation scope's evaluator: its type parameter's or type alias's name, in the scope that it is in)
+                for (auto const& s : iScopes)
+                    if (s->kind == scope::TypeParams && (s->typeAlias || s->parent->kind == scope::TypeParams))
+                    {
+                        auto const& n = named(*s->parent);
+                        s->qualname = (n.kind == scope::Module ? std::string{} : n.qualname + (n.classBody ? "." : ".<locals>.")) + (s->typeAlias ? s->aliasName : s->name);
+                    }
             }
 
             // (a function or class whose name its enclosing function declares global: its qualified name is its name (CPython's 
@@ -812,7 +1051,7 @@ namespace neos::compilers::python
                             f.qualname = f.parent->qualname + ".<locals>." + shown;
                     }
                     else if (f.kind == scope::Lambda && f.parent != nullptr)
-                        f.qualname = (f.parent->kind == scope::Module ? std::string{} : f.parent->qualname + ".<locals>.") + "<lambda>";
+                        f.qualname = (named(*f.parent).kind == scope::Module ? std::string{} : named(*f.parent).qualname + ".<locals>.") + "<lambda>";
                 }
             }
 
@@ -857,7 +1096,7 @@ namespace neos::compilers::python
                     l.line = aLine;
                     l.first = t;
                     l.name = "<lambda>";
-                    l.qualname = (owner.kind == scope::Module ? std::string{} : owner.qualname + ".<locals>.") + "<lambda>";
+                    l.qualname = (named(owner).kind == scope::Module ? std::string{} : named(owner).qualname + ".<locals>.") + "<lambda>";
                     // (its parameters: up to its colon)
                     auto const colon = lambda_colon(aLine, t, aEnd);
                     l.colon = colon;
@@ -1280,11 +1519,35 @@ namespace neos::compilers::python
             // (the scope whose local a name (used in aScope, which does not bind it) is: null if a global)
             scope* defining(scope& aScope, std::string const& aName)
             {
-                // (a class's body is not a scope of the functions within it (except for its __class__))
-                for (auto s = aScope.parent; s != nullptr && s->kind != scope::Module; s = s->parent)
-                    if (s->local(aName) && (!s->classBody || aName == "__class__"))
+                // (a class's body is not a scope of the functions within it (except for its __class__, and the annotation scopes' 
+                // __classdictcell__)); an annotation scope's is (CPython's)
+                for (auto s = up(&aScope); s != nullptr && s->kind != scope::Module; s = up(s))
+                    if (s->local(aName) && (!s->classBody || aName == "__class__" || aName == sClassDict))
                         return s;
                 return nullptr;
+            }
+
+            // (the cell of a class's body that its annotation scopes see its namespace (then the class's __dict__) through (CPython's 
+            // __classdict__))
+            static constexpr char const* sClassDict = "__classdictcell__";
+            // (the prefix of the name of a class body's cell of a name that it binds that its annotation scopes read (its namespace's: 
+            // the compiler's class body makes the cell _k__nc_x its namespace's x), apart from a cell of the name that its nested 
+            // functions' free variables pass through it)
+            static constexpr char const* sNamespaceCell = "_nc_";
+
+            // (an annotation scope in a class's body, or in an annotation scope that is: the class (CPython's ste_can_see_class_scope))
+            void class_scopes()
+            {
+                for (auto const& s : iScopes)
+                {
+                    if (s->kind != scope::TypeParams)
+                        continue;
+                    auto* c = up(s.get());
+                    while (c != nullptr && c->kind == scope::TypeParams)
+                        c = up(c);
+                    if (c != nullptr && c->classBody)
+                        s->classScope = c;
+                }
             }
 
             void resolve(scope& aScope)
@@ -1295,19 +1558,47 @@ namespace neos::compilers::python
                     return;
                 std::set<std::string> names = aScope.referenced;
                 names.insert(aScope.nonlocals.begin(), aScope.nonlocals.end());
+                auto* const cls = aScope.classScope;
+                // (an annotation scope in a class: the class's namespace (its cell))
+                if (cls != nullptr)
+                {
+                    cls->bound.insert(sClassDict);
+                    names.insert(sClassDict);
+                }
                 for (auto const& name : names)
                 {
                     if (aScope.local(name) || aScope.globals.contains(name))
                         continue;
+                    // (in an annotation scope in a class, a name that the class declares global is the module's; one that the class binds is 
+                    // its namespace's, else the module's (not an enclosing function's: CPython's analyze_name), unless a scope between them 
+                    // binds it)
+                    if (cls != nullptr && !aScope.nonlocals.contains(name) && name != sClassDict)
+                    {
+                        if (cls->globals.contains(name))
+                            continue;
+                        bool shadowed = false;
+                        for (auto s = up(&aScope); s != cls; s = up(s))
+                            shadowed = shadowed || s->local(name);
+                        if (cls->local(name) && !cls->nonlocals.contains(name) && !shadowed)
+                        {
+                            aScope.classNames.insert(name);
+                            cls->cells.insert(sNamespaceCell + name);
+                            for (auto s = &aScope; s != cls; s = up(s))
+                                s->frees.insert(sNamespaceCell + name);
+                            continue;
+                        }
+                    }
                     auto const d = defining(aScope, name);
                     if (d == nullptr)
                     {
                         if (aScope.nonlocals.contains(name))
-                            throw std::runtime_error("no binding for nonlocal '" + name + "' found");
+                            syntax_error(nonlocal_line(aScope, name), "no binding for nonlocal '" + name + "' found");
                         continue;
                     }
+                    if (aScope.nonlocals.contains(name) && d->kind == scope::TypeParams)
+                        syntax_error(nonlocal_line(aScope, name), "nonlocal binding not allowed for type parameter '" + name + "'");
                     d->cells.insert(name);
-                    for (auto s = &aScope; s != d; s = s->parent)
+                    for (auto s = &aScope; s != d; s = up(s))
                         s->frees.insert(name);
                 }
             }
@@ -1356,9 +1647,49 @@ namespace neos::compilers::python
                     for (auto const& p : aScope.parameters)
                         if (p.name == c)
                             parameter = true;
-                    result += (result.empty() ? "" : "; ") + cell(c) + " = __cell('" + c + "'" + (parameter ? ", " + c : std::string{}) + ")";
+                    result += (result.empty() ? "" : "; ") + cell(c) + " = __cell('" + c + "'" + (parameter ? ", " + c : c == sClassDict ? ", __classdict()" : std::string{}) + ")";
                 }
                 return result;
+            }
+
+            // (the cell (its variable) that a scope's name is, if it is one (its own cell, a free variable's, an annotation scope's type 
+            // parameter): empty if not; a name that a class's body binds is its namespace's (not a free variable's that passes through it), 
+            // or its cell of it (sNamespaceCell))
+            std::string cell_of(scope const& aScope, std::string const& aName) const
+            {
+                if (aScope.classBody)
+                {
+                    if (aScope.cells.contains(sNamespaceCell + aName))
+                        return cell(sNamespaceCell + aName);
+                    if (aScope.local(aName) && !aScope.cells.contains(aName))
+                        return {};
+                }
+                if (aScope.cells.contains(aName) || aScope.frees.contains(aName) || type_parameter(aScope, aName))
+                    return cell(aName);
+                return {};
+            }
+
+            // (an annotation scope's type parameter (a cell of it))
+            static bool type_parameter(scope const& aScope, std::string const& aName)
+            {
+                return aScope.kind == scope::TypeParams && std::any_of(aScope.typeParameters.begin(), aScope.typeParameters.end(), [&](auto const& p) { return p.name == aName; });
+            }
+
+            // (a name that an annotation scope in a class reads: the class's namespace's (__classdict_lookup(classdict cell, name, then 
+            // its cell or (a global's) a function that reads it, [the class's cell of it])); empty if it is not looked up there)
+            std::string class_lookup(scope const& aScope, std::string const& aName) const
+            {
+                auto const* const cls = aScope.classScope;
+                if (cls == nullptr || aName == sClassDict || aScope.globals.contains(aName) || cls->globals.contains(aName))
+                    return {};
+                std::string const lookup = "__classdict_lookup(" + cell(sClassDict) + ", '" + aName + "', ";
+                if (aScope.local(aName) || type_parameter(aScope, aName))
+                    return aScope.cells.contains(aName) ? lookup + cell(aName) + ")" : std::string{};
+                if (aScope.classNames.contains(aName))
+                    return lookup + "lambda: " + aName + ", " + cell(sNamespaceCell + aName) + ")";
+                if (aScope.frees.contains(aName))
+                    return lookup + cell(aName) + ")";
+                return lookup + "lambda: " + aName + ")";
             }
 
             // (the text of a line's tokens [aBegin, aEnd) rendered in aScope)
@@ -1553,17 +1884,108 @@ namespace neos::compilers::python
                 return static_cast<std::size_t>(std::upper_bound(iLineStarts.begin(), iLineStarts.end(), aPosition) - iLineStarts.begin()) - 1u;
             }
 
+            // (an annotation scope's type parameters: the tuple of them)
+            static std::string type_parameter_values(scope const& aTypeParams)
+            {
+                std::string result;
+                for (auto const& p : aTypeParams.typeParameters)
+                    result += cell(p.name) + ".v, ";
+                return "(" + result + ")";
+            }
+
+            // (an evaluator (an annotation scope of a bound, constraints, default or type alias's value): a function of no arguments)
+            std::string render_evaluator(scope& aEvaluator)
+            {
+                auto body = render_tokens(aEvaluator.line, aEvaluator.first, aEvaluator.last, &aEvaluator);
+                // (a starred default (*Ts = *default): the item of its unpacking, as CPython evaluates it)
+                if (aEvaluator.starred)
+                    body = "(" + body + ",)[0]";
+                // (its cells (e.g. a comprehension's variable that its lambdas read): a lambda called with them)
+                if (!aEvaluator.cells.empty())
+                {
+                    std::string inner;
+                    std::string arguments;
+                    for (auto const& c : aEvaluator.cells)
+                    {
+                        inner += (inner.empty() ? "" : ", ") + cell(c);
+                        arguments += (arguments.empty() ? "" : ", ") + std::string{ "__cell('" } + c + "')";
+                    }
+                    for (auto const& f : aEvaluator.frees)
+                    {
+                        inner += ", " + cell(f);
+                        arguments += ", " + cell(f);
+                    }
+                    body = "(lambda " + inner + ": " + body + ")(" + arguments + ")";
+                }
+                if (aEvaluator.frees.empty())
+                    return "lambda: (" + body + ")";
+                auto const cells = cell_parameters(aEvaluator);
+                return "__closure(lambda " + cells + ": (" + body + "), '" + (aEvaluator.typeAlias ? aEvaluator.aliasName : aEvaluator.name) + "', '" +
+                    aEvaluator.qualname + "', None, " + cells + ")";
+            }
+
+            // (the annotation scope of a generic def's, class's or type alias's type parameters (PEP 695): a lambda called with their cells 
+            // (and a def's default values (aDefaults), and its free variables' cells) that makes them (__type_param(cell, name, kind, 
+            // bound, constraints, default): their evaluators are evaluated when they are first read) then aValue (in it))
+            std::string type_parameter_scope(scope& aTypeParams, std::string const& aValue, std::string const& aDefaults)
+            {
+                std::string parameters;
+                std::string arguments;
+                std::string made;
+                auto const add = [&](std::string const& aParameter, std::string const& aArgument)
+                {
+                    parameters += (parameters.empty() ? "" : ", ") + aParameter;
+                    arguments += (arguments.empty() ? "" : ", ") + aArgument;
+                };
+                for (auto const& p : aTypeParams.typeParameters)
+                {
+                    add(cell(p.name), "__cell('" + p.name + "')");
+                    made += "__type_param(" + cell(p.name) + ", '" + p.shown + "', " + std::to_string(p.kind) + ", " +
+                        (p.bound != nullptr && !p.constraints ? render_evaluator(*p.bound) : std::string{ "None" }) + ", " +
+                        (p.bound != nullptr && p.constraints ? render_evaluator(*p.bound) : std::string{ "None" }) + ", " +
+                        (p.defaultValue != nullptr ? render_evaluator(*p.defaultValue) : std::string{ "None" }) + "), ";
+                }
+                // (its other cells (e.g. a comprehension's variable that its lambdas read))
+                for (auto const& c : aTypeParams.cells)
+                    if (!type_parameter(aTypeParams, c))
+                        add(cell(c), "__cell('" + c + "')");
+                if (!aDefaults.empty())
+                    add("_tpd", aDefaults);
+                for (auto const& f : aTypeParams.frees)
+                    add(cell(f), cell(f));
+                return "(lambda " + parameters + ": (" + made + aValue + ")[-1])(" + arguments + ")";
+            }
+
+            // (a type statement (its evaluator, _yN_X): "X = __type_alias('X', evaluator, type parameters)", in their annotation scope)
+            std::string render_type_alias(scope& aAlias)
+            {
+                std::string value = "__type_alias('" + aAlias.aliasName + "', " + render_evaluator(aAlias) + ", " +
+                    (aAlias.typeParams != nullptr ? type_parameter_values(*aAlias.typeParams) : std::string{ "()" }) + ")";
+                if (aAlias.typeParams != nullptr)
+                    value = type_parameter_scope(*aAlias.typeParams, value, {});
+                auto const& parent = *aAlias.parent;
+                auto const target = parent.kind != scope::Module ? cell_of(parent, aAlias.aliasName) : std::string{};
+                return (!target.empty() ? target + ".v" : aAlias.aliasName) + " = " + value;
+            }
+
             // (a nested or decorated function: where it is defined, the closure (decorated); and its function at the end of the module)
             std::string render_function(scope& aFunction)
             {
                 auto const l = aFunction.header;
                 auto const& header = iLines[l];
+                auto* const typeParams = aFunction.typeParams;
                 // (the closure)
                 std::string parameters;
                 std::string defaults;
                 for (auto const& p : aFunction.parameters)
                     if (p.defaultValue)
-                        defaults += render_tokens(l, p.defaultValue->first, p.defaultValue->second, aFunction.parent) + ", ";
+                        defaults += render_tokens(l, p.defaultValue->first, p.defaultValue->second, aFunction.classBody && typeParams != nullptr ? typeParams : aFunction.parent) + ", ";
+                // (a generic def's default values: evaluated before its type parameters' scope, which receives them (_tpd))
+                std::string const evaluatedDefaults = defaults.empty() ? std::string{} : "(" + defaults + ")";
+                if (typeParams != nullptr && !aFunction.classBody && !defaults.empty())
+                    defaults = "_tpd";
+                else if (!defaults.empty())
+                    defaults = "(" + defaults + ")";
                 {
                     // (the parameters with None for their default values (and without the annotations that are not the grammar's types))
                     std::size_t from = aFunction.openParen + 1u;
@@ -1571,7 +1993,7 @@ namespace neos::compilers::python
                     std::vector<std::tuple<std::size_t, std::size_t, std::string>> cuts;
                     for (auto const& p : aFunction.parameters)
                     {
-                        if (p.annotation && (!grammar_annotation(l, *p.annotation) || p.kind == scope::parameter::VarArgs || p.kind == scope::parameter::VarKeywords) &&
+                        if (p.annotation && (!header_annotation(aFunction, *p.annotation) || p.kind == scope::parameter::VarArgs || p.kind == scope::parameter::VarKeywords) &&
                             p.annotation->first < p.annotation->second)
                             cuts.emplace_back(tok(l, p.annotation->first - 1u).begin, tok(l, p.annotation->second - 1u).end, std::string{});
                         if (p.defaultValue)
@@ -1587,25 +2009,31 @@ namespace neos::compilers::python
                 auto const cells = cell_parameters(aFunction);
                 auto const& shown = aFunction.classBody ? aFunction.className : aFunction.name;
                 std::string value = "__closure(" + aFunction.hoisted + ", '" + shown + "', '" + aFunction.qualname + "', " +
-                    (defaults.empty() ? std::string{ "None" } : "(" + defaults + ")") + (cells.empty() ? "" : ", " + cells) + ")";
-                // (a class's body: the class)
+                    (defaults.empty() ? std::string{ "None" } : defaults) + (cells.empty() ? "" : ", " + cells) + ")";
+                // (a class's body: the class (a generic class's: its type parameters are its namespace's __type_params__))
                 if (aFunction.classBody)
-                    value = "__build_class(" + value + ")";
+                    value = "__build_class(" + value + (typeParams != nullptr ? ", " + type_parameter_values(*typeParams) : std::string{}) + ")";
                 else if (auto const annotations = annotations_dict(aFunction); !annotations.empty())
                     value = "__annotate(" + value + ", " + annotations + ")";
-                if (!aFunction.typeParameters.empty())
-                    value = "__generic_function((" + aFunction.typeParameters + "), " + value + ")";
+                if (typeParams != nullptr)
+                {
+                    if (!aFunction.classBody)
+                        value = "__generic_function(" + type_parameter_values(*typeParams) + ", " + value + ")";
+                    value = type_parameter_scope(*typeParams, value, typeParams != nullptr && !aFunction.classBody ? evaluatedDefaults : std::string{});
+                }
                 for (auto d = aFunction.decorators.rbegin(); d != aFunction.decorators.rend(); ++d)
                     value = render_tokens(*d, 1u, iLines[*d].tokens.size(), aFunction.parent) + "(" + value + ")";
                 auto const& parent = *aFunction.parent;
-                std::string const target = parent.cells.contains(shown) ? cell(shown) + ".v" : shown;
+                std::string const target = parent.kind != scope::Module && !cell_of(parent, shown).empty() ? cell_of(parent, shown) + ".v" : shown;
                 // (the function)
                 bool const any = parameters.find_first_not_of(" \t") != std::string::npos;
                 std::string function = "def " + aFunction.hoisted + "(" + cells + (!cells.empty() && any ? ", " : "") + parameters + ")";
                 // (its return annotation (if it is the grammar's type, and not a generator's or a coroutine's: it returns a generator
                 // or coroutine object) and colon)
-                if (aFunction.returnAnnotation && (!grammar_annotation(l, *aFunction.returnAnnotation) || aFunction.generator))
+                if (aFunction.returnAnnotation && (!header_annotation(aFunction, *aFunction.returnAnnotation) || aFunction.generator))
                     function += ":";
+                else if (typeParams != nullptr)
+                    function += source_of(l, aFunction.closeParen + 1u, aFunction.colon + 1u);
                 else
                     function += render_tokens(l, aFunction.closeParen + 1u, aFunction.colon + 1u, aFunction.parent);
                 std::size_t headerLines = 1u;
@@ -1755,6 +2183,23 @@ namespace neos::compilers::python
                         hoist_generator_body(*function);
                         position = regionEnd;
                         l = function->bodyEnd - 1u;
+                        continue;
+                    }
+                    // (a type statement here (_yN_X): its type alias)
+                    scope* alias = nullptr;
+                    for (auto const& s : iScopes)
+                        if (s->typeAlias && s->header == l)
+                            alias = s.get();
+                    if (alias != nullptr && line.tokens.front().begin >= aBegin)
+                    {
+                        emit(line.tokens.front().begin);
+                        if (auto const initializers = body_start(l, 0u); !initializers.empty())
+                            result += initializers + "; ";
+                        result += render_type_alias(*alias);
+                        // (the lines of its value (blank))
+                        auto const lines = std::count(iText.begin() + static_cast<std::ptrdiff_t>(line.tokens.front().begin), iText.begin() + static_cast<std::ptrdiff_t>(line.tokens.back().end), '\n');
+                        result += std::string(static_cast<std::size_t>(lines), '\n');
+                        position = line.tokens.back().end;
                         continue;
                     }
                     // (a nested function defined here: its decorators and body are replaced by its closure (and blank lines))
@@ -1980,8 +2425,8 @@ namespace neos::compilers::python
                                 {
                                     std::string cells;
                                     for (auto const& n : i.names)
-                                        if (owner->cells.contains(n) || owner->frees.contains(n))
-                                            cells += "; " + cell(n) + ".v = " + n;
+                                        if (auto const c = cell_of(*owner, n); !c.empty())
+                                            cells += "; " + c + ".v = " + n;
                                     if (!cells.empty())
                                         iClosers.emplace_back(std::make_pair(l, i.end), cells);
                                 }
@@ -1990,9 +2435,9 @@ namespace neos::compilers::python
                         bool const globalWalrus = k.kind == token::Name && t + 1u < line.tokens.size() && is_op(l, t + 1u, ":=") && 
                             owner->kind == scope::Lambda && owner->globals.contains(std::string{ text(k) });
                         if (globalWalrus || (k.kind == token::Name && t + 1u < line.tokens.size() && is_op(l, t + 1u, ":=") && owner->kind != scope::Module &&
-                            (owner->cells.contains(std::string{ text(k) }) || owner->frees.contains(std::string{ text(k) }))))
+                            !cell_of(*owner, std::string{ text(k) }).empty()))
                         {
-                            auto const name = globalWalrus ? std::string{ text(k) } : cell(std::string{ text(k) });
+                            auto const name = globalWalrus ? std::string{ text(k) } : cell_of(*owner, std::string{ text(k) });
                             auto end = t + 2u;
                             int depth = 0;
                             for (; end < line.tokens.size(); ++end)
@@ -2021,14 +2466,21 @@ namespace neos::compilers::python
                             ++t;
                             continue;
                         }
-                        // (a cell's name)
+                        // (a cell's name (an annotation scope's type parameters are cells); an annotation scope's name in a class: the class's 
+                        // namespace's, else (CPython's LOAD_FROM_DICT_OR_DEREF and LOAD_FROM_DICT_OR_GLOBALS))
                         if (k.kind == token::Name && !iSkip[l][t] && !keywords().contains(text(k)) && owner->kind != scope::Module)
                         {
                             std::string const name{ text(k) };
-                            if (owner->cells.contains(name) || owner->frees.contains(name))
+                            if (auto const lookup = owner->kind == scope::TypeParams && !iBinding[l][t] ? class_lookup(*owner, name) : std::string{}; !lookup.empty())
                             {
                                 emit(k.begin);
-                                result += cell(name) + ".v";
+                                result += lookup;
+                                position = k.end;
+                            }
+                            else if (auto const c = cell_of(*owner, name); !c.empty())
+                            {
+                                emit(k.begin);
+                                result += c + ".v";
                                 position = k.end;
                             }
                         }

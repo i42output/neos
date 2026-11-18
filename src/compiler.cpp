@@ -3607,6 +3607,10 @@ namespace neos::language
                             append(statement, *release);
                     get(counter); set_variable();
                 }
+                // (the language's statement once the variable is bound, if any)
+                if (language() != nullptr)
+                    if (auto const* bound = language()->loop_variable_bound(neolib::string_view{ construct.loopVariableName }, variable, global))
+                        append(statement, *bound);
                 // (break: out of the loop's block; continue: to the end of the body, which is a block of its own)
                 bool const continues = has_continue(construct.arms[0]);
                 if (continues)

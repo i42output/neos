@@ -340,6 +340,8 @@ namespace neos::language
         bool compiles_at_run_time(std::string const& aLanguage) const;    ///< (the program compiled last, in the language: see i_language_compiler)
         bool parsable_source(std::string const& aLanguage, std::string_view aSource, std::string& aResult, std::vector<std::uint32_t>& aPositions) const; ///< (see 
                                                                         ///< i_language_compiler; false: the source as written)
+        bool references(std::string const& aLanguage, std::string const& aSourcePath, std::uint32_t aPosition, std::vector<std::uint32_t>& aReferences) const; ///< (of 
+                                                                        ///< the program compiled last, in the language: see i_language_compiler; false: not known)
         void set_quiet(bool aQuiet) { iQuiet = aQuiet; }    ///< (syntax errors are not reported on the standard error stream: only thrown)
         std::set<std::string> const& source_files() const { return iSourceFiles; } ///< (the files of the source fragments that the program 
                                                                         ///< compiled last is compiled from (e.g. its packages): see neos --cache)

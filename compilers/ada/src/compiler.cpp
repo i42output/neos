@@ -136,6 +136,103 @@ namespace neos::compilers::ada
         return iLinkedFunctions.contains(aName.to_std_string());
     }
 
+    bool compiler::references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const
+    {
+        // the names of a source file (of the program compiled last) that denote what the defining name at a position of it declares: the 
+        // identifiers (and selectors) that the analysis resolved to it (node::ent), its other declarations' defining names (e.g. its 
+        // body's) and its end designators
+        aReferences.clear();
+        // (the file: the compiler's copy of its source is as written but for the case of its letters, so a position of it is the source's)
+        source_file const* file = nullptr;
+        for (auto const& f : iFiles)
+            if (file == nullptr && f.path == aSourcePath.to_std_string_view())
+                file = &f;
+        if (file == nullptr)
+            return false;
+        auto const in_file = [&](node const& aNode)
+        {
+            return aNode.file == file && aNode.source.data() >= file->text.data() && aNode.source.data() + aNode.source.size() <= file->text.data() + file->text.size();
+        };
+        // (the simple name that a node's source ends with: an identifier, or the last of an expanded name's (e.g. a child unit's, or a 
+        // selected component's selector))
+        auto const simple_name = [](node const& aNode)
+        {
+            auto last = aNode.source.size();
+            while (last > 0u && std::isspace(static_cast<unsigned char>(aNode.source[last - 1u])))
+                --last;
+            auto first = last;
+            while (first > 0u && (std::isalnum(static_cast<unsigned char>(aNode.source[first - 1u])) || aNode.source[first - 1u] == '_' ||
+                (static_cast<unsigned char>(aNode.source[first - 1u]) & 0x80u) != 0u))
+                --first;
+            return aNode.source.substr(first, last - first);
+        };
+        auto const position_of = [&](std::string_view aName) { return static_cast<std::uint32_t>(aName.data() - file->text.data()); };
+        // (what a subprogram's specification is of: its declaration's entity, which, for a body or another completion, is that of the 
+        // declaration that it completes (not the one that its own defining name declared))
+        auto const specified = [](node const* aDefining) -> entity const*
+        {
+            auto const* const spec = aDefining != nullptr ? aDefining->parent : nullptr;
+            if (spec != nullptr && (spec->is(construct::FunctionSpecification) || spec->is(construct::ProcedureSpecification)) &&
+                spec->parent != nullptr && spec->parent->ent != nullptr)
+                return spec->parent->ent;
+            return nullptr;
+        };
+        auto const declared_by = [&](node const& aDefining) -> entity const*
+        {
+            auto const* const subprogram = specified(&aDefining);
+            return subprogram != nullptr ? subprogram : aDefining.ent;
+        };
+        // the defining name at the position, and what it declares
+        node const* defining = nullptr;
+        for (auto const& n : iNodes)
+            if (n.is(construct::Defining) && in_file(n))
+                if (auto const name = simple_name(n); !name.empty() && position_of(name) <= aPosition && aPosition < position_of(name) + name.size())
+                    defining = &n;
+        entity const* const declared = defining != nullptr ? declared_by(*defining) : nullptr;
+        if (declared == nullptr)
+            return false;
+        auto const name = simple_name(*defining);
+        // (a name denotes it if it denotes it, an entity that its declaration or its body declared, or an operation inherited from it)
+        auto const denotes = [&](entity const* aEntity)
+        {
+            for (auto const* e = aEntity; e != nullptr; e = (e->sub != nullptr && e->sub->inherited ? e->parent : nullptr))
+            {
+                auto const* const subprogram = specified(e->decl);
+                if (e == declared || subprogram == declared)
+                    return true;
+            }
+            return false;
+        };
+        std::set<std::uint32_t> references;
+        for (auto const& n : iNodes)
+        {
+            if (&n == defining || !in_file(n))
+                continue;
+            bool reference = false;
+            switch (n.kind)
+            {
+            case construct::Identifier:
+            case construct::Selected:
+                reference = denotes(n.ent);
+                break;
+            case construct::Defining:
+                reference = declared_by(n) == declared;
+                break;
+            case construct::End:
+                reference = n.parent != nullptr && n.parent->ent == declared;
+                break;
+            default:
+                break;
+            }
+            // (its name, as the defining name is spelt (but for the case of its letters): the compiler's copy of the source is folded)
+            if (reference && simple_name(n) == name)
+                references.insert(position_of(simple_name(n)));
+        }
+        for (auto const reference : references)
+            aReferences.push_back(reference);
+        return true;
+    }
+
     void compiler::diagnose(i_source_fragment const&, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t&, std::uint32_t&, 
         neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport)
     {

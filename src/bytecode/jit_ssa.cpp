@@ -2513,6 +2513,24 @@ namespace neos
                                     return false;
                                 }
                             };
+                            // (an access's address as a base and an offset: an address that adds a constant (not negative, below 2^31) is 
+                            // its other operand's, at the offset and the constant (the same address: it wraps as the add does). Accesses 
+                            // are numbered, and known apart, by these)
+                            auto const located = [&](value aAddress, std::uint64_t aOffset)
+                            {
+                                for (int depth = 0; depth < 4; ++depth)
+                                {
+                                    auto const& a = values[aAddress];
+                                    if (a.dead || a.type != I64 || a.op != 0x7Cu || a.operands.size() != 2u)
+                                        break;
+                                    std::size_t const k = values[a.operands[1]].op == 0x42u ? 1u : values[a.operands[0]].op == 0x42u ? 0u : 2u;
+                                    if (k == 2u || values[a.operands[k]].imm0 > 0x7FFFFFFFull || aOffset + values[a.operands[k]].imm0 > 0x7FFFFFFFull)
+                                        break;
+                                    aOffset += values[a.operands[k]].imm0;
+                                    aAddress = a.operands[1u - k];
+                                }
+                                return std::pair<value, std::uint64_t>{ aAddress, aOffset };
+                            };
                             auto const memory_key = [](std::uint16_t aOp, std::uint8_t aType, std::uint64_t aMemarg, std::uint64_t aOffset, value aAddress, std::uint64_t aEpoch)
                             {
                                 key k;
@@ -2544,6 +2562,9 @@ namespace neos
                             };
                             std::vector<access> accesses;
                             constexpr std::size_t MaxAccessScan = 48u;
+                            constexpr std::size_t MaxHeadAccessScan = 1024u;    ///< (at a join: once for each class stored since its dominator)
+                            constexpr std::size_t MaxBlocksBetween = 96u;       ///< (the most blocks between a join (not a loop's head) and its 
+                                                                                ///< dominator whose stores are looked at)
                             // (the bytes of a value that are known: its bits, and how many of its low bytes they are (8: all))
                             auto const known_bytes = [&](value aValue, std::uint64_t& aBits) -> std::uint32_t
                             {
@@ -2700,22 +2721,240 @@ namespace neos
                                 auto const& b = blocks[aBlock];
                                 epoch_set epoch;
                                 if (b.predecessors.size() == 1u && idom[aBlock] == b.predecessors[0] && aBlock != order[0])
+                                {
                                     epoch = exitEpoch[b.predecessors[0]];
+                                    stack.push_back(frame{ aBlock, 0u, table.added.size(), knownOrder.size(), accesses.size(), equalOrder.size(), oneOf.size() });
+                                }
                                 else
                                 {
                                     // (a join that every path from its dominator reaches without a store (of a class) or call (its predecessors 
                                     // end with its dominator's memory (of that class)): its dominator's memory (that class's))
                                     bool const dominated = aBlock != order[0] && !b.predecessors.empty() && idom[aBlock] != Undefined;
+                                    // (a loop's head (its predecessors that are not numbered yet are its loop's: it dominates them): its
+                                    // loop's blocks' memory at their ends is as at the head, of the classes that none of them changes (no
+                                    // store of the class, no call))
+                                    std::array<bool, std::tuple_size<epoch_set>::value> unchanged{};
+                                    bool looped = false;
+                                    // (the stores of the blocks between its dominator and it (and of its loop, if it is a loop's head), if 
+                                    // they are all that changes memory there (no call, no store of no class); those blocks)
+                                    std::vector<value> loopStores;
+                                    bool onlyStores = false;
+                                    std::vector<bool> in;
+                                    if (dominated)
+                                        for (auto p : b.predecessors)
+                                            if (!exited[p])
+                                            {
+                                                looped = true;
+                                                break;
+                                            }
+                                    if (dominated)
+                                    {
+                                        // (the blocks between its dominator and it (those that reach its predecessors without passing 
+                                        // its dominator), with its loop's if it is a loop's head)
+                                        unchanged.fill(true);
+                                        onlyStores = true;
+                                        in.assign(blocks.size(), false);
+                                        std::vector<std::uint32_t> work;
+                                        in[aBlock] = true;
+                                        in[idom[aBlock]] = true;
+                                        std::size_t between = 0u;
+                                        for (auto p : b.predecessors)
+                                        {
+                                            if (exited[p])
+                                            {
+                                                if (!in[p])
+                                                {
+                                                    in[p] = true;
+                                                    work.push_back(p);
+                                                }
+                                                continue;
+                                            }
+                                            auto d = p;
+                                            while (d != aBlock && d != Undefined && d != order[0])
+                                                d = idom[d];
+                                            if (d != aBlock)
+                                            {
+                                                // (not its loop's (a predecessor that it does not dominate): nothing is known)
+                                                unchanged.fill(false);
+                                                onlyStores = false;
+                                                work.clear();
+                                                break;
+                                            }
+                                            if (!in[p])
+                                            {
+                                                in[p] = true;
+                                                work.push_back(p);
+                                            }
+                                        }
+                                        bool called = false;
+                                        while (!work.empty() && !called)
+                                        {
+                                            auto const x = work.back();
+                                            work.pop_back();
+                                            if (!looped && ++between > MaxBlocksBetween)
+                                            {
+                                                // (a join far from its dominator: only what its predecessors' epochs tell)
+                                                onlyStores = false;
+                                                break;
+                                            }
+                                            for (auto v : blocks[x].code)
+                                            {
+                                                auto const& i = values[v];
+                                                if (i.dead)
+                                                    continue;
+                                                if (i.call())
+                                                {
+                                                    unchanged.fill(false);
+                                                    onlyStores = false;
+                                                    called = true;
+                                                    break;
+                                                }
+                                                if (i.store())
+                                                {
+                                                    if (auto const c = class_of(i); c == 0u)
+                                                    {
+                                                        bool const g = unchanged[Globals];
+                                                        unchanged.fill(false);
+                                                        unchanged[Globals] = g;
+                                                        onlyStores = false;
+                                                    }
+                                                    else
+                                                    {
+                                                        unchanged[c] = false;
+                                                        unchanged[0] = false;
+                                                        loopStores.push_back(v);
+                                                    }
+                                                }
+                                                else if (i.op == 0x24u)
+                                                    unchanged[Globals] = false;
+                                            }
+                                            for (auto p : blocks[x].predecessors)
+                                                if (!in[p])
+                                                {
+                                                    in[p] = true;
+                                                    work.push_back(p);
+                                                }
+                                        }
+                                    }
+                                    std::array<bool, std::tuple_size<epoch_set>::value> kept{};      // (the class's memory is its dominator's)
                                     for (std::size_t c = 0u; c < epoch.size(); ++c)
                                     {
                                         bool same = dominated;
                                         for (auto p : b.predecessors)
-                                            if (!same || !exited[p] || exitEpoch[p][c] != exitEpoch[idom[aBlock]][c])
+                                            if (!same || (exited[p] ? exitEpoch[p][c] != exitEpoch[idom[aBlock]][c] : !unchanged[c]))
                                                 same = false;
+                                        kept[c] = same;
                                         epoch[c] = same ? exitEpoch[idom[aBlock]][c] : ++epochs;
                                     }
+                                    stack.push_back(frame{ aBlock, 0u, table.added.size(), knownOrder.size(), accesses.size(), equalOrder.size(), oneOf.size() });
+                                    if (dominated && onlyStores && !loopStores.empty())
+                                    {
+                                        // (a class that those stores change, each store at a known base (a numbered value; in the loop's code,
+                                        // which is not numbered yet, a base that is the same in every iteration: code that makes what code
+                                        // before the loop made (loads of classes that the loop does not change, and operations, of such
+                                        // values)): its dominator's accesses at the same bases that no such store overlaps are as they were 
+                                        // (another base may be the same address: not known))
+                                        auto const before_loop = [&](auto const& aSelf, value aValue, unsigned aDepth) -> value
+                                        {
+                                            auto const x = replaced.resolved(aValue);
+                                            auto const& i = values[x];
+                                            if (i.constant() || (i.block < exited.size() && exited[i.block]))
+                                                return x;   // (numbered: before the loop, or between the dominator and the join)
+                                            if (aDepth == 0u || i.dead || i.op == Phi)
+                                                return None;
+                                            key k;
+                                            if (i.load())
+                                            {
+                                                auto const c = class_of(i);
+                                                if (c == 0u || !kept[c] || (i.imm0 & 0x100u) != 0u || (i.flags & Volatile) != 0u || i.operands.size() != 1u)
+                                                    return None;
+                                                auto const at = located(replaced.resolved(i.operands[0]), i.imm1);
+                                                auto const a = aSelf(aSelf, at.first, aDepth - 1u);
+                                                if (a == None)
+                                                    return None;
+                                                k = memory_key(i.op, i.type, i.imm0, at.second, a, epoch[c]);
+                                            }
+                                            else if (((i.op >= 0x45u && i.op <= 0xC4u) || i.op == 0x1Bu) && i.operands.size() <= 4u)
+                                            {
+                                                k.push_back(i.op | (std::uint64_t{ i.type } << 16u));
+                                                small_vector<value, 4> operands;
+                                                for (auto o : i.operands)
+                                                {
+                                                    auto const a = aSelf(aSelf, o, aDepth - 1u);
+                                                    if (a == None)
+                                                        return None;
+                                                    operands.push_back(a);
+                                                }
+                                                if (commutative(i.op) && operands.size() == 2u)
+                                                {
+                                                    k.push_back(std::min(operands[0], operands[1]));
+                                                    k.push_back(std::max(operands[0], operands[1]));
+                                                }
+                                                else
+                                                    for (auto o : operands)
+                                                        k.push_back(o);
+                                            }
+                                            else
+                                                return None;
+                                            auto const slot = table.find_slot(k);
+                                            return table.keys[slot].size != 0u ? table.values[slot] : None;
+                                        };
+                                        struct loop_store
+                                        {
+                                            value base;
+                                            std::uint64_t memory;
+                                            std::uint64_t offset;
+                                            std::uint32_t width;
+                                        };
+                                        std::vector<loop_store> stores;
+                                        for (std::size_t c = 1u; c < epoch.size(); ++c)
+                                        {
+                                            if (c == Globals || kept[c])
+                                                continue;
+                                            stores.clear();
+                                            bool known = true;
+                                            for (auto v : loopStores)
+                                            {
+                                                auto const st = values[v];  // (a copy)
+                                                if (class_of(st) != c)
+                                                    continue;
+                                                auto const at = st.operands.size() == 2u ? located(replaced.resolved(st.operands[0]), st.imm1) : std::pair<value, std::uint64_t>{ None, 0u };
+                                                auto const base = at.first != None ? before_loop(before_loop, at.first, 8u) : None;
+                                                auto const width = width_of(st.op);
+                                                if (base == None || width == 0u)
+                                                {
+                                                    known = false;
+                                                    break;
+                                                }
+                                                stores.push_back(loop_store{ base, st.imm0 >> 32u, at.second, width });
+                                            }
+                                            if (!known || stores.empty())
+                                                continue;
+                                            auto const before = exitEpoch[idom[aBlock]][c];
+                                            std::size_t scanned = 0u;
+                                            for (auto a = stack.back().accessMark; a > 0u && scanned < MaxHeadAccessScan; --a, ++scanned)
+                                            {
+                                                auto const e = accesses[a - 1u];
+                                                if (e.memoryClass != c || e.epoch != before)
+                                                    continue;
+                                                bool apart = true;
+                                                for (auto const& st : stores)
+                                                    if (e.memory == st.memory && (e.address != st.base || (e.offset < st.offset + st.width && st.offset < e.offset + e.width)))
+                                                    {
+                                                        apart = false;
+                                                        break;
+                                                    }
+                                                if (!apart)
+                                                    continue;
+                                                if (e.loadOp != 0u)
+                                                    table.try_emplace(memory_key(e.loadOp, e.type, e.memory << 32u, e.offset, e.address, epoch[c]), e.data);
+                                                auto moved = e;
+                                                moved.epoch = epoch[c];
+                                                accesses.push_back(moved);
+                                            }
+                                        }
+                                    }
                                 }
-                                stack.push_back(frame{ aBlock, 0u, table.added.size(), knownOrder.size(), accesses.size(), equalOrder.size(), oneOf.size() });
                                 if (b.predecessors.size() >= 2u && b.predecessors.size() <= MaxOneOf && aBlock != order[0])
                                 {
                                     // (each predecessor's edge to it: x == C (the same x))
@@ -2825,6 +3064,33 @@ namespace neos
                                                         break;
                                                     }
                                                 }
+                                        // (x != C on this edge, and x is one of two constants (a join's that dominates: see one_of): x is the 
+                                        // other)
+                                        else if (auto const c2 = values[condition]; !c2.dead && (c2.op == 0x46u || c2.op == 0x47u || c2.op == 0x51u || c2.op == 0x52u) &&
+                                            c2.operands.size() == 2u)
+                                            for (std::size_t n = 0u; n < 2u; ++n)
+                                            {
+                                                auto const k = replaced.resolved(c2.operands[n]);
+                                                auto const x = replaced.resolved(c2.operands[1u - n]);
+                                                if (!values[k].constant() || values[x].constant() || x >= equalTo.size() || equalTo[x] != None || values[x].type != values[k].type)
+                                                    continue;
+                                                for (auto o = oneOf.size(); o > 0u; --o)
+                                                    if (auto const& known = oneOf[o - 1u]; known.subject == x)
+                                                    {
+                                                        if (known.count == 2u && (known.constants[0] == values[k].imm0) != (known.constants[1] == values[k].imm0))
+                                                        {
+                                                            instruction other = values[k];
+                                                            other.imm0 = known.constants[0] == values[k].imm0 ? known.constants[1] : known.constants[0];
+                                                            other.block = aBlock;
+                                                            other.dead = false;
+                                                            values.push_back(other);
+                                                            equalTo[x] = static_cast<value>(values.size() - 1u);
+                                                            equalOrder.push_back(x);
+                                                        }
+                                                        break;
+                                                    }
+                                                break;
+                                            }
                                         }
                                 }
                                 for (auto v : b.code)
@@ -2844,7 +3110,9 @@ namespace neos
                                     auto& i = values[v];
                                     if (i.store())
                                     {
-                                        auto const st = values[v];   // (a copy: constants may be made, moving the values)
+                                        auto st = values[v];   // (a copy: constants may be made, moving the values; its address as a base and an offset: see located)
+                                        if (st.operands.size() == 2u)
+                                            std::tie(st.operands[0], st.imm1) = located(st.operands[0], st.imm1);
                                         // (its class's memory changes (and class 0's); a store of class 0: all classes')
                                         auto const c = class_of(st);
                                         auto const before = epoch[c];
@@ -2984,7 +3252,10 @@ namespace neos
                                         i.flags |= Unchecked;   // (its operand is within its range: it cannot trap)
                                     key k;
                                     if (i.load())
-                                        k = memory_key(i.op, i.type, i.imm0, i.imm1, i.operands[0], epoch[class_of(i)]);
+                                        {
+                                        auto const at = located(i.operands[0], i.imm1);
+                                        k = memory_key(i.op, i.type, i.imm0, at.second, at.first, epoch[class_of(i)]);
+                                    }
                                     else if (i.op == 0x23u)
                                     {
                                         k.push_back(i.op);
@@ -3029,17 +3300,18 @@ namespace neos
                                         {
                                             auto const e = accesses[a - 1u];
                                             auto const& x = values[v];
-                                            if (e.memoryClass != loadClass || e.epoch != epoch[loadClass] || e.address != x.operands[0] || e.memory != (x.imm0 >> 32u))
+                                            auto const at = located(x.operands[0], x.imm1);
+                                            if (e.memoryClass != loadClass || e.epoch != epoch[loadClass] || e.address != at.first || e.memory != (x.imm0 >> 32u))
                                                 continue;
-                                            if (!(e.offset <= x.imm1 && x.imm1 + loadWidth <= e.offset + e.width))
+                                            if (!(e.offset <= at.second && at.second + loadWidth <= e.offset + e.width))
                                             {
-                                                if (e.offset < x.imm1 + loadWidth && x.imm1 < e.offset + e.width)
+                                                if (e.offset < at.second + loadWidth && at.second < e.offset + e.width)
                                                     break;  // (an overlap that does not cover it: what it reads is not known)
                                                 continue;
                                             }
                                             if (!e.stored)
                                                 continue;
-                                            if (e.truncated && x.op == 0x35u && e.offset == x.imm1)
+                                            if (e.truncated && x.op == 0x35u && e.offset == at.second)
                                             {
                                                 instruction m;
                                                 m.op = 0x42u;
@@ -3057,12 +3329,12 @@ namespace neos
                                             }
                                             std::uint64_t bits = 0u;
                                             auto const knownBytes = known_bytes(e.data, bits);
-                                            if (x.imm1 + loadWidth > e.offset + knownBytes)
+                                            if (at.second + loadWidth > e.offset + knownBytes)
                                                 break;
                                             // (little endian: the bytes at its offset)
                                             if (e.width < 8u)
                                                 bits &= (std::uint64_t{ 1u } << (8u * e.width)) - 1u;
-                                            bits >>= 8u * (x.imm1 - e.offset);
+                                            bits >>= 8u * (at.second - e.offset);
                                             if (loadWidth < 8u)
                                                 bits &= (std::uint64_t{ 1u } << (8u * loadWidth)) - 1u;
                                             bool const signedLoad = x.op == 0x2Cu || x.op == 0x2Eu || x.op == 0x30u || x.op == 0x32u || x.op == 0x34u;
@@ -3081,8 +3353,9 @@ namespace neos
                                     }
                                     {
                                         auto const& x = values[v];
+                                        auto const at = located(x.operands[0], x.imm1);
                                         if (x.load())
-                                            accesses.push_back(access{ epoch[loadClass], loadClass, x.operands[0], x.imm0 >> 32u, x.imm1, loadWidth, x.op, x.type, data, false });
+                                            accesses.push_back(access{ epoch[loadClass], loadClass, at.first, x.imm0 >> 32u, at.second, loadWidth, x.op, x.type, data, false });
                                     }
                                 }
                                 exitEpoch[aBlock] = epoch;

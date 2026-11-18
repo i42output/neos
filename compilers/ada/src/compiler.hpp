@@ -83,6 +83,7 @@ namespace neos::compilers::ada
         void emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
         bool linked_function(neolib::i_string_view const& aName) const override;
+        bool references(neolib::i_string_view const& aSourcePath, std::uint32_t aPosition, neolib::i_vector<std::uint32_t>& aReferences) const override;
         void diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t& aEndLine, 
             std::uint32_t& aEndColumn, neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport) override;
     public:
