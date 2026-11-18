@@ -817,9 +817,10 @@ namespace neos
                             }
                             // --- the code
                             // (a loop whose first iteration is made ahead of it: one with no loop within it, no result, whose code ends 
-                            // with a branch (its end is not reached), of at most MaxPeeledTokens tokens; not within another's. Larger 
-                            // loops' copies cost more to optimize than the loops then save)
-                            static constexpr std::size_t MaxPeeledTokens = 200u;
+                            // with a branch (its end is not reached), of at most MaxPeeledTokens tokens; not within another's. (The
+                            // copy costs its optimization again, which is made on another thread; with larger loops than this the
+                            // code is no better)
+                            static constexpr std::size_t MaxPeeledTokens = 2000u;
                             bool peeled(std::size_t aBegin, std::size_t aEnd, std::uint64_t aType) const
                             {
                                 if (iPeeling != 0u || aType != 0x40u)
