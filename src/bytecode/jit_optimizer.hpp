@@ -72,6 +72,10 @@ namespace neos
                         // (leaves the optimized code for the function's own (see deopt): its arguments are the call's arguments, then the
                         // deopt's number (an i32 constant); it does not return)
                         static std::uint32_t deopt(module_description const& aModule) { return static_cast<std::uint32_t>(aModule.functions.size() + 1u); }
+                        // (after a call: where the optimized code leaves when the call returns, if what the code assumed (its watched
+                        // words, see MemargWatched) changed while the call ran (see deopt::returned): its argument is the deopt's
+                        // number (an i32 constant); no code but a patch point)
+                        static std::uint32_t returned(module_description const& aModule) { return static_cast<std::uint32_t>(aModule.functions.size() + 2u); }
                     };
 
                     // (a memory access's memarg flag (its first immediate's low bits): a cached load, whose value may be any that its word has
@@ -126,6 +130,12 @@ namespace neos
                         std::uint32_t depth = 0u;       ///< (the operand stack's height below its arguments)
                         std::uint32_t locals = 0u;      ///< (the function's (its parameters and locals))
                         bool guard = false;             ///< (a guard failed (a speculation's value changed), else the inlined code would call)
+                        // (the code leaves after a call that it made, when the call returns (see intrinsics::returned): its frames (all of
+                        // them, the innermost too) are as their calls have them while they run, and the innermost's code continues after
+                        // its call (at call: its position) with the call's result (results: 0 or 1; the deopt's last value), as V8's
+                        // lazy deoptimization does. Its values: each frame's locals and operand stack, then the result)
+                        bool returned = false;
+                        std::uint32_t results = 0u;
                         std::vector<bool> live;         ///< (the function's locals that its own code may read after the call (empty: all))
                         std::vector<frame> frames;      ///< (if not empty: the frames that it leaves for, outermost (the function's own) first;
                                                         ///< the last's call is the call (of a function without a frame of its own) that the
@@ -143,19 +153,24 @@ namespace neos
                         std::size_t maxCalleeTokens = 6000u;    ///< (a callee larger than this is not inlined)
                         std::size_t maxFramedCalleeTokens = 600u;   ///< (... nor one with a frame of its own larger than this, ...)
                         std::size_t maxLargeFramedCalleeTokens = 2400u; ///< (... unless it is at most this and its code (after folding) is small (see below))
-                        std::size_t maxLargeFramedInlinedTokens = 1200u; ///< (an inlined call of such a callee: its code's size (after folding) at most this...)
-                        std::size_t maxLargeFramedInlinedCost = 200u;   ///< (... and its instructions that are code at most this)
+                        std::size_t maxLargeFramedInlinedCost = 500u;   ///< (an inlined call of such a callee: its instructions that are code (after folding) at most this)
                         // (by callee: the times in a row that such a callee was too large where it was inlined (the module's, for all of its
                         // optimizations: tried again until it has been too large MaxLargeRejects times); if none, it is always tried)
                         std::atomic<std::uint8_t>* largeRejects = nullptr;
                         static constexpr std::uint8_t MaxLargeRejects = 4u;
                         std::size_t maxTokens = 60000u;         ///< (the function's code may grow to this, by inlining...)
                         std::size_t maxGrowth = 10u;             ///< (... and to this many times its size (and 2000 tokens))
-                        std::size_t maxInlinedTokens = 2800u;   ///< (an inlined call whose code (after folding) is larger is not inlined...)
-                        std::size_t maxInlinedCost = 600u;      ///< (... nor one with more instructions that are code (see rewriter::inline_call) ...)
+                        std::size_t maxInlinedCost = 1500u;     ///< (an inlined call with more instructions that are code (after folding; see rewriter::inline_call) is not inlined...)
                         std::size_t maxGuards = 16u;            ///< (... nor one with more guards)
                         std::size_t maxInlines = 512u;          ///< (the calls inlined in a function)
                         bool deopt = false;                     ///< (the code leaves for the function's own (see deopt), rather than calls)
+                        bool exits = false;                     ///< (calls are followed by exits (see deopt::returned): what the code assumed
+                                                                ///< of watched words holds after them without being tested again)
+                        bool assume = false;                    ///< (with exits: a watched load at a constant address (see MemargWatched) is the
+                                                                ///< value its word has now, with no test (result::assumed: the code is left at its
+                                                                ///< exits, and not entered again, once the word changes, as V8's code that depends
+                                                                ///< on what it assumed); only if every call it makes is followed by an exit
+                                                                ///< (result::unexited: else it is optimized again without))
                         // (where the code can leave for frames of inlined calls (see deopt::frames): whether a function (with aLocals 
                         // locals) can be left for at a call (at aPosition, of aArguments arguments, aDepth below them) that it makes; if 
                         // none, it does not)
@@ -202,6 +217,9 @@ namespace neos
                         std::size_t folded = 0u;
                         std::size_t guards = 0u;
                         std::set<std::pair<std::uint64_t, std::uint64_t>> useful;  ///< (the speculations whose values were folded (see options::usefulHint))
+                        std::set<std::pair<std::uint32_t, std::uint64_t>> assumed;  ///< (the words (their memories and addresses) that its code
+                                                                                    ///< assumed (see options::assume))
+                        bool unexited = false;                  ///< (a call that its code makes is not followed by an exit (see options::exits))
                     };
 
                     // (an integer instruction's result for constant operands (aY: a binary one's), if it is folded (not if it traps))

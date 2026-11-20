@@ -49,6 +49,7 @@
 #include <type_traits>
 #include <optional>
 #include <stdexcept>
+#include <set>
 #include <vector>
 #include <neos/bytecode/vm/jit.hpp>
 #include "jit_optimizer.hpp"
@@ -88,7 +89,13 @@ namespace neos
                         Trap,               ///< (imm0: the trap: unreachable)
                         Deopt,              ///< (leaves for the function's own code (see optimizer::deopt; imm0: its number): operands: the
                                             ///< function's locals, the operand stack below the call's arguments, the arguments)
-                        Assume              ///< (neos::assume (see import_call::Assume): operand: a condition that is not 0 here (no code))
+                        Assume,             ///< (neos::assume (see import_call::Assume): operand: a condition that is not 0 here (no code))
+                        Invalidated,        ///< (after a call (see optimizer::intrinsics::returned): not 0 if a word that the code's watched loads
+                                            ///< read has changed (i32; no code: its branch (its only use) is a patch point); the loads' values
+                                            ///< are theirs after the call too (see number_values))
+                        Keeps               ///< (neos::keeps (see import_call::Keeps): operands: a load's value, and a condition; where the
+                                            ///< condition is a constant that is not 0 (made from words that the code assumes: see 
+                                            ///< function::assume), a later load of the same word is the value, as a watched load's is (no code))
                     };
 
                     enum flag : std::uint8_t
@@ -358,6 +365,11 @@ namespace neos
                         std::vector<std::uint32_t> order;       ///< (the blocks, as the code is laid out (reverse postorder))
                         std::vector<std::uint32_t> uses;        ///< (each value's uses)
                         bool usesCurrent = false;               ///< (uses: counted since the code last changed (see optimize))
+                        bool assume = false;                    ///< (its watched loads at constant addresses are the values their words have now
+                                                                ///< (see optimizer::options::assume: every call is followed by an exit); set by
+                                                                ///< its maker)
+                        std::set<std::pair<std::uint32_t, std::uint64_t>> assumed;  ///< (the words (their memories and addresses) that its code
+                                                                                    ///< assumed: its exits are kept while it has any)
                         std::uint64_t cfgHash = 0u;             ///< (the blocks' edges when loop depths were last found (see finish))
                     };
 

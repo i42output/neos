@@ -839,11 +839,73 @@ namespace neos
                                                 terminate(Deopt, std::move(operands), {}, index);
                                                 break;
                                             }
+                                            if (callee == optimizer::intrinsics::returned(iModule))
+                                            {
+                                                // (after a call (see optimizer::deopt::returned): a branch (a patch point) to a block that leaves: its values
+                                                // are each frame's locals (the optimized code's, or constants; a local that its code does not read after its
+                                                // call: 0) and operand stack (the next part of the operand stack's), then the call's result)
+                                                auto const number = pop();
+                                                if (!iFunction.values[number].constant() || iFunction.values[number].imm0 >= iDeopts.size())
+                                                    throw unsupported{ "deopt" };
+                                                auto const index = iFunction.values[number].imm0;
+                                                auto const& d = iDeopts[static_cast<std::size_t>(index)];
+                                                if (!d.returned || d.frames.empty())
+                                                    throw unsupported{ "deopt" };
+                                                operand_list operands;
+                                                std::size_t height = 0u;
+                                                for (auto const& frame : d.frames)
+                                                {
+                                                    auto const& fd = iModule.functions.at(frame.function);
+                                                    auto const parameterCount = fd.parameters->size();
+                                                    if (frame.locals.size() > parameterCount + fd.locals->size() || height + frame.depth > iStack.size())
+                                                        throw unsupported{ "deopt state" };
+                                                    for (std::size_t l = 0u; l < frame.locals.size(); ++l)
+                                                    {
+                                                        auto const type = l < parameterCount ? (*fd.parameters)[l] : (*fd.locals)[l - parameterCount];
+                                                        auto const local = frame.locals[l];
+                                                        if (local == optimizer::deopt::NoLocal)
+                                                            operands.push_back(add(type == I32 ? 0x41u : type == I64 ? 0x42u : type == F32 ? 0x43u : 0x44u, type, {},
+                                                                frame.constants[l]));
+                                                        else if (local >= iLocals || iVariableTypes[local] != type)
+                                                            throw unsupported{ "deopt state" };
+                                                        else if (l < frame.live.size() && !frame.live[l])
+                                                            operands.push_back(zero(type));
+                                                        else
+                                                            operands.push_back(read(static_cast<variable>(local), iCurrent));
+                                                    }
+                                                    for (std::uint32_t e = 0u; e < frame.depth; ++e)
+                                                        operands.push_back(iStack[height + e]);
+                                                    height += frame.depth;
+                                                }
+                                                if (height + d.results != iStack.size())
+                                                    throw unsupported{ "deopt state" };
+                                                for (std::uint32_t e = 0u; e < d.results; ++e)
+                                                    operands.push_back(iStack[height + e]);
+                                                auto const condition = add(Invalidated, I32, {});
+                                                auto const exitBlock = new_block();
+                                                auto const next = new_block();
+                                                terminate(Branch, { condition }, { exitBlock, next });
+                                                seal(exitBlock);
+                                                seal(next);
+                                                iCurrent = exitBlock;
+                                                terminate(Deopt, std::move(operands), {}, index);
+                                                iCurrent = next;
+                                                iReachable = true;
+                                                break;
+                                            }
                                             if (callee < iModule.functions.size() && iModule.functions[callee].imported && iModule.functions[callee].call == import_call::Assume)
                                             {
                                                 // (neos::assume: its condition (not a call))
                                                 auto const condition = pop();
                                                 add(Assume, Void, { condition });
+                                                break;
+                                            }
+                                            if (callee < iModule.functions.size() && iModule.functions[callee].imported && iModule.functions[callee].call == import_call::Keeps)
+                                            {
+                                                // (neos::keeps: the value and its condition (not a call))
+                                                auto const condition = pop();
+                                                auto const kept = pop();
+                                                add(Keeps, Void, { kept, condition });
                                                 break;
                                             }
                                             if (callee == optimizer::intrinsics::guard_failed(iModule))
@@ -1100,7 +1162,10 @@ namespace neos
                                 for (auto v : aFunction.blocks[b].code)
                                 {
                                     auto& i = aFunction.values[v];
-                                    if (i.dead || !i.load() || (i.imm0 & optimizer::MemargCached) == 0u || i.operands.size() != 1u || (i.type != I32 && i.type != I64))
+                                    // (and, in code that assumes its watched loads' words (see function::assume), a watched load: its word is one the
+                                    // code depends on)
+                                    bool const watched = aFunction.assume && (i.imm0 & optimizer::MemargWatched) != 0u;
+                                    if (i.dead || !i.load() || ((i.imm0 & optimizer::MemargCached) == 0u && !watched) || i.operands.size() != 1u || (i.type != I32 && i.type != I64))
                                         continue;
                                     auto const& a = aFunction.values[i.operands[0]];
                                     if (!a.constant())
@@ -1122,6 +1187,9 @@ namespace neos
                                     auto const word = aMemoryWord(memory, address, width);
                                     if (!word)
                                         continue;
+                                    if (watched)
+                                        for (auto w = address & ~std::uint64_t{ 7u }; w < address + width; w += 8u)
+                                            aFunction.assumed.emplace(memory, w);
                                     std::uint64_t value = *word;
                                     if (sign && width < 8u)
                                     {
@@ -1349,7 +1417,7 @@ namespace neos
                         // (what neos::assume claims (ssa::Assume): that a value (defined in the assume's block, before it: every path to the 
                         // assume passes its definition, and its value does not change) is not a constant (x != C, or eqz(x == C)); a phi 
                         // of such values (each not the same constant) is not it either; comparisons of them with the constant are constants)
-                        bool fold_assumed(function& aFunction)
+                        bool fold_assumed_constants(function& aFunction)
                         {
                             auto& values = aFunction.values;
                             std::vector<std::optional<std::uint64_t>> excluded(values.size());
@@ -1464,6 +1532,231 @@ namespace neos
                                     }
                                 }
                             return changed;
+                        }
+
+                        // (what else neos::assume claims of an i64 (defined in the assume's block, before it, as above): that it is below a 
+                        // constant (x <u K), or that its bits of a mask are a constant's ((x & M) == T: x is then at least T); the claims of
+                        // a condition that is an and of conditions are each of theirs. Unsigned comparisons of such a value (and of x & m 
+                        // and x >>u s of one below a constant: they are below it, or its shift) with constants that the claim decides are
+                        // constants)
+                        bool fold_assumed_bounds(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            struct claim
+                            {
+                                bool below = false;
+                                bool masked = false;
+                                std::uint64_t limit = 0u;
+                                std::uint64_t mask = 0u;
+                                std::uint64_t bits = 0u;
+                            };
+                            std::vector<claim> claims;
+                            std::vector<bool> own;
+                            std::vector<value> conditions;
+                            for (auto const& b : aFunction.blocks)
+                                for (std::size_t k = 0u; k < b.code.size(); ++k)
+                                {
+                                    auto const& a = values[b.code[k]];
+                                    if (a.dead || a.op != Assume || a.operands.size() != 1u)
+                                        continue;
+                                    auto const defined_before = [&](value aValue)
+                                    {
+                                        if (values[aValue].block != a.block || values[aValue].op == Phi || values[aValue].constant())
+                                            return false;
+                                        for (std::size_t j = 0u; j < k; ++j)
+                                            if (b.code[j] == aValue)
+                                                return true;
+                                        return false;
+                                    };
+                                    conditions.clear();
+                                    conditions.push_back(a.operands[0]);
+                                    while (!conditions.empty())
+                                    {
+                                        auto const c = conditions.back();
+                                        conditions.pop_back();
+                                        auto const& i = values[c];
+                                        if (i.dead || i.operands.size() != 2u)
+                                            continue;
+                                        if (own.empty())
+                                            own.resize(values.size());
+                                        own[c] = true;
+                                        auto const& l = values[i.operands[0]];
+                                        auto const& r = values[i.operands[1]];
+                                        if (i.op == 0x71u)
+                                        {
+                                            // (i32.and: both)
+                                            conditions.push_back(i.operands[0]);
+                                            conditions.push_back(i.operands[1]);
+                                        }
+                                        else if (i.op == 0x72u)
+                                        {
+                                            // (i32.or with what is 0 (0, or an i32.and with 0): the other)
+                                            auto const zero = [&](instruction const& aOperand)
+                                            {
+                                                if (aOperand.constant())
+                                                    return aOperand.imm0 == 0u;
+                                                if (aOperand.dead || aOperand.op != 0x71u || aOperand.operands.size() != 2u)
+                                                    return false;
+                                                for (auto const o : aOperand.operands)
+                                                    if (values[o].constant() && values[o].imm0 == 0u)
+                                                        return true;
+                                                return false;
+                                            };
+                                            if (zero(l))
+                                                conditions.push_back(i.operands[1]);
+                                            else if (zero(r))
+                                                conditions.push_back(i.operands[0]);
+                                        }
+                                        else if (i.op == 0x54u && r.constant() && defined_before(i.operands[0]))
+                                        {
+                                            // (i64.lt_u(x, K))
+                                            if (claims.empty())
+                                                claims.resize(values.size());
+                                            auto& x = claims[i.operands[0]];
+                                            x.limit = x.below ? std::min(x.limit, r.imm0) : r.imm0;
+                                            x.below = true;
+                                        }
+                                        else if (i.op == 0x51u)
+                                        {
+                                            // (i64.eq(i64.and(x, M), T))
+                                            for (std::size_t n = 0u; n < 2u; ++n)
+                                            {
+                                                auto const& t = values[i.operands[n]];
+                                                auto const& y = values[i.operands[1u - n]];
+                                                if (!t.constant() || y.dead || y.op != 0x83u || y.operands.size() != 2u)
+                                                    continue;
+                                                for (std::size_t m = 0u; m < 2u; ++m)
+                                                    if (auto const& mask = values[y.operands[m]]; mask.constant() && defined_before(y.operands[1u - m]) &&
+                                                        (t.imm0 & ~mask.imm0) == 0u)
+                                                    {
+                                                        if (claims.empty())
+                                                            claims.resize(values.size());
+                                                        auto& x = claims[y.operands[1u - m]];
+                                                        if (!x.masked)
+                                                        {
+                                                            x.masked = true;
+                                                            x.mask = mask.imm0;
+                                                            x.bits = t.imm0;
+                                                        }
+                                                        own[i.operands[1u - n]] = true;
+                                                        break;
+                                                    }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            if (claims.empty())
+                                return false;
+                            bool changed = false;
+                            auto const constant_of = [&](instruction& aInstruction, bool aResult)
+                            {
+                                aInstruction.op = 0x41u;
+                                aInstruction.type = I32;
+                                aInstruction.imm0 = aResult ? 1u : 0u;
+                                aInstruction.operands.clear();
+                                changed = true;
+                            };
+                            for (auto bi : aFunction.order)
+                                for (auto v : aFunction.blocks[bi].code)
+                                {
+                                    auto& i = values[v];
+                                    if (i.dead || i.operands.size() != 2u || v >= claims.size())
+                                        continue;
+                                    auto const a = i.operands[0];
+                                    auto const b = i.operands[1];
+                                    if (a >= claims.size() || b >= claims.size())
+                                        continue;
+                                    if (i.op == 0x83u)
+                                    {
+                                        // (x & m of an x below a limit: below it)
+                                        for (auto const x : { a, b })
+                                            if (claims[x].below && !claims[v].below)
+                                            {
+                                                claims[v].below = true;
+                                                claims[v].limit = claims[x].limit;
+                                            }
+                                        continue;
+                                    }
+                                    if (i.op == 0x88u)
+                                    {
+                                        // (x >>u s of an x below a limit)
+                                        if (claims[a].below && claims[a].limit != 0u && values[b].constant() && values[b].imm0 < 64u)
+                                        {
+                                            claims[v].below = true;
+                                            claims[v].limit = ((claims[a].limit - 1u) >> values[b].imm0) + 1u;
+                                        }
+                                        continue;
+                                    }
+                                    if (v < own.size() && own[v])
+                                        continue;
+                                    if ((i.op == 0x54u || i.op == 0x56u || i.op == 0x58u || i.op == 0x5Au) && values[b].constant())
+                                    {
+                                        // (x <u C, x >u C, x <=u C, x >=u C)
+                                        auto const c = values[b].imm0;
+                                        auto const& x = claims[a];
+                                        if (x.below && x.limit != 0u)
+                                        {
+                                            if ((i.op == 0x54u || i.op == 0x5Au) && c >= x.limit)
+                                            {
+                                                constant_of(i, i.op == 0x54u);
+                                                continue;
+                                            }
+                                            if ((i.op == 0x56u || i.op == 0x58u) && c >= x.limit - 1u)
+                                            {
+                                                constant_of(i, i.op == 0x58u);
+                                                continue;
+                                            }
+                                        }
+                                        if (x.masked)
+                                        {
+                                            // (x is at least its bits)
+                                            if ((i.op == 0x54u || i.op == 0x5Au) && c <= x.bits)
+                                                constant_of(i, i.op == 0x5Au);
+                                            else if ((i.op == 0x56u || i.op == 0x58u) && c < x.bits)
+                                                constant_of(i, i.op == 0x56u);
+                                        }
+                                        continue;
+                                    }
+                                    if (i.op == 0x51u || i.op == 0x52u)
+                                    {
+                                        for (std::size_t n = 0u; n < 2u; ++n)
+                                        {
+                                            auto const xv = i.operands[1u - n];
+                                            auto const& k = values[i.operands[n]];
+                                            if (!k.constant() || values[xv].constant())
+                                                continue;
+                                            auto const& x = claims[xv];
+                                            if ((x.below && k.imm0 >= x.limit) || (x.masked && (k.imm0 & x.mask) != x.bits))
+                                            {
+                                                constant_of(i, i.op == 0x52u);
+                                                break;
+                                            }
+                                            // (x & M of an x whose bits of M are known)
+                                            if (auto const& y = values[xv]; !y.dead && y.op == 0x83u && y.operands.size() == 2u)
+                                            {
+                                                bool done = false;
+                                                for (std::size_t m = 0u; m < 2u && !done; ++m)
+                                                    if (auto const& mask = values[y.operands[m]]; mask.constant() && y.operands[1u - m] < claims.size())
+                                                        if (auto const& z = claims[y.operands[1u - m]]; z.masked && z.mask == mask.imm0)
+                                                        {
+                                                            constant_of(i, (k.imm0 == z.bits) == (i.op == 0x51u));
+                                                            done = true;
+                                                        }
+                                                if (done)
+                                                    break;
+                                            }
+                                        }
+                                    }
+                                }
+                            return changed;
+                        }
+
+                        bool fold_assumed(function& aFunction)
+                        {
+                            bool const constants = fold_assumed_constants(aFunction);
+                            bool const bounds = fold_assumed_bounds(aFunction);
+                            return constants || bounds;
                         }
 
                         bool fold_constants(function& aFunction)
@@ -2434,6 +2727,12 @@ namespace neos
                                         i = (i + 1u) & mask;
                                     return i;
                                 }
+                                // (the value of the key (None: it has none))
+                                value find(key const& aKey) const
+                                {
+                                    auto const i = find_slot(aKey);
+                                    return keys[i].size != 0u ? values[i] : None;
+                                }
                                 // (the value of the key, and whether it was added (with aValue))
                                 std::pair<value, bool> try_emplace(key const& aKey, value aValue)
                                 {
@@ -2480,10 +2779,43 @@ namespace neos
                             // (memory's epochs: one for each alias class (see optimizer::MemargClassShift: class 0's changes with any store),
                             // and globals')
                             constexpr std::size_t Globals = optimizer::MemargClasses;
-                            using epoch_set = std::array<std::uint64_t, optimizer::MemargClasses + 1u>;
+                            // (and the watched loads' (see optimizer::MemargWatched: of words at constant addresses, which only their runtime
+                            // writes, reporting it): the words change only in calls (or by a store of class 0), and not in a call that is
+                            // followed by an exit (see Invalidated: the code leaves there if one changed while the call ran), so what such
+                            // a load read before the call it has read after it (as V8's optimized code depends on what it assumed without
+                            // testing it again). A function with no such load has no exits (they are for nothing))
+                            constexpr std::size_t Watched = optimizer::MemargClasses + 1u;
+                            using epoch_set = std::array<std::uint64_t, optimizer::MemargClasses + 2u>;
                             std::uint64_t epochs = 0u;
                             std::vector<epoch_set> exitEpoch(blocks.size(), epoch_set{});
                             auto const class_of = [](instruction const& aAccess) { return static_cast<std::size_t>((aAccess.imm0 >> optimizer::MemargClassShift) & optimizer::MemargClassMask); };
+                            auto const watched_load = [&](instruction const& aLoad)
+                            {
+                                return aLoad.load() && (aLoad.imm0 & optimizer::MemargWatched) != 0u && aLoad.operands.size() == 1u && values[aLoad.operands[0]].constant();
+                            };
+                            {
+                                bool any = false;
+                                for (auto const& i : values)
+                                    if (!i.dead && watched_load(i))
+                                    {
+                                        any = true;
+                                        break;
+                                    }
+                                if (!any && aFunction.assumed.empty())
+                                {
+                                    // (and it assumes none from now on: its exits are gone)
+                                    aFunction.assume = false;
+                                    for (auto& i : values)
+                                        if (!i.dead && i.op == Invalidated)
+                                        {
+                                            i.op = 0x41u;
+                                            i.imm0 = 0u;
+                                        }
+                                }
+                            }
+                            // (the call that the instruction before was (an exit follows its call), and the watched loads' epoch before it)
+                            bool afterCall = false;
+                            std::uint64_t watchedBeforeCall = 0u;
                             replacements replaced;
                             // (constants of the same type and bits: one value (so that instructions of them compare equal))
                             {
@@ -2540,6 +2872,11 @@ namespace neos
                                 k.push_back(aEpoch);
                                 k.push_back(aAddress);
                                 return k;
+                            };
+                            // (a kept load's key (see Keeps): the load's, by the watched loads' epoch)
+                            auto const kept_key = [&](instruction const& aLoad, std::pair<value, std::uint64_t> const& aAt, std::uint64_t aWatchedEpoch)
+                            {
+                                return memory_key(aLoad.op, aLoad.type, aLoad.imm0, aAt.second, aAt.first, aWatchedEpoch | (std::uint64_t{ 1u } << 63u));
                             };
                             struct frame { std::uint32_t block; std::size_t next; std::size_t mark; std::size_t knownMark; std::size_t accessMark; std::size_t equalMark; std::size_t oneOfMark; };
                             // (the memory accesses made (in the blocks being walked: those that dominate the block being numbered), with
@@ -2797,15 +3134,31 @@ namespace neos
                                                 onlyStores = false;
                                                 break;
                                             }
-                                            for (auto v : blocks[x].code)
+                                            for (auto const& v : blocks[x].code)
                                             {
                                                 auto const& i = values[v];
                                                 if (i.dead)
                                                     continue;
                                                 if (i.call())
                                                 {
-                                                    unchanged.fill(false);
+                                                    // (a call that an exit follows (see Invalidated) does not change the watched loads' words; the rest it does)
+                                                    bool exits = false;
+                                                    for (auto n = static_cast<std::size_t>(&v - blocks[x].code.data()) + 1u; n < blocks[x].code.size(); ++n)
+                                                        if (auto const& after = values[blocks[x].code[n]]; after.dead || after.op == CallResult)
+                                                            continue;
+                                                        else
+                                                        {
+                                                            exits = after.op == Invalidated;
+                                                            break;
+                                                        }
                                                     onlyStores = false;
+                                                    if (exits && unchanged[Watched])
+                                                    {
+                                                        unchanged.fill(false);
+                                                        unchanged[Watched] = true;
+                                                        continue;
+                                                    }
+                                                    unchanged.fill(false);
                                                     called = true;
                                                     break;
                                                 }
@@ -3093,6 +3446,7 @@ namespace neos
                                             }
                                         }
                                 }
+                                afterCall = false;
                                 for (auto v : b.code)
                                 {
                                     auto& x = values[v];
@@ -3240,9 +3594,35 @@ namespace neos
                                     }
                                     if (i.call())
                                     {
+                                        watchedBeforeCall = epoch[Watched];
                                         epoch.fill(++epochs);
+                                        afterCall = true;
                                         continue;
                                     }
+                                    if (i.op == Invalidated)
+                                    {
+                                        // (after its call: the watched loads' words are as before it (else the code leaves here))
+                                        if (afterCall)
+                                            epoch[Watched] = watchedBeforeCall;
+                                        afterCall = false;
+                                        continue;
+                                    }
+                                    if (i.op == Keeps)
+                                    {
+                                        // (a load's value that its word keeps while the words that the code assumed keep theirs (the claim's condition is
+                                        // then a constant: see function::assume): a load of the same word (in the blocks that this one dominates, with
+                                        // no call without an exit since) is the value (it is numbered as a watched load is: see kept_key))
+                                        if (aFunction.assume && i.operands.size() == 2u && values[i.operands[1]].constant() && values[i.operands[1]].imm0 != 0u)
+                                            if (auto const& l = values[i.operands[0]]; l.load() && !l.dead && !watched_load(l) && l.operands.size() == 1u &&
+                                                (l.imm0 & 0x100u) == 0u && (l.flags & Volatile) == 0u)
+                                            {
+                                                auto const at = located(l.operands[0], l.imm1);
+                                                table.try_emplace(kept_key(l, at, epoch[Watched]), i.operands[0]);
+                                            }
+                                        continue;
+                                    }
+                                    if (i.op != CallResult && !i.constant())
+                                        afterCall = false;
                                     if (i.op == 0x24u)
                                     {
                                         epoch[Globals] = ++epochs;
@@ -3252,9 +3632,17 @@ namespace neos
                                         i.flags |= Unchecked;   // (its operand is within its range: it cannot trap)
                                     key k;
                                     if (i.load())
-                                        {
+                                    {
                                         auto const at = located(i.operands[0], i.imm1);
-                                        k = memory_key(i.op, i.type, i.imm0, at.second, at.first, epoch[class_of(i)]);
+                                        // (a load of a word that keeps its value (see Keeps): the value)
+                                        if (aFunction.assume && !watched_load(i))
+                                            if (auto const kept = table.find(kept_key(i, at, epoch[Watched])); kept != None && values[kept].type == i.type)
+                                            {
+                                                i.dead = true;
+                                                replaced.add(v, kept);
+                                                continue;
+                                            }
+                                        k = memory_key(i.op, i.type, i.imm0, at.second, at.first, epoch[watched_load(i) ? Watched : class_of(i)]);
                                     }
                                     else if (i.op == 0x23u)
                                     {
@@ -3289,7 +3677,7 @@ namespace neos
                                         continue;
                                     auto const loadClass = class_of(values[v]);
                                     auto const loadWidth = width_of(values[v].op);
-                                    if (loadClass == 0u || loadWidth == 0u)
+                                    if (loadClass == 0u || loadWidth == 0u || watched_load(values[v]))
                                         continue;
                                     if (inserted && (values[v].imm0 & 0x100u) == 0u && (values[v].flags & Volatile) == 0u)
                                     {
@@ -7201,7 +7589,7 @@ namespace neos
                         }
                         // (assumes: no code (their conditions' code, only theirs: none))
                         for (auto& i : aFunction.values)
-                            if (i.op == Assume)
+                            if (i.op == Assume || i.op == Keeps)
                                 i.dead = true;
                         aFunction.usesCurrent = false;
                         sink_values(aFunction);

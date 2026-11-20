@@ -495,6 +495,8 @@ namespace neos
                                 r.inlined = iInlined;
                                 r.folded = iFolded;
                                 r.guards = iGuards;
+                                r.assumed = std::move(iAssumed);
+                                r.unexited = iUnexited;
                                 return r;
                             }
                         private:
@@ -504,9 +506,15 @@ namespace neos
                                 iOut.push_back(aToken);
                                 iOrigins.push_back(iOrigin);
                                 iDeleted.push_back(false);
-                                if (iOut.size() > iMaxTokens)
+                                if (too_large())
                                     iInliningOff = true;
                                 return iOut.size() - 1u;
+                            }
+                            // (the function's code has grown to its limit (see options::maxTokens): the tokens that are its code (not those that
+                            // folding has deleted), or three times that of tokens made (the optimizer's own work))
+                            bool too_large() const
+                            {
+                                return iOut.size() - iDeletions.size() > iMaxTokens || iOut.size() > 3u * iMaxTokens;
                             }
                             void erase(std::size_t aBegin, std::size_t aEnd)
                             {
@@ -803,6 +811,86 @@ namespace neos
                                 deopt d{ made.site, made.callee, arguments, made.depth, ownLocals, false };
                                 d.frames = std::move(frames);
                                 iDeopts.push_back(std::move(d));
+                                return true;
+                            }
+                            // (after a call that the code makes (in the function's own code, or in inlined calls: each has a frame in the
+                            // baseline's code, a language's helper too): an exit (see deopt::returned), if the baseline's code has the frames'
+                            // calls (see options::deoptFrame); else the call is one without (see result::unexited))
+                            void returned_exit(std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aResults)
+                            {
+                                if (!exit_made(aPosition, aArguments, aResults))
+                                    iUnexited = true;
+                            }
+                            bool exit_made(std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aResults)
+                            {
+                                if (!iOptions.exits || !iOptions.deopt || !iOptions.deoptFrame || iDeopts.size() >= 60000u || aResults > 1u || iStack.size() < aResults)
+                                    return false;
+                                auto const arguments_of = [&](inline_context const& aCall)
+                                {
+                                    return static_cast<std::uint32_t>(iModule.functions[aCall.callee].parameters->size() + (aCall.indirect ? 1u : 0u));
+                                };
+                                auto const& f = iModule.functions[iFunction];
+                                auto const ownLocals = static_cast<std::uint32_t>(f.parameters->size() + f.locals->size());
+                                auto const height = static_cast<std::uint32_t>(iStack.size() - aResults);  // (below the call's arguments)
+                                std::vector<deopt::frame> frames;
+                                deopt::frame own;
+                                own.function = iFunction;
+                                own.position = iInlines.empty() ? aPosition : iInlines[0].site;
+                                own.arguments = iInlines.empty() ? aArguments : arguments_of(iInlines[0]);
+                                own.depth = iInlines.empty() ? height : iInlines[0].depth;
+                                for (std::uint32_t l = 0u; l < ownLocals; ++l)
+                                    own.locals.push_back(l);
+                                own.constants.assign(ownLocals, 0u);
+                                frames.push_back(std::move(own));
+                                for (std::size_t j = 0u; j < iInlines.size(); ++j)
+                                {
+                                    auto const& c = iInlines[j];
+                                    bool const last = j + 1u == iInlines.size();
+                                    auto const nextDepth = last ? height : iInlines[j + 1u].depth;
+                                    if (nextDepth < c.depth)
+                                        return false;
+                                    deopt::frame frame;
+                                    frame.function = c.callee;
+                                    frame.position = last ? aPosition : iInlines[j + 1u].site;
+                                    frame.arguments = last ? aArguments : arguments_of(iInlines[j + 1u]);
+                                    frame.depth = nextDepth - c.depth;
+                                    frame.locals = c.locals;
+                                    frame.constants.assign(c.locals.size(), 0u);
+                                    for (std::size_t i = 0u; i < c.locals.size(); ++i)
+                                        if (c.locals[i] == NoLocal)
+                                        {
+                                            if (i >= c.constantParameters.size() || !c.constantParameters[i])
+                                                return false;
+                                            frame.constants[i] = c.constantParameters[i]->bits;
+                                        }
+                                    frames.push_back(std::move(frame));
+                                }
+                                // (locals whose values are known constants here: the constants (their code may have been removed))
+                                for (auto& frame : frames)
+                                    for (std::size_t l = 0u; l < frame.locals.size(); ++l)
+                                        if (auto const local = frame.locals[l]; local != NoLocal && local < iConstants.size() && iConstants[local])
+                                        {
+                                            frame.constants[l] = iConstants[local]->bits;
+                                            frame.locals[l] = NoLocal;
+                                        }
+                                std::size_t values = aResults;
+                                for (auto const& frame : frames)
+                                {
+                                    values += frame.locals.size() + frame.depth;
+                                    if (!iOptions.deoptFrame(frame.function, frame.position, frame.arguments, frame.depth, static_cast<std::uint32_t>(frame.locals.size())))
+                                        return false;
+                                }
+                                if (values > iOptions.maxDeoptValues)
+                                    return false;
+                                deopt d{ aPosition, iInlines.empty() ? iFunction : iInlines.back().callee, 0u, 0u, ownLocals, false };
+                                d.returned = true;
+                                d.results = aResults;
+                                d.frames = std::move(frames);
+                                iDeopts.push_back(std::move(d));
+                                emit(0x41u);
+                                emit(iDeopts.size() - 1u);
+                                emit(0x10u);
+                                emit(intrinsics::returned(iModule));
                                 return true;
                             }
                             inline_context* speculating()
@@ -1354,6 +1442,8 @@ namespace neos
                                             effect();
                                             for (auto t : *iModule.types[type].second)
                                                 push(t);
+                                            returned_exit(position, static_cast<std::uint32_t>(iModule.types[type].first->size() + 1u),
+                                                static_cast<std::uint32_t>(iModule.types[type].second->size()));
                                         }
                                         break;
                                     case 0x1A:
@@ -1545,7 +1635,37 @@ namespace neos
                                                 auto const shift = 64u - 8u * x.width;
                                                 value = static_cast<std::uint64_t>(static_cast<std::int64_t>(value << shift) >> shift);
                                             }
+                                                    value &= mask_of(x.type);
+                                                    // (one that is watched too, in code that assumes (see options::assume): the code depends on the words that it 
+                                                    // reads (it is made again when one changes, rather than keep the value that it had))
+                                                    if ((aMemarg & MemargWatched) != 0u && iOptions.assume && iOptions.exits && iOptions.deopt)
+                                                        for (auto w = at & ~std::uint64_t{ 7u }; w < at + x.width; w += 8u)
+                                                            iAssumed.emplace(memory, w);
+                                                    used(address.from);
+                                                    erase(address.begin, address.end);
+                                                    ++iFolded;
+                                                    push_constant(x.type, value, address.from);
+                                                    return;
+                                                }
+                                            }
+                                            if (address.constant && (aMemarg & MemargWatched) != 0u && iOptions.assume && iOptions.exits && iOptions.deopt && memory != 0u &&
+                                    memory <= NEOS_RT_EXTERNAL_MEMORIES && x.type != F32 && x.type != F64 && external_memory(memory).fixed)
+                                {
+                                    // (a watched load: the value its word has now, assumed (see options::assume: no test; the code depends on it))
+                                    auto const at = address.bits + aOffset;
+                                    if (at >= address.bits)
+                                        if (auto const word = iMemoryWord(memory, at, x.width))
+                                        {
+                                            std::uint64_t value = *word;
+                                            if (x.sign)
+                                            {
+                                                auto const shift = 64u - 8u * x.width;
+                                                value = static_cast<std::uint64_t>(static_cast<std::int64_t>(value << shift) >> shift);
+                                            }
                                             value &= mask_of(x.type);
+                                            // (the words (8 bytes, aligned) that it reads)
+                                            for (auto w = at & ~std::uint64_t{ 7u }; w < at + x.width; w += 8u)
+                                                iAssumed.emplace(memory, w);
                                             used(address.from);
                                             erase(address.begin, address.end);
                                             ++iFolded;
@@ -1652,10 +1772,27 @@ namespace neos
                                 if (aCallee >= iModule.functions.size())
                                     throw cannot_optimize{ "invalid function" };
                                 auto const& callee = iModule.functions[aCallee];
+                                bool const indirect = iIndirect.has_value();    // (a call_indirect's (inlining it resets iIndirect))
                                 if (callee.imported && callee.call == import_call::Assume)
                                 {
                                     // (neos::assume: not a call (no effect; see ssa::Assume))
                                     pop();
+                                    emit(0x10u);
+                                    emit(aCallee);
+                                    return;
+                                }
+                                if (callee.imported && callee.call == import_call::Keeps)
+                                {
+                                    // (neos::keeps: not a call (no effect; see ssa::Keeps); one whose condition is 0 claims nothing: none)
+                                    auto const condition = pop();
+                                    pop();
+                                    if (condition.constant && condition.bits == 0u)
+                                    {
+                                        used(condition.from);
+                                        erase(condition.begin, condition.end);
+                                        emit(0x1Au);    // (its value: dropped)
+                                        return;
+                                    }
                                     emit(0x10u);
                                     emit(aCallee);
                                     return;
@@ -1749,6 +1886,9 @@ namespace neos
                                     effect();
                                 for (auto t : *callee.results)
                                     push(t);
+                                // (a call_indirect's whose index is a constant: the function's own code's call has the index too)
+                                if (!callee.imported || !callee.checked)
+                                    returned_exit(aPosition, static_cast<std::uint32_t>(callee.parameters->size() + (indirect ? 1u : 0u)), static_cast<std::uint32_t>(callee.results->size()));
                             }
                             // (the state before an inlined call, for when it is not inlined after all)
                             struct snapshot
@@ -1800,7 +1940,7 @@ namespace neos
                                 iReachable = true;
                                 iUnreachableEnd = false;
                                 // (the code that grew too large was not kept: inlining is on again, unless the code is still too large)
-                                iInliningOff = iOut.size() > iMaxTokens;
+                                iInliningOff = too_large();
                             }
                             // (false if it is not inlined after all (the caller restores the state before it))
                             // (the origin of code (its position) within inlined calls of which one (at least) is of a function with a frame
@@ -1857,6 +1997,7 @@ namespace neos
                                 auto const& callee = iModule.functions[aCallee];
                                 auto const& parameters = *callee.parameters;
                                 auto const saveOrigin = iOrigin;
+                                bool const unexitedBefore = iUnexited;  // (the code of a call that is not inlined after all is removed: its calls too)
                                 iOrigin = aPosition;
                                 struct framed_scope
                                 {
@@ -1974,14 +2115,15 @@ namespace neos
                                     // path's function, whose call the function's own code makes)): called
                                     iInlines.pop_back();
                                     iOrigin = saveOrigin;
+                                    iUnexited = unexitedBefore;
                                     return false;
                                 }
                                 auto done = std::move(iInlines.back());
                                 iInlines.pop_back();
                                 {
-                                    // (its size: its tokens, and its instructions that are likely to be code (not constants, locals' gets and
-                                    // sets (registers), blocks' structure or drops))
-                                    std::size_t size = 0u;
+                                    // (its size: its instructions that are likely to be code (not constants, locals' gets and sets (registers), 
+                                    // blocks' structure or drops). Not its tokens: most are those, and a stub's tokens that are no code (a claim's
+                                    // operands, a known local's sets) made callees that fit be called)
                                     std::size_t cost = 0u;
                                     for (auto i = blockAt; i < iOut.size();)
                                     {
@@ -1992,8 +2134,14 @@ namespace neos
                                         }
                                         auto const op = static_cast<std::uint8_t>(iOut[i]);
                                         auto const n = immediates(op, iOut, i);
-                                        for (std::size_t k = 0u; k <= n && i + k < iOut.size(); ++k)
-                                            size += iDeleted[i + k] ? 0u : 1u;
+                                        // (a call that is no code (a claim: neos::assume, neos::keeps; an exit's patch point: see intrinsics::returned): not counted)
+                                        if (op == 0x10u && i + 1u < iOut.size())
+                                            if (auto const target = iOut[i + 1u]; target == intrinsics::returned(iModule) || (target < iModule.functions.size() &&
+                                                iModule.functions[target].imported && (iModule.functions[target].call == import_call::Assume || iModule.functions[target].call == import_call::Keeps)))
+                                            {
+                                                i += 1u + n;
+                                                continue;
+                                            }
                                         switch (op)
                                         {
                                         case 0x01: case 0x02: case 0x03: case 0x05: case 0x0B: case 0x1A:
@@ -2006,8 +2154,7 @@ namespace neos
                                         i += 1u + n;
                                     }
                                     bool const largeCallee = !callee.frameless && callee.codeEnd - callee.codeBegin > iOptions.maxFramedCalleeTokens;
-                                    bool const large = size > (largeCallee ? iOptions.maxLargeFramedInlinedTokens : iOptions.maxInlinedTokens) ||
-                                        cost > (largeCallee ? iOptions.maxLargeFramedInlinedCost : iOptions.maxInlinedCost) || done.guardCount > iOptions.maxGuards;
+                                    bool const large = cost > (largeCallee ? iOptions.maxLargeFramedInlinedCost : iOptions.maxInlinedCost) || done.guardCount > iOptions.maxGuards;
                                     if (largeCallee && iOptions.largeRejects != nullptr)
                                     {
                                         auto& rejects = iOptions.largeRejects[aCallee];
@@ -2021,6 +2168,7 @@ namespace neos
                                         // (and not inlined again (its code is as large where it is called again))
                                         iLarge.insert(aCallee);
                                         iOrigin = saveOrigin;
+                                        iUnexited = unexitedBefore;
                                         return false;
                                     }
                                 }
@@ -2076,16 +2224,19 @@ namespace neos
                                                 emit(const_op(parameters[i]));
                                                 emit(const_token(parameters[i], *arguments[i]));
                                             }
-                                            else
-                                            {
-                                                emit(0x20u);
-                                                emit(done.locals[i]);
+                                                    else
+                                                    {
+                                                        emit(0x20u);
+                                                        emit(done.locals[i]);
+                                                    }
+                                                }
+                                                emit(0x10u);
+                                                emit(aCallee);
+                                                // (its exit: the call is the one that the code that makes it has at its position)
+                                                if (!exit_made(aSite, static_cast<std::uint32_t>(parameters.size() + (done.indirect ? 1u : 0u)), static_cast<std::uint32_t>(callee.results->size())))
+                                                    iUnexited = true;
                                             }
-                                        }
-                                        emit(0x10u);
-                                        emit(aCallee);
-                                    }
-                                    emit(0x0Bu);
+                                            emit(0x0Bu);
                                     // (its result: the construct's (the inlined code's, or the call's): not a constant (the inlined code's
                                     // constant's tokens are within it))
                                     if (result != NoResult && !iStack.empty() && iStack.back().constant)
@@ -2184,6 +2335,8 @@ namespace neos
                             std::size_t iMaxTokens = 0u;
                             std::size_t iInlined = 0u;
                             std::size_t iFolded = 0u;
+                            std::set<std::pair<std::uint32_t, std::uint64_t>> iAssumed;     ///< (see result::assumed)
+                            bool iUnexited = false;                                         ///< (see result::unexited)
                             std::size_t iGuards = 0u;
                         };
                     }

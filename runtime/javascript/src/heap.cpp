@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <boost/unordered/unordered_flat_map.hpp>
 #include "js.hpp"
 #include "gc.hpp"
 
@@ -170,6 +171,7 @@ namespace neos::javascript_runtime
         };
         struct intern_key_hash
         {
+            using is_avalanching = void;    // (the hash of the text's bytes: used as it is)
             std::size_t operator()(intern_key const& aKey) const noexcept { return aKey.hash; }
         };
         struct intern_key_equal
@@ -181,7 +183,9 @@ namespace neos::javascript_runtime
         {
             // (pinned strings (that live as long as the program): marked by the collector (pinnedValues, in the order they were 
             // pinned); the others (weak) live while they are referred to (those that die are removed))
-            using map = std::unordered_map<intern_key, value, intern_key_hash, intern_key_equal>;
+            // (open addressing: a string that is a property's key is looked up here whenever it is not an interned string itself
+            // (e.g. a slice of the source that a parser looks up): no node for each string, and no division for each lookup)
+            using map = boost::unordered_flat_map<intern_key, value, intern_key_hash, intern_key_equal>;
             map pinned;
             map weak;
             std::vector<value> pinnedValues;
@@ -214,7 +218,7 @@ namespace neos::javascript_runtime
                 aTracer.mark(v);
         }, [](tracer& aTracer)
         {
-            std::erase_if(interned().weak, [&](auto const& aEntry) { return !aTracer.alive(aEntry.second); });
+            erase_if(interned().weak, [&](auto const& aEntry) { return !aTracer.alive(aEntry.second); });
         } };
     }
 

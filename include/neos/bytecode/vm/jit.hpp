@@ -97,6 +97,10 @@ namespace neos
                     ObjectRelease,  ///< neos::object_release (host_interface::objectRelease)
                     Assume,         ///< neos::assume (i32): no call (no code): the program's claim that its operand is not 0 where the
                                     ///< call is (optimized code may assume it (see ssa::Assume))
+                    Keeps,          ///< neos::keeps (i64, i64): no call (no code): the program's claim that, where its second operand is not
+                                    ///< 0, the word that its first operand was loaded from (the operand is the load's value) has that value
+                                    ///< for as long as the watched words (see optimizer::MemargWatched) that the second operand was made 
+                                    ///< from have theirs (optimized code that assumes those words need not load it again: see ssa::Keeps)
                     StackLow        ///< neos::stack_low (-> i32): no call: nonzero if the call stack is near its end (see StackLowMargin)
                 };
 

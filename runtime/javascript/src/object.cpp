@@ -34,6 +34,8 @@
 // Objects: property storage, the ordinary internal methods, arrays (exotic), functions ([[Call]] and [[Construct]])
 // and errors
 
+#include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include "js.hpp"
 #include "api.hpp"
@@ -74,6 +76,8 @@ namespace neos::javascript_runtime
 
     shape* shape::transition(value aKey, std::uint8_t aAttributes)
     {
+        // (an object leaves the shape for the one with the key (compiled code adds a property by a transition that has been made))
+        leave();
         auto const k = transition_key(aKey, aAttributes);
         if (iManyTransitions)
         {
@@ -105,7 +109,7 @@ namespace neos::javascript_runtime
             iTransitions.emplace_back(k, next);
             if (iTransitions.size() > FewKeys)
             {
-                iManyTransitions = std::make_unique<std::unordered_map<value, shape*>>(iTransitions.begin(), iTransitions.end());
+                iManyTransitions = std::make_unique<boost::unordered_flat_map<value, shape*>>(iTransitions.begin(), iTransitions.end());
                 iTransitions.clear();
                 iTransitions.shrink_to_fit();
             }
@@ -120,7 +124,7 @@ namespace neos::javascript_runtime
         if (aPrototype == proto)
             return this;
         if (!iProtoRoots)
-            iProtoRoots = std::make_unique<std::unordered_map<value, shape*>>();
+            iProtoRoots = std::make_unique<boost::unordered_flat_map<value, shape*>>();
         if (auto const existing = iProtoRoots->find(aPrototype); existing != iProtoRoots->end())
             return existing->second;
         auto& shapes = the_heap().shape_count();
@@ -133,6 +137,37 @@ namespace neos::javascript_runtime
         root->validity = validity;
         iProtoRoots->emplace(aPrototype, root);
         return root;
+    }
+
+    void shape::field_kind_changed(std::uint8_t aKind)
+    {
+        if (fieldKind == FieldNone)
+            fieldKind = aKind;
+        else
+            field_any();
+    }
+
+    void shape::field_any()
+    {
+        if (fieldKind == FieldAny)
+            return;
+        // (the word first: code that assumed the kind does not read the property again as of that kind (see validity_changed))
+        fieldKind = FieldAny;
+        if (fieldValidity != nullptr)
+        {
+            ++*fieldValidity;
+            validity_changed(fieldValidity);
+        }
+    }
+
+    std::uint64_t* shape::field_validity()
+    {
+        if (fieldValidity == nullptr)
+        {
+            fieldValidity = static_cast<std::uint64_t*>(region_allocate(sizeof(std::uint64_t)));
+            *fieldValidity = 1u;
+        }
+        return fieldValidity;
     }
 
     shape* shape::with_proto(value aPrototype)
@@ -164,7 +199,7 @@ namespace neos::javascript_runtime
         }
         if (!iIndex)
         {
-            iIndex = std::make_unique<std::unordered_map<value, std::uint32_t>>();
+            iIndex = std::make_unique<boost::unordered_flat_map<value, std::uint32_t>>();
             iIndex->reserve(count);
             for (auto const* s = this; s->parent != nullptr; s = s->parent)
                 iIndex->emplace(s->key, s->count - 1u);
@@ -268,7 +303,10 @@ namespace neos::javascript_runtime
         else if ((t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u)
             cell_of<accessor_pair>(t.values()[iPosition]).getter = aData;
         else
+        {
+            t.iShape->owner(iPosition)->note_field(aData);
             t.values()[iPosition] = aData;
+        }
     }
 
     void property_ref::set(value aData, value aSetter, std::uint8_t aAttributes)
@@ -293,7 +331,10 @@ namespace neos::javascript_runtime
             pair.setter = aSetter;
         }
         else
+        {
+            t.iShape->owner(iPosition)->note_field(aData);
             t.values()[iPosition] = aData;
+        }
     }
 
     property_table::dictionary& property_table::dict()
@@ -325,6 +366,7 @@ namespace neos::javascript_runtime
         changed();
         if (iShape == nullptr)
             release_dictionary();
+        leave_shape();
         if (auto* const root = aBase->root_for(prototype); root != nullptr)
             iShape = root;
         else
@@ -344,7 +386,9 @@ namespace neos::javascript_runtime
             changed();
             if (auto* const s = iShape->with_proto(aPrototype); s != nullptr)
             {
+                leave_shape();
                 iShape = s;
+                note_fields();
                 return;
             }
             make_dictionary();
@@ -423,6 +467,7 @@ namespace neos::javascript_runtime
             d->entries.push_back(e);
         }
         release_values();
+        leave_shape();
         iShape = nullptr;
         iStorage = unit_of(d);
         note_owner(this);
@@ -438,7 +483,9 @@ namespace neos::javascript_runtime
             if (auto* const next = iShape->transition(aKey, aAttributes))
             {
                 // (an accessor's value: its getter and setter (a pair))
-                push((aAttributes & AttributeAccessor) != 0u ? value_of(the_heap().make<accessor_pair>(aData, aSetter)) : aData);
+                auto const pushed = (aAttributes & AttributeAccessor) != 0u ? value_of(the_heap().make<accessor_pair>(aData, aSetter)) : aData;
+                next->note_field(pushed);
+                push(pushed);
                 iShape = next;
                 return property_ref{ *this, next->count - 1u };
             }
@@ -455,7 +502,9 @@ namespace neos::javascript_runtime
     void property_table::add(value aData, shape* aShape)
     {
         changed();
+        aShape->note_field(aData);
         push(aData);
+        leave_shape();
         iShape = aShape;
     }
 
@@ -519,6 +568,7 @@ namespace neos::javascript_runtime
         if (aShape == 0u || std::uint64_t{ iShape.word() } != aShape || aPosition >= iShape->count)
             return false;
         changed();
+        iShape->owner(aPosition)->note_field(aValue);
         values()[aPosition] = aValue;
         return true;
     }
@@ -536,6 +586,16 @@ namespace neos::javascript_runtime
             }
             if (iShape->count != 0u)
                 aTracer.mark(std::span<value const>{ values(), iShape->count });
+            // (NEOS_JS_FIELD_CHECK: each of its values is of its field's kind (see shape::fieldKind); it aborts if one is not)
+            static bool const sCheck = std::getenv("NEOS_JS_FIELD_CHECK") != nullptr;
+            if (sCheck)
+                for (shape* s = iShape; s != nullptr && s->count != 0u; s = s->parent)
+                    if (auto const v = values()[s->count - 1u]; s->fieldKind != shape::FieldAny && s->fieldKind != shape::kind_of(v))
+                    {
+                        std::fprintf(stderr, "[js] field check: a value %016llx at position %u of a shape of %u keys is not of its field's kind %u\n",
+                            static_cast<unsigned long long>(v), s->count - 1u, iShape->count, static_cast<unsigned>(s->fieldKind));
+                        std::abort();
+                    }
         }
         else
             for (auto const& e : entries())

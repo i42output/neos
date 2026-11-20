@@ -502,6 +502,8 @@ namespace neos
                                 d.call = jit::import_call::ObjectRelease;
                             else if (*f.import == "neos::assume")
                                 d.call = jit::import_call::Assume;
+                            else if (*f.import == "neos::keeps")
+                                d.call = jit::import_call::Keeps;
                             else if (*f.import == "neos::stack_low")
                                 d.call = jit::import_call::StackLow;
                             else if (f.import->starts_with(std::string{ bytecode::LinkNamespace } + "::") || *f.import == "neos::link_run")
@@ -2220,6 +2222,7 @@ namespace neos
                             { "neos::exit", import_kind::Exit },    // (the program stops: its exit status)
                             { "neos::allocate", import_kind::Allocate }, // (memory (zeroed) of a size: its address)
                             { "neos::assume", import_kind::Assume },    // (the program's claim that its operand is not 0: nothing is done)
+                            { "neos::keeps", import_kind::Assume },     // (the program's claim that a word keeps its value (see jit::import_call::Keeps): nothing is done)
                             { "neos::stack_low", import_kind::StackLow },   // (nonzero if the call stack is near its end: see jit::StackLowMargin)
                             { "neos::link_run", import_kind::LinkRun }  // (a translation unit after the first runs: see link_run)
                         };

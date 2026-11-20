@@ -1274,12 +1274,14 @@ namespace neos::compilers::javascript
         iControls.push_back(control{ control_kind::Block });
         others(1u);
         end_control();
+        shape_kept(aShape, aEntry);
         aBody();
         // (the other entries' own copies of aBody)
         for (std::uint32_t e = layout::SiteEntries - 1u; e >= 1u; --e)
         {
             end_control();
             entry_at(e);
+            shape_kept(aShape, aEntry);
             aBody();
         }
     }
@@ -1357,6 +1359,107 @@ namespace neos::compilers::javascript
         call(iCompiler.runtime_function("neos::assume", { I32 }, type::Void));
         get(value);
         release(value);
+    }
+
+    void function_generator::field_kind(std::uint32_t aEntry, std::uint32_t aKind)
+    {
+        get(aEntry);
+        site_load(opcode::I64LoadMem32U, layout::SiteFieldKind);
+        set(aKind);
+    }
+
+    void function_generator::shape_kept(std::uint32_t aShape, std::uint32_t aEntry)
+    {
+        // (the receiver's shape word (aShape: its load's value) is the entry's shape: if no object has left that shape yet 
+        // (layout::ShapeLeft: a watched word, so optimized code that assumes it depends on it), the receiver has it until one does 
+        // (neos::keeps: such code need not load and test it again after the calls it makes). An entry's shape is a cached load, so
+        // the word's address is a constant in code that knows the site)
+        // (an entry that has no shape (not used, or a dictionary's): none)
+        get(aEntry);
+        site_load(opcode::I64LoadMem, layout::SiteShape);
+        op(opcode::I64Eqz);
+        op(opcode::I32Eqz);
+        op(opcode::If);
+        iCode.push_back(0x40u);
+        iControls.push_back(control{ control_kind::Block });
+        {
+            get(aShape);
+            get(aEntry);
+            site_load(opcode::I64LoadMem, layout::SiteShape);
+            i64(static_cast<std::int64_t>(layout::ValueUnitShift));
+            op(opcode::I64Shl);
+            op(opcode::I64LoadMem);
+            u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
+            u32(layout::Memory);
+            u32(layout::ShapeLeft);
+                op(opcode::I64Eqz);
+                op(opcode::I64UConvertI32);
+                call(iCompiler.runtime_function("neos::keeps", { I64, I64 }, type::Void));
+            }
+            end_control();
+    }
+
+    void function_generator::field_valid(std::uint32_t aEntry, std::uint32_t aKind, std::size_t aSlow)
+    {
+        // (a field of a kind: the kind's validity word (a watched load: see the holders') has the entry's value)
+        get(aKind);
+        op(opcode::I64Eqz);
+        op(opcode::I32Eqz);
+        op(opcode::If);
+        iCode.push_back(0x40u);
+        iControls.push_back(control{ control_kind::Block });
+        {
+            get(aEntry);
+            site_load(opcode::I64LoadMem, layout::SiteValidity);
+            op(opcode::I64LoadMem);
+            u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
+            u32(layout::Memory);
+            u32(0u);
+            get(aEntry);
+            site_load(opcode::I64LoadMem, layout::SiteValidityValue);
+            op(opcode::I64Ne);
+            branch(aSlow, true);
+        }
+        end_control();
+    }
+
+    void function_generator::of_field_kind(std::uint32_t aKind, std::uint32_t aValue, std::optional<std::size_t> aSlow)
+    {
+        // (a value is of a field's kind (0: any): a number (FieldNumber: below the tags), a string or an object (its tag). Each kind
+        // has its own test, so code that knows the kind (an optimizing tier's: an entry's is a cached load) has that one only (none
+        // if any). With aSlow: there if the value is not of the kind; else assumed (neos::assume: optimized code knows it))
+        for (std::uint32_t kind = layout::FieldNumber; kind <= layout::FieldObject; ++kind)
+        {
+            get(aKind);
+            i64(kind);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            {
+                get(aValue);
+                if (kind == layout::FieldNumber)
+                {
+                    constant(values::TagSpecial);
+                    op(opcode::I64LtU);
+                }
+                else
+                {
+                    constant(0xFFFF000000000000ull);
+                    op(opcode::I64And);
+                    constant(kind == layout::FieldString ? values::TagString : values::TagObject);
+                    op(opcode::I64Eq);
+                }
+                if (aSlow)
+                {
+                    op(opcode::I32Eqz);
+                    branch(*aSlow, true);
+                }
+                else
+                    call(iCompiler.runtime_function("neos::assume", { I32 }, type::Void));
+            }
+            end_control();
+        }
     }
 
     void function_generator::cached_get_stub(bool aComputed)
@@ -1506,7 +1609,12 @@ namespace neos::compilers::javascript
                     iCode.push_back(0x7Eu);
                     iControls.push_back(control{ control_kind::Block });
                     {
-                        // (its own property: its value at the position (its shape's: a data property))
+                        // (its own property: its value at the position (its shape's: a data property); of its field's kind, if the
+                        // entry has one whose validity word is the same (layout::SiteFieldKind): optimized code knows it)
+                        auto const fieldKind = temporary();
+                        auto const fieldValue = temporary();
+                        field_kind(entry, fieldKind);
+                        field_valid(entry, fieldKind, slow);
                         get(cell);
                         unit_load(layout::ObjectValues, alias::Values);
                         get(word);
@@ -1517,6 +1625,11 @@ namespace neos::compilers::javascript
                         op(opcode::I64Add);
                         mem_load(opcode::I64LoadMem, 0u, alias::Slot);
                         assume_not_exception();
+                        set(fieldValue);
+                        of_field_kind(fieldKind, fieldValue, std::nullopt);
+                        get(fieldValue);
+                        release(fieldValue);
+                        release(fieldKind);
                     }
                     op(opcode::Else);
                     {
@@ -1885,6 +1998,15 @@ namespace neos::compilers::javascript
                 op(opcode::I32Eqz);
                 op(opcode::I32Ior);
                 branch(slow, true);
+                // (a value of its field's kind (the entry's: layout::MegamorphicWritable - 1; 0: any))
+                auto const fieldKind = temporary();
+                get(entry);
+                mem_load(opcode::I64LoadMem32U, layout::MegamorphicWritable, alias::Site);
+                i64(1);
+                op(opcode::I64Sub);
+                set(fieldKind);
+                of_field_kind(fieldKind, value, slow);
+                release(fieldKind);
                 get(cell);
                 unit_load(layout::ObjectValues, alias::Values);
                 get(entry);
@@ -1911,7 +2033,12 @@ namespace neos::compilers::javascript
                 iCode.push_back(0x40u);
                 iControls.push_back(control{ control_kind::Block });
                 {
-                    // (SiteOwn: it has the property at the position (its shape's: a writable data property): its value)
+                    // (SiteOwn: it has the property at the position (its shape's: a writable data property): its value, if it is
+                    // of the entry's field's kind (layout::SiteFieldKind; else the runtime's set: the field is then of any kind))
+                    auto const fieldKind = temporary();
+                    field_kind(entry, fieldKind);
+                    of_field_kind(fieldKind, value, slow);
+                    release(fieldKind);
                     get(cell);
                     unit_load(layout::ObjectValues, alias::Values);
                     get(word);
@@ -1975,6 +2102,13 @@ namespace neos::compilers::javascript
                 mem_load(opcode::I64LoadMem32U, layout::ObjectValueCapacity, alias::Values);
                 op(opcode::I64GeU);
                 branch(slow, true);
+                // (a value of the added property's field's kind (layout::SiteFieldKind; else the runtime's))
+                {
+                    auto const fieldKind = temporary();
+                    field_kind(entry, fieldKind);
+                    of_field_kind(fieldKind, value, slow);
+                    release(fieldKind);
+                }
                 get(cell);
                 unit_load(layout::ObjectValues, alias::Values);
                 get(word);
@@ -2384,20 +2518,39 @@ namespace neos::compilers::javascript
         op(opcode::I64Add);
         tee(list);
         // (the next slot of its size class's run of free slots (if it is within it: none (0) is not); the run's bytes were counted
-        // as allocated when the runtime took it)
-        volatile_load(opcode::I64LoadMem, layout::AllocBump, true, alias::Alloc);
-        tee(slot);
-        get(entry);
-        site_load(opcode::I64LoadMem32U, layout::SiteSlotSize);
-        op(opcode::I64Add);
-        tee(bumpNext);
-        get(list);
-        volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
-        op(opcode::I64GtU);
-        branch(slow, true);     // (no run (0): its limit is 0 too)
-        get(list);
-        get(bumpNext);
-        mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
+        // as allocated when the runtime took it); else the runtime's (allocate_slot: it may collect), as a constructor's object's 
+        // (not the runtime's literal: a run's end is no reason to make the whole object there)
+        set(list);
+        begin(control_kind::Block, I64);
+        {
+            auto const allocated = iControls.size() - 1u;
+            begin(control_kind::Block);
+            auto const refill = iControls.size() - 1u;
+            get(list);
+            volatile_load(opcode::I64LoadMem, layout::AllocBump, true, alias::Alloc);
+            tee(slot);
+            get(entry);
+            site_load(opcode::I64LoadMem32U, layout::SiteSlotSize);
+            op(opcode::I64Add);
+            tee(bumpNext);
+            get(list);
+            volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
+            op(opcode::I64GtU);
+            branch(refill, true);   // (no run (0): its limit is 0 too)
+            get(list);
+            get(bumpNext);
+            mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
+            get(slot);
+            branch(allocated, false);
+            end_control();
+            get(entry);
+            site_load(opcode::I32LoadMem, layout::SiteSlotSize);
+            runtime("allocate_slot", { I32 }, I64);
+            end_control();
+        }
+        i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
+        op(opcode::I64And);
+        set(slot);
         // (the array: the template's copy (its type, flags and kind); its shape (the entry's: its prototype's), elements (their offset and
         // number) and length)
         get(entry);
@@ -2482,20 +2635,39 @@ namespace neos::compilers::javascript
         op(opcode::I64Add);
         tee(list);
         // (the next slot of its size class's run of free slots (if it is within it: none (0) is not); the run's bytes were counted
-        // as allocated when the runtime took it)
-        volatile_load(opcode::I64LoadMem, layout::AllocBump, true, alias::Alloc);
-        tee(slot);
-        get(entry);
-        site_load(opcode::I64LoadMem32U, layout::SiteSlotSize);
-        op(opcode::I64Add);
-        tee(bumpNext);
-        get(list);
-        volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
-        op(opcode::I64GtU);
-        branch(slow, true);     // (no run (0): its limit is 0 too)
-        get(list);
-        get(bumpNext);
-        mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
+        // as allocated when the runtime took it); else the runtime's (allocate_slot: it may collect), as a constructor's object's 
+        // (not the runtime's literal: a run's end is no reason to make the whole object there)
+        set(list);
+        begin(control_kind::Block, I64);
+        {
+            auto const allocated = iControls.size() - 1u;
+            begin(control_kind::Block);
+            auto const refill = iControls.size() - 1u;
+            get(list);
+            volatile_load(opcode::I64LoadMem, layout::AllocBump, true, alias::Alloc);
+            tee(slot);
+            get(entry);
+            site_load(opcode::I64LoadMem32U, layout::SiteSlotSize);
+            op(opcode::I64Add);
+            tee(bumpNext);
+            get(list);
+            volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
+            op(opcode::I64GtU);
+            branch(refill, true);   // (no run (0): its limit is 0 too)
+            get(list);
+            get(bumpNext);
+            mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
+            get(slot);
+            branch(allocated, false);
+            end_control();
+            get(entry);
+            site_load(opcode::I32LoadMem, layout::SiteSlotSize);
+            runtime("allocate_slot", { I32 }, I64);
+            end_control();
+        }
+        i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
+        op(opcode::I64And);
+        set(slot);
         get(entry);
         site_load(opcode::I64LoadMem, layout::SiteTemplate);
         set(pattern);

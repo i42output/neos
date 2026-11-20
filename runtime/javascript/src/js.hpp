@@ -64,6 +64,7 @@
 #include <type_traits>
 #include <typeinfo>
 #include <unordered_map>
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <utility>
 #include <vector>
 #include <neos/runtime/plugin.h>
@@ -960,6 +961,17 @@ namespace neos::javascript_runtime
         // a base root's (heap::root_shape, type_root_shape, a watched object's) is null, its other prototypes' roots are its own (see
         // root_for))
         value proto = Null;
+        // (not 0 once an object has left the shape (see leave; compiled code reads it: layout::ShapeLeft): until then, an object
+        // that has the shape keeps it)
+        std::uint64_t left = 0u;
+        void leave()
+        {
+            if (left == 0u)
+            {
+                left = 1u;
+                validity_changed(&left);
+            }
+        }
         shape* base = nullptr;          ///< (the base root whose shapes it is one of (a base root: itself))
         shape* parent = nullptr;
         value key = 0u;                 ///< (the key that its parent's transition to it added)
@@ -968,17 +980,50 @@ namespace neos::javascript_runtime
         std::uint64_t epoch = 0u;       ///< (the collection that last marked its keys (see mark_keys))
         std::uint64_t* validity = nullptr;  ///< (a watched object's shape (its own: see watch): the object's validity word (in the region),
                                             ///< which each change of its properties changes; its transitions' are the same)
+        // (the kind of the values of the property that its transition added, in every object that has the property there (objects 
+        // of the shape and of those it transitions to): none until an object has one; a value of another kind makes it FieldAny 
+        // (note_field), which changes its validity word (if it has one: field_validity). Compiled code that reads the property 
+        // assumes the kind while the word is the same, and stores only values of the kind (layout::SiteFieldKind); every other 
+        // store of a shape's value notes it first)
+        static constexpr std::uint8_t FieldNone = 0u, FieldNumber = 1u, FieldString = 2u, FieldObject = 3u, FieldAny = 4u;
+        std::uint8_t fieldKind = FieldNone;
+        std::uint64_t* fieldValidity = nullptr;
+        static std::uint8_t kind_of(value aValue)
+        {
+            if (aValue < 0xFFF9000000000000ull)
+                return FieldNumber;
+            auto const tag = aValue >> 48u;
+            return tag == 0xFFFAu ? FieldString : tag == 0xFFFDu ? FieldObject : FieldAny;
+        }
+        void note_field(value aValue)
+        {
+            if (fieldKind == FieldAny)
+                return;
+            if (auto const k = kind_of(aValue); k != fieldKind)
+                field_kind_changed(k);
+        }
+        shape* owner(std::uint32_t aPosition)   ///< (the shape (it or one before it) whose transition added the property at a position)
+        {
+            auto* s = this;
+            while (s->count > aPosition + 1u)
+                s = s->parent;
+            return s;
+        }
+        std::uint64_t* field_validity();        ///< (its field's kind's validity word (in the region; made if it has none))
+        void field_any();                       ///< (its field's kind is FieldAny from now on)
         shape* transition(value aKey, std::uint8_t aAttributes);  ///< (the shape with aKey added; null if there are no more shapes)
         shape* root_for(value aPrototype);      ///< (a base root's: its root of objects of the prototype (null if there are no more shapes))
         shape* with_proto(value aPrototype);    ///< (the shape of the same keys of objects of the prototype (null if there are no more shapes))
         std::optional<std::uint32_t> position(value aKey);  ///< (a key's position)
         std::span<slot const> slots();  ///< (its keys and their attributes, by position)
     private:
+        void field_kind_changed(std::uint8_t aKind);
         std::vector<std::pair<value, shape*>> iTransitions;
-        std::unique_ptr<std::unordered_map<value, shape*>> iManyTransitions;
-        std::unique_ptr<std::unordered_map<value, std::uint32_t>> iIndex;   ///< (built when a key is found in a shape of many keys)
+        // (these maps are open addressing: they are looked up whenever a property is not found by a cache)
+        std::unique_ptr<boost::unordered_flat_map<value, shape*>> iManyTransitions;
+        std::unique_ptr<boost::unordered_flat_map<value, std::uint32_t>> iIndex;   ///< (built when a key is found in a shape of many keys)
         std::vector<slot> iSlots;       ///< (built when they are wanted)
-        std::unique_ptr<std::unordered_map<value, shape*>> iProtoRoots;     ///< (a base root's: its roots of other prototypes (they are 
+        std::unique_ptr<boost::unordered_flat_map<value, shape*>> iProtoRoots;     ///< (a base root's: its roots of other prototypes (they are 
                                                                             ///< kept: a prototype that dies has no objects; a later object
                                                                             ///< of its handle is a prototype of the same value))
     public:
@@ -1073,6 +1118,7 @@ namespace neos::javascript_runtime
             {
                 changed();
                 release();
+                leave_shape();
                 iShape = aOther.iShape;
                 iStorage = aOther.iStorage;
                 iCapacity = aOther.iCapacity;
@@ -1134,7 +1180,7 @@ namespace neos::javascript_runtime
                                                 ///< include deleted ones))
         property_ref at(std::uint32_t aPosition) { return property_ref{ *this, aPosition }; }   ///< (a property by its position)
         value value_at(std::uint32_t aPosition) const { return values()[aPosition]; }    ///< (a shape's data property's value (by its position))
-        void set_value_at(std::uint32_t aPosition, value aValue) { changed(); values()[aPosition] = aValue; }   ///< (... set)
+        void set_value_at(std::uint32_t aPosition, value aValue) { changed(); iShape->owner(aPosition)->note_field(aValue); values()[aPosition] = aValue; }   ///< (... set)
         // (a watched object's table (its shape has a validity word: see watch): each change of its properties (its shape, values or 
         // their storage) changes the word (reported: see validity_changed))
         void changed()
@@ -1154,7 +1200,14 @@ namespace neos::javascript_runtime
             }
         }
         std::uint64_t* watch_dictionary();      ///< (a dictionary's validity word (made if it has none): see watch)
-        void reshape(shape* aShape) { changed(); iShape = aShape; }    ///< (its shape: one of the same keys (and positions))
+        void reshape(shape* aShape) { changed(); leave_shape(); iShape = aShape; note_fields(); }    ///< (its shape: one of the same keys (and positions))
+        void leave_shape() { if (iShape != nullptr) iShape->leave(); }  ///< (it leaves its shape (see shape::left): before its shape changes)
+        void note_fields()  ///< (its values are its shape's fields' (their kinds: see shape::note_field))
+        {
+            auto const* const v = values();
+            for (shape* s = iShape; s != nullptr && s->count != 0u; s = s->parent)
+                s->note_field(v[s->count - 1u]);
+        }
         template <typename F>
         void for_each(F&& aFunction) const
         {

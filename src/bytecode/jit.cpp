@@ -366,6 +366,14 @@ namespace neos
                     // optimized code stays (it leaves again where it left) while the optimization is made in the background, and is replaced
                     // when it next leaves once that has been made (see replace_later); NEOS_TIER2_REPLACE 0: its own code runs meanwhile)
                     bool replace = true;
+                    // (optimized code's calls (of the module's functions) are followed by exits (see optimizer::deopt::returned): what it
+                    // read of watched words holds after them (NEOS_TIER2_EXITS 0: tested again after each call))
+                    bool exits = true;
+                    // (and what optimized code reads of watched words at constant addresses it assumes, with no test: the code is not
+                    // entered again once such a word changes (NEOS_TIER2_ASSUME 0: tested); a function whose code has been left so
+                    // MaxInvalidations times tests them (see optimizer::options::assume))
+                    bool assume = true;
+                    std::vector<std::uint8_t> invalidations;
                     std::vector<std::shared_ptr<tier_job>> replacements;
                     std::vector<std::int32_t> pollCalls;                ///< (by function: its calls before it next looks for its optimization
                                                                         ///< being made (see optimize_function))
@@ -426,6 +434,8 @@ namespace neos
                         std::uint8_t const* code = nullptr;  ///< (the code that resume and returned are offsets in (null: the module's))
                         std::size_t resume = 0u;        ///< (the code's offset)
                         std::size_t returned = 0u;      ///< (the code's offset where its call returns to (0: none))
+                        bool continued = false;         ///< (an import's call: returned is where the code continues once the call has been made
+                                                        ///< (its result is in the outgoing area, at argumentsAt), not a return address)
                         std::uint32_t arguments = 0u;
                         std::int32_t argumentsAt = 0;   ///< (its arguments' offset in the outgoing area (an import's: after the shadow space))
                         std::vector<deopt_slot> stack;
@@ -523,6 +533,16 @@ namespace neos
                         std::uintptr_t address = 0u;
                     };
                     std::vector<watched_guard> watched;
+                    // (its code's exits (see optimizer::deopt::returned: each patch point's offset and the offset it jumps to), and the
+                    // words whose change makes them leave: those that its watched loads read, and (assumed) those that it assumed (see
+                    // optimizer::options::assume: their change also keeps the code from being entered again))
+                    struct exit_word
+                    {
+                        std::uintptr_t address = 0u;
+                        bool assumed = false;
+                    };
+                    std::vector<watched_guard> exits;
+                    std::vector<exit_word> exitWords;
                     bool background = false;            ///< (made in the background (its reads are checked when it is installed))
                     std::uint64_t osrLoop = NoOsrLoop;  ///< (code that a call continues in from a loop (see osr_entry))
                     std::unique_ptr<tier_version> version;
@@ -4564,6 +4584,15 @@ namespace neos
                                 release(pop());
                                 return;
                             }
+                            if (callee.call == import_call::Keeps)
+                            {
+                                // (neos::keeps: no code (its operands are not used))
+                                if (iStack.size() < iControl.back().base + 2u)
+                                    throw unsupported{ "operand stack underflow" };
+                                release(pop());
+                                release(pop());
+                                return;
+                            }
                             if (callee.call == import_call::StackLow)
                             {
                                 // (neos::stack_low: no call: less than StackLowMargin of the stack left above its limit)
@@ -4584,10 +4613,11 @@ namespace neos
                             for (std::size_t i = 0u; i < n; ++i)
                                 release(pop());
                             spill_registers();
-                            if (iCounters != nullptr && iTier == nullptr && ((!callee.imported && callee.inlinable) || slow_plugin(callee)))
+                            if (iCounters != nullptr && iTier == nullptr)
                             {
                                 // (where optimized code that inlined the call (or that does not make it: see slow_plugin) can leave for this 
-                                // code (see compiled_module::deopt_point))
+                                // code (see compiled_module::deopt_point); and where optimized code that made the call can continue in this
+                                // code once it has returned (see optimizer::deopt::returned))
                                 pending_deopt_point d;
                                 d.position = aPosition;
                                 d.label = a.new_label();
@@ -4597,7 +4627,9 @@ namespace neos
                                 for (auto const& e : iStack)
                                     d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp, e.k == kind::Local ? static_cast<std::int32_t>(e.local) : -1 });
                                 a.bind(d.label);
-                                call_made(d.point);
+                                // (counted where its count is asked for (see optimizer::options::coldCall, slowCall))
+                                if (callee.imported ? slow_plugin(callee) : callee.inlinable)
+                                    call_made(d.point);
                                 iDeoptPoints.push_back(std::move(d));
                             }
                             iOutgoing = std::max(iOutgoing, base + 8 * static_cast<std::int32_t>(std::max(n, results.size())));
@@ -4657,7 +4689,7 @@ namespace neos
                                 }
                             }
                             else if (direct(callee))
-                                direct_call(aFunction, callee);
+                                direct_call(aFunction, callee, aPosition);
                             else
                             {
                                 save_pinned_xmms();
@@ -4671,9 +4703,21 @@ namespace neos
                                 restore_pinned_gprs();
                                 a.test_rr(false, RAX, RAX);
                                 a.jcc(NE, iTrapLabels[TrapHostException]);
+                                continues_here(aPosition);
                                 for (std::size_t i = 0u; i < results.size(); ++i)
                                     push_loaded(results[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
                             }
+                        }
+                        // (an import's call has been made (its results are in the outgoing area, no value is in a register): where optimized
+                        // code that made the call continues (see compiled_module::deopt_point::continued))
+                        void continues_here(std::size_t aPosition)
+                        {
+                            if (iDeoptPoints.empty() || iDeoptPoints.back().position != aPosition || iDeoptPoints.back().returnLabel)
+                                return;
+                            auto& d = iDeoptPoints.back();
+                            d.returnLabel = a.new_label();
+                            a.bind(*d.returnLabel);
+                            d.point.continued = true;
                         }
                         // (a deopt point's call, in a function with a frame of its own: its count is incremented (to at most its greatest) when
                         // it is made (here: where a deopt resumes too), see compiled_module::callFlags; rax is free (the call's arguments are in
@@ -4779,7 +4823,7 @@ namespace neos
                         }
                         // the call of an import called directly: its arguments are in the outgoing area (its first result is put 
                         // there too)
-                        void direct_call(std::uint32_t aFunction, function_description const& aCallee)
+                        void direct_call(std::uint32_t aFunction, function_description const& aCallee, std::size_t aPosition)
                         {
                             bool const table = iModule.objects != nullptr;
                             if (aCallee.call != import_call::Plugin)
@@ -4872,6 +4916,7 @@ namespace neos
                             }
                             else if (f.error != nullptr || converted(f.result))
                                 direct_helper(&plugin_result, aFunction, f.error != nullptr);
+                            continues_here(aPosition);
                             auto const& results = *aCallee.results;
                             for (std::size_t i = 0u; i < results.size(); ++i)
                                 push_loaded(results[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
@@ -6216,11 +6261,15 @@ namespace neos
                             for (auto const& g : iWatchedGuards)
                                 if (g.patch != NoLabel)
                                     iWatched.push_back(compiled_module::tier_job::watched_guard{ a.label_offset(g.patch), a.label_offset(g.target), g.address });
+                            for (auto const& [patch, target] : iExitPatches)
+                                iExits.push_back(compiled_module::tier_job::watched_guard{ a.label_offset(patch), a.label_offset(target), 0u });
                             iCode = std::move(a.code);
                         }
                         bytes& code() { return iCode; }
                         // (its watched tests' patch points (see find_watched_guards), and the words they assumed (memory, address, value))
                         std::vector<compiled_module::tier_job::watched_guard> const& watched() const { return iWatched; }
+                        std::vector<compiled_module::tier_job::watched_guard> const& exits() const { return iExits; }
+                        std::vector<compiled_module::tier_job::exit_word> const& exit_words() const { return iWatchedWords; }
                         template <typename Visit>
                         void watched_words(Visit aVisit) const
                         {
@@ -7114,7 +7163,7 @@ namespace neos
                                 a.alu_rm(7, true, RSP, R15, ContextStackLimit);
                                 a.jcc(B, iTrapLabels[TrapStackExhausted]);
                             }
-                            if (iVersion != nullptr && std::any_of(iVersion->deopts.begin(), iVersion->deopts.end(), [](auto const& d) { return !d.guard; }))
+                            if (iVersion != nullptr && std::any_of(iVersion->deopts.begin(), iVersion->deopts.end(), [](auto const& d) { return !d.guard && !d.returned; }))
                             {
                                 // (its calls are counted: a deopt that it seldom takes (as a share of its calls) does not make it optimized
                                 // again (see deopt_taken))
@@ -7417,7 +7466,7 @@ namespace neos
                             a.pop(RBP);
                             if (!d.frames.empty())
                             {
-                                frames_exit(d);
+                                frames_exit(d, d.returned && d.results != 0u ? f.values[i.operands.back()].type : std::uint8_t{ ssa::Void });
                                 return;
                             }
                             // (the baseline's frame (as its prologue makes it))
@@ -7504,7 +7553,7 @@ namespace neos
                         // when that one returns), and the one that the frame's code restores after its call (registers that it saves around 
                         // its calls); the registers have the last frame's values (and, those that no frame has, the values they have now:
                         // the optimized code's caller's))
-                        void frames_exit(optimizer::deopt const& aDeopt)
+                        void frames_exit(optimizer::deopt const& aDeopt, std::uint8_t aResultType)
                         {
                             struct register_value
                             {
@@ -7555,6 +7604,8 @@ namespace neos
                                 if (previous != nullptr)
                                 {
                                     // (the previous frame's call: it returns there)
+                                    if (previous->continued)
+                                        throw unsupported{ "deopt point" };
                                     a.mov_ri(RAX, deopt_address(iTier, *previous, previous->returned), true);
                                     a.push(RAX);
                                 }
@@ -7603,7 +7654,7 @@ namespace neos
                                     else if (e.local >= 0 && static_cast<std::size_t>(e.local) < frame.locals.size())
                                         to_local(static_cast<std::size_t>(e.local), disp);
                                 }
-                                if (&d != &aDeopt.frames.back())
+                                if (&d != &aDeopt.frames.back() || aDeopt.returned)
                                 {
                                     // (what its code restores after its call)
                                     for (auto const& [r, disp] : frame.callSavedGprs)
@@ -7634,10 +7685,37 @@ namespace neos
                                     else
                                         a.mov_ri(r, gprs[r].bits, true);
                                 }
+                            if (aDeopt.returned)
+                            {
+                                // (the innermost's call has been made (see optimizer::deopt::returned): the code continues where it returns to,
+                                // with its result (the deopt's last value); an import's: where its code has its result in the outgoing area)
+                                if (previous->continued)
+                                {
+                                    if (aDeopt.results != 0u)
+                                    {
+                                        a.load(true, RAX, RCX, 8 * o);
+                                        a.store(true, RSP, previous->argumentsAt, RAX);
+                                    }
+                                    a.mov_ri(RAX, deopt_address(iTier, *previous, previous->returned), true);
+                                    a.jmp_r(RAX);
+                                    return;
+                                }
+                                a.mov_ri(RAX, deopt_address(iTier, *previous, previous->returned), true);
+                                a.push(RAX);
+                                if (aDeopt.results != 0u)
+                                {
+                                    if (is_float_type(aResultType))
+                                        a.movf_load(aResultType == ssa::F64, 0, RCX, 8 * o);
+                                    else
+                                        a.load(true, RAX, RCX, 8 * o);
+                                }
+                                a.ret();
+                                return;
+                            }
                             a.mov_ri(RAX, deopt_address(iTier, *previous, previous->resume), true);
                             a.jmp_r(RAX);
-                        }
-                        // (the moves of the phis of the successor (of the block that ends with a jump to it): a parallel move)
+                            }
+                            // (the moves of the phis of the successor (of the block that ends with a jump to it): a parallel move)
                         void phi_moves(std::uint32_t aFrom, std::uint32_t aTo)
                         {
                             auto const& to = f.blocks[aTo];
@@ -8035,6 +8113,8 @@ namespace neos
                                 return;     // (see defer_and_branch)
                             if (v < iWatchedPart.size() && iWatchedPart[v])
                                 return;     // (a watched test's load or comparison: its branch's patch point (see find_watched_guards))
+                            if (op == ssa::Invalidated)
+                                return;     // (an exit's test: its branch's patch point)
                             switch (op)
                             {
                             case ssa::Param:
@@ -8140,6 +8220,18 @@ namespace neos
                             auto const& successors = f.blocks[iCurrentBlock].successors;
                             auto const whenTrue = forwarded(successors[0]);
                             auto const whenFalse = forwarded(successors[1]);
+                            if (f.values[i.operands[0]].op == ssa::Invalidated)
+                            {
+                                // (an exit's test (see ssa::Invalidated): a patch point; a change of a word that the code's watched loads read
+                                // makes it a jump to the block that leaves)
+                                auto const patch = a.new_label();
+                                a.bind(patch);
+                                a.patch_point();
+                                iExitPatches.emplace_back(patch, iBlockLabels[whenTrue]);
+                                if (whenFalse != iNext)
+                                    a.jmp(iBlockLabels[whenFalse]);
+                                return;
+                            }
                             if (auto const w = iWatchedOf.find(i.operands[0]); w != iWatchedOf.end())
                             {
                                 // (a watched test (see find_watched_guards): a patch point; its word's change makes it a jump to the path
@@ -8692,6 +8784,11 @@ namespace neos
                             std::size_t target = NoLabel;
                         };
                         std::vector<watched_test> iWatchedGuards;
+                        // (exits (see ssa::Invalidated): each one's patch point and the block that leaves; and the words that the code's
+                        // watched loads read (a change of any makes each exit's patch point a jump))
+                        std::vector<std::pair<std::size_t, std::size_t>> iExitPatches;
+                        std::vector<compiled_module::tier_job::watched_guard> iExits;
+                        std::vector<compiled_module::tier_job::exit_word> iWatchedWords;
                         std::unordered_map<value, std::size_t> iWatchedOf;     ///< (by comparison)
                         std::vector<bool> iWatchedPart;
                         std::vector<compiled_module::tier_job::watched_guard> iWatched;
@@ -8702,7 +8799,52 @@ namespace neos
                             // (not in a module whose code more than one thread may run at once (one with globals that each thread has its own
                             // of: see module_description::threadGlobals): a patch point is changed while code runs)
                             if (!enabled || iModule.threadGlobals != nullptr)
+                            {
+                                for (auto const& i : f.values)
+                                    if (!i.dead && i.op == ssa::Invalidated)
+                                        throw unsupported{ "exits" };
+                                if (!f.assumed.empty())
+                                    throw unsupported{ "exits" };
                                 return;
+                            }
+                            // (the words that the code assumed)
+                            for (auto const& [memory, offset] : f.assumed)
+                            {
+                                if (memory == 0u || memory > NEOS_RT_EXTERNAL_MEMORIES || !external_memory(memory).fixed)
+                                    throw unsupported{ "watched word" };
+                                auto const& x = external_memory(memory);
+                                if (offset > x.size || x.size - offset < 8u)
+                                    throw unsupported{ "watched word" };
+                                iWatchedWords.push_back(compiled_module::tier_job::exit_word{ reinterpret_cast<std::uintptr_t>(x.base + offset), true });
+                            }
+                            // (the words that watched loads read)
+                            bool exits = false;
+                            for (auto const& i : f.values)
+                                if (!i.dead && i.op == ssa::Invalidated)
+                                {
+                                    exits = true;
+                                    break;
+                                }
+                            if (exits)
+                                for (auto const& li : f.values)
+                                {
+                                    if (li.dead || !li.load() || (li.imm0 & optimizer::MemargWatched) == 0u || li.operands.size() != 1u || !constant(li.operands[0]))
+                                        continue;
+                                    auto const memory = static_cast<std::uint32_t>(li.imm0 >> 32u);
+                                    if (memory == 0u || memory > NEOS_RT_EXTERNAL_MEMORIES || !external_memory(memory).fixed)
+                                        throw unsupported{ "watched word" };
+                                    auto const& x = external_memory(memory);
+                                    // (the words (8 bytes, aligned: what the runtime reports) that it reads)
+                                    auto const at = bits(li.operands[0]) + li.imm1;
+                                    if (at > x.size || x.size - at < 16u)
+                                        throw unsupported{ "watched word" };
+                                    for (auto offset = at & ~std::uint64_t{ 7u }; offset < at + 8u; offset += 8u)
+                                    {
+                                        auto const word = reinterpret_cast<std::uintptr_t>(x.base + offset);
+                                        if (std::find_if(iWatchedWords.begin(), iWatchedWords.end(), [&](auto const& w) { return w.address == word; }) == iWatchedWords.end())
+                                            iWatchedWords.push_back(compiled_module::tier_job::exit_word{ word, false });
+                                    }
+                                }
                             for (std::uint32_t b = 0u; b < f.blocks.size(); ++b)
                             {
                                 auto const& block = f.blocks[b];
@@ -9686,11 +9828,12 @@ namespace neos
                                                                         ///< that first took its path (e.g. the call that filled a call site's entry))
                     constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
                     constexpr std::int32_t RecompileCallsAfterDeopts = 200; ///< (... whose code left often for its own (not a guard's))
+                    constexpr std::uint8_t MaxInvalidations = 4u;           ///< (see compiled_module::assume)
                     constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
                     constexpr std::uint32_t DeoptStrikes = 2u;              ///< (an inlined call whose deopts made the function optimized again this often:
                                                                             ///< its code calls rather than deopts (e.g. a cache's miss: optimized again, 
                                                                             ///< the code knows the cache's new entry; again: it calls))
-                    constexpr std::uint64_t CallsPerSeldomDeopt = 10u;      ///< (an optimized function's calls per deopt (at least) that do not make it
+                    constexpr std::uint64_t CallsPerSeldomDeopt = 100u;      ///< (an optimized function's calls per deopt (at least) that do not make it
                                                                             ///< optimized again: a call that left for the baseline's code costs a
                                                                             ///< few of its calls there; optimizing it again, and code whose rare 
                                                                             ///< paths call (and join the others) rather than leave, cost more)
@@ -9763,7 +9906,7 @@ namespace neos
                         {
                             if (!x.frames.empty())
                             {
-                                std::size_t values = x.arguments;
+                                std::size_t values = x.arguments + x.results;
                                 for (auto const& frame : x.frames)
                                 {
                                     values += frame.locals.size() + frame.depth;
@@ -9797,6 +9940,13 @@ namespace neos
                         return expected->data();
                     }
 
+                    // (whether optimized code's watched tests are patch points (NEOS_JIT_WATCHED=0: each test is made; see find_watched_guards))
+                    bool watched_tests()
+                    {
+                        static bool const sEnabled = []() { auto const* e = std::getenv("NEOS_JIT_WATCHED"); return e == nullptr || *e != '0'; }();
+                        return sEnabled;
+                    }
+
                     // (an optimization's first part (here, on the program's thread): its job, with the optimizer's options)
                     std::shared_ptr<compiled_module::tier_job> prepare_optimization(compiled_module& aModule, std::uint32_t aFunction)
                     {
@@ -9818,6 +9968,9 @@ namespace neos
                         // (deopts: where the baseline's code has a frame to leave for (else none))
                         // (a function optimized again more than twice (its deopts were taken): without deopts (its slow paths call))
                         options.deopt = m.backend && m.deopt && deopt_frame_of(m, f) != nullptr;
+                        // (exits: where watched tests are patch points (see find_watched_guards))
+                        options.exits = options.deopt && m.exits && m.description.threadGlobals == nullptr && watched_tests();
+                        options.assume = options.exits && m.assume && m.invalidations[f] < MaxInvalidations;
                         bool const fromLoop = f < m.loopTriggered.size() && m.loopTriggered[f] != 0u;
                         if (options.deopt)
                         {
@@ -9910,11 +10063,24 @@ namespace neos
                             {
                                 if (m.verbose != 0u)
                                     std::fprintf(stderr, "[tier2] f%u: no deopts (the baseline's frame does not match)\n", f);
-                                options.deopt = false;
-                                aJob.reads.clear();
-                                r = run_optimizer(m, f, options, &aJob.reads);
-                            }
-                            aJob.tokensHash = tokens_hash(r.tokens);
+                                    options.deopt = false;
+                                    options.exits = false;
+                                    options.assume = false;
+                                    aJob.reads.clear();
+                                    r = run_optimizer(m, f, options, &aJob.reads);
+                                }
+                                if (options.assume && r.unexited)
+                                {
+                                    // (a call that it makes is not followed by an exit: what it reads of watched words is tested (see 
+                                    // optimizer::options::assume))
+                                    options.assume = false;
+                                    if (!r.assumed.empty())
+                                    {
+                                        aJob.reads.clear();
+                                        r = run_optimizer(m, f, options, &aJob.reads);
+                                    }
+                                }
+                                aJob.tokensHash = tokens_hash(r.tokens);
                         };
                         optimize();
                         // (the same code as the code that left (see tier_job::strikeIfSame): its struck calls are struck again, and it is
@@ -10034,6 +10200,8 @@ namespace neos
                                 osr->parameters.insert(osr->parameters.end(), d.functions[f].locals->begin(), d.functions[f].locals->end());
                             }
                             auto function = ssa::build(d, f, r.tokens, r.locals, r.origins, r.deopts, osr ? &*osr : nullptr);
+                            function.assume = aJob.options.assume;
+                            function.assumed = r.assumed;
                             auto const built_at = std::chrono::steady_clock::now();
                             // (cached loads' words: read safely (this runs while the program runs: its pages' states may change))
                             auto const memoryWord = [&aJob](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
@@ -10060,6 +10228,8 @@ namespace neos
                             generator.generate(aJob.callSites);
                             aJob.code = std::move(generator.code());
                             aJob.watched = generator.watched();
+                            aJob.exits = generator.exits();
+                            aJob.exitWords = generator.exit_words();
                             generator.watched_words([&](std::uint32_t aMemory, std::uint64_t aAddress, std::uint64_t aValue)
                             {
                                 aJob.reads.push_back({ aMemory, 8u, aAddress, aValue });
@@ -10121,6 +10291,8 @@ namespace neos
                     }
 
                     void watch_guards(compiled_module const& aModule, void* aCode, std::vector<compiled_module::tier_job::watched_guard> const& aGuards);
+                    void watch_exits(compiled_module& aModule, void* aCode, compiled_module::tier_version const* aVersion,
+                        std::vector<compiled_module::tier_job::watched_guard> const& aExits, std::vector<compiled_module::tier_job::exit_word> const& aWords);
 
                     // (an optimization's last part (here): its code installed (the function's calls go there))
                     void const* install_optimization(compiled_module& aModule, compiled_module::tier_job& aJob)
@@ -10196,7 +10368,10 @@ namespace neos
                             return nullptr;
                         }
                         if (optimizing)
+                        {
                             watch_guards(m, chunk.code, aJob.watched);
+                            watch_exits(m, chunk.code, version.get(), aJob.exits, aJob.exitWords);
+                        }
                         auto* const optimized = static_cast<std::uint8_t*>(chunk.code) + entry;
                         m.chunks.push_back(std::move(chunk));
                         // (calls of it go there: its indirect table entry and its entry (a jump: jmp [rip]; its address))
@@ -10222,9 +10397,19 @@ namespace neos
                             if (m.verbose >= 2u)
                             {
                                 std::size_t frames = 0u;
-                                for (auto const& x : r.deopts)
+                                std::size_t exits = 0u;
+                                auto const& deopts = m.versions.back()->deopts;
+                                for (auto const& x : deopts)
+                                {
                                     frames += x.frames.empty() ? 0u : 1u;
-                                std::fprintf(stderr, "[tier2] f%u: %zu deopts (%zu with frames)\n", f, r.deopts.size(), frames);
+                                    exits += x.returned ? 1u : 0u;
+                                }
+                                std::size_t assumed = 0u;
+                                for (auto const& w : aJob.exitWords)
+                                    assumed += w.assumed ? 1u : 0u;
+                                std::fprintf(stderr, "[tier2] f%u: %zu deopts (%zu with frames, %zu after their calls), %zu watched patch points, %zu exits for %zu words (%zu assumed%s)\n",
+                                    f, deopts.size(), frames, exits, aJob.watched.size(), aJob.exits.size(), aJob.exitWords.size(), assumed,
+                                    aJob.options.assume ? "" : aJob.options.exits ? "; tested" : "; no exits");
                             }
                             std::fprintf(stderr, "[tier2] phases (total): optimizer %llu, ssa build %llu, ssa optimize+generate %llu us\n",
                                 (unsigned long long)m.phaseMicroseconds[0], (unsigned long long)m.phaseMicroseconds[1], (unsigned long long)m.phaseMicroseconds[2]);
@@ -10499,6 +10684,7 @@ namespace neos
                         if (chunk.code == nullptr)
                             return nullptr;
                         watch_guards(m, chunk.code, job->watched);
+                        watch_exits(m, chunk.code, job->version.get(), job->exits, job->exitWords);
                         state.entry = chunk.code;
                         m.chunks.push_back(std::move(chunk));
                         job->version->osrLoop = aLoop;
@@ -10702,7 +10888,7 @@ namespace neos
                             // (a deopt within a loop of the function's code is counted as any other: its call's remaining iterations are
                             // the baseline's (or continue in optimized code from the loop, see tier_loop), and the loop's code keeps no
                             // call whose path joins the others')
-                            if (!d.guard && !again)
+                            if (!d.guard && !d.returned && !again)
                             {
                                 ++aVersion->deoptCounts[aDeopt];
                                 if (++aVersion->deoptsTaken < DeoptsBeforeReoptimizing)
@@ -10720,13 +10906,17 @@ namespace neos
                             // (optimized again; the inlined code that left often (e.g. a cache's misses, an allocator's slow path), and the
                             // version's other such deopts that it has left at: a strike each (see DeoptStrikes: then it calls instead); a guard
                             // that fails again: not inlined)
+                            // (one that left after a call (see optimizer::deopt::returned: a word that its watched loads read changed while the
+                            // call ran): optimized again (with what holds then), no strike)
                             std::set<std::size_t> struck;
-                            if (!d.guard)
+                            if (d.returned)
+                                ;
+                            else if (!d.guard)
                                 struck.insert(d.call);
                             else if (++m.guardFailures[f][d.call] >= 2u)
                                 m.noInline[f].insert(d.call);
                             for (std::size_t k = 0u; k < aVersion->deopts.size(); ++k)
-                                if (!aVersion->deopts[k].guard && aVersion->deoptCounts[k] >= 1u)
+                                if (!aVersion->deopts[k].guard && !aVersion->deopts[k].returned && aVersion->deoptCounts[k] >= 1u)
                                     struck.insert(aVersion->deopts[k].call);
                             m.struck[f].clear();
                             for (auto const call : struck)
@@ -10738,7 +10928,7 @@ namespace neos
                             {
                                 osr_left(m, aVersion);
                                 if (m.verbose != 0u)
-                                    std::fprintf(stderr, "[tier2] f%u (osr): deopt %u (call@%zu%s)\n", f, aDeopt, d.call, d.guard ? ", a guard" : "");
+                                    std::fprintf(stderr, "[tier2] f%u (osr): deopt %u (call@%zu%s)\n", f, aDeopt, d.call, d.returned ? ", after it" : d.guard ? ", a guard" : "");
                                 return;
                             }
                             if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
@@ -10746,7 +10936,7 @@ namespace neos
                             if (replace_later(m, f))
                             {
                                 if (m.verbose != 0u)
-                                    std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s%s): being replaced\n", f, aDeopt, d.call, d.guard ? ", a guard" : "",
+                                    std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s%s): being replaced\n", f, aDeopt, d.call, d.returned ? ", after it" : d.guard ? ", a guard" : "",
                                         d.frames.empty() ? "" : ", frames");
                                 return;
                             }
@@ -10757,10 +10947,10 @@ namespace neos
                             m.currentVersion[f] = nullptr;
                             ++m.recompiles[f];
                             // (a guard's: once its words' values have settled; else (calls that its code had not made, now made): soon)
-                            m.counters[f] = d.guard ? RecompileCalls : RecompileCallsAfterDeopts;
+                            m.counters[f] = d.guard && !d.returned ? RecompileCalls : RecompileCallsAfterDeopts;
                             m.loopCounters[f] = m.loopIterations;
                             if (m.verbose != 0u)
-                                std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s%s)\n", f, aDeopt, d.call, d.guard ? ", a guard" : "",
+                                std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s%s)\n", f, aDeopt, d.call, d.returned ? ", after it" : d.guard ? ", a guard" : "",
                                     d.frames.empty() ? "" : ", frames");
                         }
                         catch (...)
@@ -10869,6 +11059,73 @@ namespace neos
                         }
                     }
 
+                    // (an installed optimization's exits (see optimizer::deopt::returned), by the words whose change makes them leave
+                    // (those that its watched loads read, and those that it assumed): once one changes, each of its exits' patch points
+                    // becomes a jump to the exit's code (its calls that are running leave when the calls they made return), and, if the
+                    // code assumed the word, it is not entered again (see assumption_failed))
+                    struct exit_group
+                    {
+                        compiled_module* module = nullptr;
+                        compiled_module::tier_version const* version = nullptr;
+                        std::vector<watched_site> exits;
+                        bool left = false;      ///< (its exits leave)
+                    };
+                    struct exit_watch
+                    {
+                        std::shared_ptr<exit_group> group;
+                        bool assumed = false;
+                    };
+                    std::unordered_multimap<std::uintptr_t, exit_watch> sExits;
+
+                    void watch_exits(compiled_module& aModule, void* aCode, compiled_module::tier_version const* aVersion,
+                        std::vector<compiled_module::tier_job::watched_guard> const& aExits, std::vector<compiled_module::tier_job::exit_word> const& aWords)
+                    {
+                        if (aWords.empty())
+                            return;
+                        auto* const code = static_cast<std::uint8_t*>(aCode);
+                        auto group = std::make_shared<exit_group>();
+                        group->module = &aModule;
+                        group->version = aVersion;
+                        for (auto const& e : aExits)
+                            group->exits.push_back(watched_site{ code + e.offset, code + e.target, &aModule });
+                        std::lock_guard<std::mutex> lock{ sWatchedMutex };
+                        for (auto const& w : aWords)
+                            sExits.emplace(w.address, exit_watch{ group, w.assumed });
+                        sAnyWatched.store(true, std::memory_order_relaxed);
+                    }
+
+                    // (optimized code that assumed a watched word's value (see optimizer::options::assume), which has changed: not entered
+                    // again (its function's own code runs until it has been optimized again, with what holds then); its calls that are 
+                    // running leave at their exits)
+                    void assumption_failed(compiled_module& aModule, compiled_module::tier_version const* aVersion)
+                    {
+                        auto& m = aModule;
+                        std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
+                        auto const f = aVersion->function;
+                        if (aVersion->osrLoop != NoOsrLoop)
+                        {
+                            osr_left(m, aVersion);
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u (osr): a word that it assumed changed\n", f);
+                            return;
+                        }
+                        // (its function's current code only (an earlier version's calls that are still running leave at their exits))
+                        if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
+                            return;
+                        if (m.invalidations[f] < 255u)
+                            ++m.invalidations[f];
+                        m.replacements[f].reset();
+                        set_entry(m, f, m.savedEntries[f]);
+                        m.indirect[f].target = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f]);
+                        m.tierState[f] = 0u;
+                        m.currentVersion[f] = nullptr;
+                        ++m.recompiles[f];
+                        m.counters[f] = RecompileCallsAfterDeopts;
+                        m.loopCounters[f] = m.loopIterations;
+                        if (m.verbose != 0u)
+                            std::fprintf(stderr, "[tier2] f%u: a word that it assumed changed\n", f);
+                    }
+
                     void unwatch_module(compiled_module const& aModule)
                     {
                         std::lock_guard<std::mutex> lock{ sWatchedMutex };
@@ -10877,7 +11134,12 @@ namespace neos
                                 i = sWatched.erase(i);
                             else
                                 ++i;
-                        sAnyWatched.store(!sWatched.empty(), std::memory_order_relaxed);
+                        for (auto i = sExits.begin(); i != sExits.end();)
+                            if (i->second.group->module == &aModule)
+                                i = sExits.erase(i);
+                            else
+                                ++i;
+                        sAnyWatched.store(!sWatched.empty() || !sExits.empty(), std::memory_order_relaxed);
                     }
                 }
 
@@ -10887,18 +11149,32 @@ namespace neos
                     if (!sAnyWatched.load(std::memory_order_relaxed))
                         return;
                     std::vector<watched_site> sites;
+                    std::vector<exit_watch> exits;
                     {
                         std::lock_guard<std::mutex> lock{ sWatchedMutex };
                         auto const [first, last] = sWatched.equal_range(reinterpret_cast<std::uintptr_t>(aAddress));
-                        if (first == last)
-                            return;
                         for (auto i = first; i != last; ++i)
                             sites.push_back(i->second);
                         sWatched.erase(first, last);
-                        sAnyWatched.store(!sWatched.empty(), std::memory_order_relaxed);
+                        auto const [firstExit, lastExit] = sExits.equal_range(reinterpret_cast<std::uintptr_t>(aAddress));
+                        for (auto i = firstExit; i != lastExit; ++i)
+                            exits.push_back(i->second);
+                        sExits.erase(firstExit, lastExit);
+                        sAnyWatched.store(!sWatched.empty() || !sExits.empty(), std::memory_order_relaxed);
                     }
                     for (auto const& site : sites)
                         patch_watched(site);
+                    for (auto const& e : exits)
+                    {
+                        if (!e.group->left)
+                        {
+                            e.group->left = true;
+                            for (auto const& site : e.group->exits)
+                                patch_watched(site);
+                        }
+                        if (e.assumed)
+                            assumption_failed(*e.group->module, e.group->version);
+                    }
                 }
 
                 compiled_module::~compiled_module()
@@ -11012,6 +11288,8 @@ namespace neos
                             m.deopt = setting("NEOS_TIER2_DEOPT").value_or(1) != 0;
                             m.background = setting("NEOS_TIER2_BACKGROUND").value_or(1) != 0;
                             m.replace = setting("NEOS_TIER2_REPLACE").value_or(1) != 0;
+                            m.exits = setting("NEOS_TIER2_EXITS").value_or(1) != 0;
+                            m.assume = setting("NEOS_TIER2_ASSUME").value_or(1) != 0;
                             m.osr = m.backend && setting("NEOS_TIER2_OSR").value_or(1) != 0;
                             m.verbose = static_cast<std::uint32_t>(setting("NEOS_TIER2_VERBOSE").value_or(0));
                             auto const calls = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_CALLS").value_or(2000), 1, NotAgain));
@@ -11045,6 +11323,7 @@ namespace neos
                             m.staleJobs.assign(n, 0u);
                             m.tierState.assign(n, 0u);
                             m.recompiles.assign(n, 0u);
+                            m.invalidations.assign(n, 0u);
                             m.noInline.resize(n);
                             m.largeRejects = std::make_unique<std::atomic<std::uint8_t>[]>(room);
                             m.noDeopt.resize(n);
@@ -11136,6 +11415,7 @@ namespace neos
                         m.staleJobs.resize(n, 0u);
                         m.tierState.resize(n, 0u);
                         m.recompiles.resize(n, 0u);
+                        m.invalidations.resize(n, 0u);
                         m.noInline.resize(n);
                         m.noDeopt.resize(n);
                         m.guardFailures.resize(n);

@@ -124,6 +124,7 @@ namespace neos::javascript_runtime
             };
             bool const ok =
                 reinterpret_cast<std::byte const*>(&root_shape()->proto) - reinterpret_cast<std::byte const*>(root_shape()) == jsl::ShapeProto &&
+                reinterpret_cast<std::byte const*>(&root_shape()->left) - reinterpret_cast<std::byte const*>(root_shape()) == jsl::ShapeLeft &&
                 at(o.properties.shape_field()) == jsl::ObjectShape &&
                 at(o.properties.values_field()) == jsl::ObjectValues &&
                 at(o.properties.capacity_field()) == jsl::ObjectValueCapacity &&
@@ -1546,8 +1547,29 @@ namespace neos::javascript_runtime
             static_assert(offsetof(site, position) == jsl::SitePosition && offsetof(site, prototypes) == jsl::SitePrototype);
             static_assert(offsetof(site, added) == jsl::SiteAdded && offsetof(site, function) == jsl::SiteFunction);
             static_assert(offsetof(site, number) == jsl::SiteNumber && offsetof(site, dispatch) == jsl::SiteDispatch);
+            static_assert(offsetof(site, reserved2) == jsl::SiteFieldKind && offsetof(site, prototypes) + 24u == jsl::SiteValidityValue);
+            static_assert(shape::FieldNumber == jsl::FieldNumber && shape::FieldString == jsl::FieldString && shape::FieldObject == jsl::FieldObject);
 
             inline std::uint64_t shape_word(shape const* aShape) { return shape_ref::word_of(aShape); }
+
+            // (an entry of an own data property (SiteOwn) of objects of a shape: its field's kind if it is one that compiled code can
+            // rely on (jsl::SiteFieldKind: see shape::fieldKind), and (a get's: it assumes the kind of what it reads) the kind's 
+            // validity word and its value (jsl::SiteValidity, jsl::SiteValidityValue))
+            inline std::uint8_t field_kind_of(shape* aOwner)
+            {
+                return aOwner->fieldKind >= shape::FieldNumber && aOwner->fieldKind <= shape::FieldObject ? aOwner->fieldKind : std::uint8_t{ 0u };
+            }
+            inline void own_field(site& aEntry, shape* aShape, bool aGet)
+            {
+                auto* const owner = aShape->owner(aEntry.position);
+                aEntry.reserved2 = field_kind_of(owner);
+                if (aGet && aEntry.reserved2 != 0u)
+                {
+                    auto* const word = owner->field_validity();
+                    aEntry.added = region_offset(word);
+                    aEntry.prototypes[1].shape = *word;
+                }
+            }
 
             // (the programs' tables)
             // (a program's table: its own sites' entries, then those of each of its extensions (see property_sites_extension): none of
@@ -1748,11 +1770,13 @@ namespace neos::javascript_runtime
                                 return;
                             e.kind = jsl::SiteOwn;
                             e.position = p.position();
+                            own_field(e, const_cast<shape*>(layout), true);
                             // (and the megamorphic cache's (for sites whose entries do not have it); a watched object's property is not
-                            // one that a set can store (its sets are the runtime's: see watch))
+                            // one that a set can store (its sets are the runtime's: see watch); a set stores a value of its field's kind
+                            // (1 + the kind: see jsl::MegamorphicWritable))
                             auto& state = the_heap().the_allocation_state();
                             auto* const table = reinterpret_cast<megamorphic_entry*>(gRegionBase + state.megamorphic);
-                            table[megamorphic_index(e.shape, aKey)] = megamorphic_entry{ e.shape, aKey, e.position, p->writable() && layout->validity == nullptr ? 1u : 0u, 0u };
+                            table[megamorphic_index(e.shape, aKey)] = megamorphic_entry{ e.shape, aKey, e.position, p->writable() && layout->validity == nullptr ? 1u + e.reserved2 : 0u, 0u };
                             return;
                         }
                         auto prototype = o.proto();
@@ -1842,7 +1866,12 @@ namespace neos::javascript_runtime
                         if (shape_word(o.properties.layout()) != e.shape || e.shape == 0u)
                             continue;
                         if (e.kind == jsl::SiteOwn && o.properties.cached_value(e.shape, e.position, aKey, aResult))
+                        {
+                            // (its field's kind is no longer the entry's (compiled code's get came here): the entry's is its field's)
+                            if (e.reserved2 != 0u && *reinterpret_cast<std::uint64_t const*>(gRegionBase + e.added) != e.prototypes[1].shape)
+                                own_field(const_cast<site&>(e), shape_ref::from_word(e.shape), true);
                             return true;
+                        }
                         if (e.kind == jsl::SiteHolder && prototypes_match(o, e, true) &&
                             holder_value(obj(e.prototypes[e.depth - 1u].object), e.prototypes[e.depth - 1u].shape, e.position, aKey, aResult))
                             return true;
@@ -1979,6 +2008,9 @@ namespace neos::javascript_runtime
             auto* const entries = site_of(aSite);
             if (entries == nullptr || entries[0].kind != jsl::SiteNone)
                 return Undefined;
+            // (its fields are of any kind from now on: compiled code stores its literals' values as they are)
+            for (auto* f = s; f != nullptr && f->count != 0u; f = f->parent)
+                f->field_any();
             auto& e = entries[0];
             e.kind = jsl::SiteLiteral;
             e.depth = static_cast<std::uint8_t>(sizeClass);
@@ -2171,6 +2203,7 @@ namespace neos::javascript_runtime
             entry.kind = jsl::SiteOwn;
             entry.shape = shape;
             entry.position = e.position;
+            own_field(entry, shape_ref::from_word(shape), true);
             remember(aSite, entry);
             return true;
         }
@@ -2245,7 +2278,11 @@ namespace neos::javascript_runtime
                         auto const& state = the_heap().the_allocation_state();
                         auto const& m = reinterpret_cast<megamorphic_entry const*>(gRegionBase + state.megamorphic)[megamorphic_index(shape, aKey)];
                         if (m.shape == shape && m.key == aKey && m.reserved != 0u && o.properties.cached_store(shape, m.position, aValue))
+                        {
+                            // (the entry's kind is its field's (compiled code's set of a value of another kind came here))
+                            const_cast<megamorphic_entry&>(m).reserved = 1u + field_kind_of(shape_ref::from_word(shape)->owner(m.position));
                             return aValue;
+                        }
                     }
                     else if (entries != nullptr)
                     {
@@ -2272,12 +2309,17 @@ namespace neos::javascript_runtime
                         if (e->key != aKey || e->shape != shape_word(layout))
                             continue;
                         // (Own: a writable data property (its shape's) at the position)
+                        // (the entry's kind is then its field's (compiled code's set of a value of another kind came here))
                         if (e->kind == jsl::SiteOwn && o.properties.cached_store(e->shape, e->position, aValue))
+                        {
+                            own_field(*const_cast<site*>(e), const_cast<shape*>(layout), true);
                             return aValue;
+                        }
                         if (e->kind == jsl::SiteAdd && o.extensible && prototypes_match(o, *e, false) &&
                             (e->depth == 0u ? o.proto() : obj(e->prototypes[e->depth - 1u].object).proto()) == Null)
                         {
                             o.properties.add(aValue, shape_ref::from_word(e->added));
+                            const_cast<site*>(e)->reserved2 = field_kind_of(shape_ref::from_word(e->added));
                             return aValue;
                         }
                     }
@@ -2303,10 +2345,11 @@ namespace neos::javascript_runtime
                     return result;
                 e.kind = jsl::SiteOwn;
                 e.position = p.position();
-                // (and the megamorphic cache's (a writable data property))
+                own_field(e, const_cast<shape*>(before), true);    // (with its validity word: a get may read the entry)
+                // (and the megamorphic cache's (a writable data property: of its field's kind))
                 auto& state = the_heap().the_allocation_state();
                 auto* const table = reinterpret_cast<megamorphic_entry*>(gRegionBase + state.megamorphic);
-                table[megamorphic_index(e.shape, aKey)] = megamorphic_entry{ e.shape, aKey, e.position, 1u, 0u };
+                table[megamorphic_index(e.shape, aKey)] = megamorphic_entry{ e.shape, aKey, e.position, 1u + e.reserved2, 0u };
             }
             else
             {
@@ -2333,6 +2376,8 @@ namespace neos::javascript_runtime
                 e.depth = depth;
                 e.position = static_cast<std::uint32_t>(o.properties.size() - 1u);
                 e.added = shape_word(after);
+                // (the added property's field's kind: compiled code adds a value of the kind only)
+                e.reserved2 = field_kind_of(const_cast<shape*>(after));
             }
             remember(aSite, e);
             return result;

@@ -243,6 +243,11 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t Memory = 2u;                 ///< (the external memory's index: JavaScript's)
         inline constexpr std::uint32_t HandleShift = 3u;            ///< (a cell's offset: its handle << HandleShift (an address's index scaled by 8))
         inline constexpr std::uint32_t ShapeProto = 0u;             ///< (value: a shape's (its objects') prototype (a shape is at its word << ValueUnitShift))
+        inline constexpr std::uint32_t ShapeLeft = 8u;              ///< (u64: not 0 once an object has left the shape (it got another, or none: a
+                                                                    ///< property added (or a transition for one made), its prototype changed, a
+                                                                    ///< dictionary's): until then an object that has the shape keeps it. A watched
+                                                                    ///< word (the runtime reports its change): compiled code that assumes it
+                                                                    ///< claims that the receiver's shape word keeps its value (neos::keeps))
         inline constexpr std::uint32_t ObjectShape = 4u;            ///< (u32: its properties' shape (its region offset >> 3; 0: none: a dictionary))
         inline constexpr std::uint32_t ObjectValues = 8u;          ///< (u32: a shape's: the region offset of its properties' values (value) >>
                                                                     ///< ValueUnitShift; their number is its shape's)
@@ -311,6 +316,14 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t SiteFunction = 64u;          ///< (value: the property's value, a function of the program's ...)
         inline constexpr std::uint32_t SiteNumber = 72u;            ///< (i32: ... whose number (for the dispatcher) this is (else -1))
         inline constexpr std::uint32_t SiteSlotSize = 76u;          ///< (u32: a new expression's (SiteConstruct): the size of the object's slot)
+        inline constexpr std::uint32_t SiteFieldKind = 76u;         ///< (u32: SiteOwn, SiteAdd: the kind of the values of the property in the objects
+                                                                    ///< of the shape (FieldNumber ...; 0: any): a get's value is of the kind while
+                                                                    ///< the kind's validity word (SiteValidity) has the entry's value
+                                                                    ///< (SiteValidityValue); a set stores (adds) a value of the kind only (others are
+                                                                    ///< the runtime's, which makes the kind any: the word then changes))
+        inline constexpr std::uint32_t FieldNumber = 1u;            ///< (a number)
+        inline constexpr std::uint32_t FieldString = 2u;            ///< (a string)
+        inline constexpr std::uint32_t FieldObject = 3u;            ///< (an object)
         inline constexpr std::uint32_t SiteDispatch = 80u;          ///< (u64: the function's (SiteFunction's) dispatch key (see FunctionDispatch); else 0)
         inline constexpr std::uint32_t SiteTemplate = SiteAdded;    ///< (u64: SiteConstruct: the region offset of the object's template (its first
                                                                     ///< ObjectSize bytes: its new objects' are a copy of it, then their handle,
@@ -343,7 +356,8 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t MegamorphicEntrySize = 32u;
         inline constexpr std::uint32_t MegamorphicKey = 8u;
         inline constexpr std::uint32_t MegamorphicPosition = 16u;
-        inline constexpr std::uint32_t MegamorphicWritable = 20u;   ///< (u32: not 0: the property is writable (a set can store it))
+        inline constexpr std::uint32_t MegamorphicWritable = 20u;   ///< (u32: not 0: the property is writable (a set can store it: 1: any
+                                                                    ///< value; 1 + a kind (FieldNumber ...): a value of its field's kind))
         inline constexpr std::uint32_t ObjectSize = 16u;            ///< (an ordinary object's size (its values' storage in its cell follows it))
         inline constexpr std::uint32_t ArraySize = 40u;             ///< (an array's size (an array literal's elements' storage in its cell follows it))
         inline constexpr std::uint32_t MaxLiteralElements = 16u;    ///< (an array literal's elements that its site's arrays have room for)
