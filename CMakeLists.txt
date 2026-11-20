@@ -547,6 +547,9 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/intl_segmenter.cpp
     runtime/javascript/src/intl_duration_format.cpp)
 target_include_directories(javascript PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include") # (ECMAScript's conversions)
+# (its string table and its shapes' maps are Boost's open addressing maps (boost/unordered/unordered_flat_map.hpp, Boost 1.81 or 
+# later; headers only): a runtime plugin has only neos's include directory otherwise, so Boost's is given to it here)
+target_link_libraries(javascript PRIVATE Boost::headers)
 # (its thread_locals (e.g. the calling thread's isolate, read all the time) through TLS descriptors: an access is not a call of
 # __tls_get_addr (x86-64 ELF))
 if(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
