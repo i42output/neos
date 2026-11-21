@@ -1847,7 +1847,12 @@ namespace neos
                                         return;
                                     restore(before);
                                 }
-                                if (inlinable(aCallee, aInline != nullptr ? iInlines.front().call : aPosition) && !iLarge.contains(aCallee))
+                                // (a function with a frame of its own, at a call that is seldom made (see options::callShare): called)
+                                bool seldom = false;
+                                if (!callee.frameless && !callee.imported && iOptions.callShare)
+                                    if (auto const share = iOptions.callShare(aPosition); share >= 0.0 && share < iOptions.minCallShare)
+                                        seldom = true;
+                                if (!seldom && inlinable(aCallee, aInline != nullptr ? iInlines.front().call : aPosition) && !iLarge.contains(aCallee))
                                 {
                                     // (inlined if its code, after folding, is small enough; else called)
                                     snapshot const before = take_snapshot();

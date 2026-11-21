@@ -9979,6 +9979,24 @@ namespace neos
                         options.exits = options.deopt && m.exits && m.description.threadGlobals == nullptr && watched_tests();
                         options.assume = options.exits && m.assume && m.invalidations[f] < MaxInvalidations;
                         options.unassumed = m.unassumed;
+                        // (a call's share of its function's calls (see optimizer::options::callShare): the times the baseline's code has made it
+                        // (see callFlags) for each time the function's code has been entered: its counter's calls so far, or (a function that 
+                        // has been optimized: its code ran at least that often) the calls before a function is optimized; not known until it has
+                        // been entered often enough (nor where functions are optimized at their first calls). The counts are the program's 
+                        // (the optimizer may run while it runs): words read as they are)
+                        options.callShare = [&m](std::size_t aPosition) -> double
+                        {
+                            auto const* const point = deopt_point_at(m, aPosition);
+                            if (point == nullptr || point->made == nullptr)
+                                return -1.0;
+                            auto const g = point->function;
+                            if (g >= m.counters.size())
+                                return -1.0;
+                            auto const entered = m.tierState[g] != 0u || m.recompiles[g] != 0u ? m.tierCalls : m.tierCalls - std::min(m.tierCalls, std::max(m.counters[g], 0));
+                            if (entered < WarmCalls)
+                                return -1.0;
+                            return static_cast<double>(*point->made) / static_cast<double>(entered);
+                        };
                         bool const fromLoop = f < m.loopTriggered.size() && m.loopTriggered[f] != 0u;
                         if (options.deopt)
                         {

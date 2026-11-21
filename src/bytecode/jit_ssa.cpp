@@ -1648,6 +1648,44 @@ namespace neos
                                 }
                             if (claims.empty())
                                 return false;
+                            // (a phi of values that are each below a limit (a claim's, or a constant's own): below the greatest of them (e.g. a loop's
+                            // sum of numbers: its first value a constant, its next an operation's result that is claimed))
+                            for (bool grew = true; grew;)
+                            {
+                                grew = false;
+                                for (auto bi : aFunction.order)
+                                    for (auto v : aFunction.blocks[bi].code)
+                                    {
+                                        auto const& p = values[v];
+                                        if (p.op != Phi)
+                                            break;
+                                        if (p.dead || p.type != I64 || claims[v].below || p.operands.empty())
+                                            continue;
+                                        std::uint64_t limit = 0u;
+                                        bool all = true;
+                                        for (auto o : p.operands)
+                                        {
+                                            if (o == v)
+                                                continue;
+                                            if (o >= claims.size())
+                                                all = false;
+                                            else if (values[o].constant() && values[o].type == I64 && values[o].imm0 != ~std::uint64_t{})
+                                                limit = std::max(limit, values[o].imm0 + 1u);
+                                            else if (claims[o].below)
+                                                limit = std::max(limit, claims[o].limit);
+                                            else
+                                                all = false;
+                                            if (!all)
+                                                break;
+                                        }
+                                        if (all && limit != 0u)
+                                        {
+                                            claims[v].below = true;
+                                            claims[v].limit = limit;
+                                            grew = true;
+                                        }
+                                    }
+                            }
                             bool changed = false;
                             auto const constant_of = [&](instruction& aInstruction, bool aResult)
                             {

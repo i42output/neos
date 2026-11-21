@@ -151,17 +151,18 @@ namespace neos
                         bool speculation = true;
                         std::set<std::size_t> noInline;         ///< (calls (their tokens' positions) not to inline)
                         std::set<std::size_t> noDeopt;          ///< (inlined calls (their positions) whose code's calls are made (not deopts))
-                        std::size_t maxInlineDepth = 4u;
+                        std::size_t maxInlineDepth = 8u;        ///< (inlined calls within inlined calls: a language's function inlined at some depth has
+                                                                ///< its helpers' calls (e.g. its property caches' stubs) inlined in it, not called)
                         std::size_t maxCalleeTokens = 6000u;    ///< (a callee larger than this is not inlined)
                         std::size_t maxFramedCalleeTokens = 600u;   ///< (... nor one with a frame of its own larger than this, ...)
                         std::size_t maxLargeFramedCalleeTokens = 2400u; ///< (... unless it is at most this and its code (after folding) is small (see below))
-                        std::size_t maxLargeFramedInlinedCost = 500u;   ///< (an inlined call of such a callee: its instructions that are code (after folding) at most this)
+                        std::size_t maxLargeFramedInlinedCost = 900u;   ///< (an inlined call of such a callee: its instructions that are code (after folding) at most this)
                         // (by callee: the times in a row that such a callee was too large where it was inlined (the module's, for all of its
                         // optimizations: tried again until it has been too large MaxLargeRejects times); if none, it is always tried)
                         std::atomic<std::uint8_t>* largeRejects = nullptr;
                         static constexpr std::uint8_t MaxLargeRejects = 4u;
                         std::size_t maxTokens = 60000u;         ///< (the function's code may grow to this, by inlining...)
-                        std::size_t maxGrowth = 10u;             ///< (... and to this many times its size (and 2000 tokens))
+                        std::size_t maxGrowth = 20u;            ///< (... and to this many times its size (and 4000 tokens))
                         std::size_t maxInlinedCost = 1500u;     ///< (an inlined call with more instructions that are code (after folding; see rewriter::inline_call) is not inlined...)
                         std::size_t maxGuards = 16u;            ///< (... nor one with more guards)
                         std::size_t maxInlines = 512u;          ///< (the calls inlined in a function)
@@ -186,6 +187,12 @@ namespace neos
                         // (a call (its position: in a function with a frame of its own) that has never been made (its function's code 
                         // has run often enough): the code leaves there (a deopt), rather than inline (or make) it; if none, none are)
                         std::function<bool(std::size_t aPosition)> coldCall;
+                        // (a call (its position) of a function with a frame of its own: the times it has been made for each time its function's
+                        // code has been entered, as far as the baseline's counts tell (less than 0: not known). One made less often than 
+                        // minCallShare is called, not inlined: a callee that is seldom called does not make its caller's code larger (and too 
+                        // large to be inlined itself where it is called often), as V8's inlining is by call frequency; if none, all are tried)
+                        std::function<double(std::size_t aPosition)> callShare;
+                        double minCallShare = 0.1;
                         // (a call (its position: in the function's own code) of an import that optimized code does not make (a slow path)
                         // and that has never been made: the code leaves there (a deopt), rather than make it; if none, it makes it)
                         std::function<bool(std::uint32_t aCallee, std::size_t aPosition)> slowCall;
