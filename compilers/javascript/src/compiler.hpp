@@ -347,7 +347,6 @@ namespace neos::compilers::javascript
         void loose_equality(std::uint32_t aLhs, std::uint32_t aRhs, bool aNotEqual, std::string const& aRuntime);
         void dispatch_number(std::uint32_t aNumber);  ///< (a call of the program's function (see dispatch): its number, before its arguments)
         void dispatch(std::uint32_t aNumber);         ///< (... its arguments -> its result: the call)
-        static constexpr std::int64_t TailCallDepth = 1024;  ///< (tail calls made as calls (nested) before they are made by the caller)
         void check();               ///< (the i64 on the stack: an exception branches to the innermost handler)
         void assume_not_exception();    ///< (the i64 on the stack is not an exception (neos::assume): optimized code knows it)
         void field_kind(std::uint32_t aEntry, std::uint32_t aKind);     ///< (an entry's field's kind (layout::SiteFieldKind) -> aKind)
@@ -672,7 +671,6 @@ namespace neos::compilers::javascript
         std::uint32_t slow_function(std::uint32_t aRuntime, std::string const& aName, std::vector<type> const& aParameters, type aResult);
         void define_slow_functions();       ///< (none yet: each is defined when the code first calls it (see slow_function))
         std::uint32_t stub_function(function_generator::stub aStub);   ///< (the stub's function (defined when the code first calls it))
-        std::uint32_t tail_depth_global();      ///< (the global (an i64): the tail calls made as calls that are running (see call_value))
         std::uint32_t template_base_global();   ///< (an extension of the program: the global (an i64) that holds the number of its first 
                                                 ///< tagged template site (they are numbered after the program's: see the runtime's template_sites))
         std::uint32_t source_line_of(std::string_view aSource) const;

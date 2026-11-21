@@ -164,6 +164,8 @@ namespace neos
                         std::uint64_t exitFrame;
                         std::uint64_t exitSite;
                         value* deoptBuffer;     ///< (the thread's: where optimized code that leaves for the baseline's puts its values)
+                        std::uint64_t exhausting;   ///< (nonzero while the program's handler of an exhausted stack runs: see 
+                                                    ///< module_description::stackExhausted)
                         value results[MaxResults];
                     };
                     constexpr std::size_t MaxDeoptValues = 4096u;
@@ -231,6 +233,7 @@ namespace neos
                     constexpr std::int32_t ContextExitSite = static_cast<std::int32_t>(offsetof(context, exitSite));
                     constexpr std::int32_t ContextObjects = static_cast<std::int32_t>(offsetof(context, objects));
                     constexpr std::int32_t ContextDeoptBuffer = static_cast<std::int32_t>(offsetof(context, deoptBuffer));
+                    constexpr std::int32_t ContextExhausting = static_cast<std::int32_t>(offsetof(context, exhausting));
                     constexpr std::int32_t TableSlots = static_cast<std::int32_t>(offsetof(object_table, slots));
                     constexpr std::int32_t TableSize = static_cast<std::int32_t>(offsetof(object_table, size));
                     constexpr std::int32_t TableFree = static_cast<std::int32_t>(offsetof(object_table, free));
@@ -324,7 +327,8 @@ namespace neos
                                                                         ///< the loop that it is within, at its head (see tier_loop))
                     std::int32_t loopIterations = 0;
                     std::vector<std::uint8_t> staleJobs;                ///< (each function's optimizations made in the background that were not
-                                                                        ///< installed (the program's memory had changed): then made here)
+                                                                        ///< installed (the program's memory had changed): MaxStaleJobs, then 
+                                                                        ///< made here; none once one made in the background is installed)
                     std::vector<std::uint8_t> loopTriggered;            ///< (an optimization that its loops started: its calls not yet made 
                                                                         ///< are not cold (its code after the loop has not run yet))
                     std::uint64_t triggeringLoop = NoOsrLoop;           ///< (the loop (its token) whose iterations started the optimization
@@ -2037,6 +2041,49 @@ namespace neos
                     void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept;
                     void deopt_taken(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aDeopt) noexcept;
 
+                    // (the program's handler that a function's entry calls in its place when it finds the stack exhausted (see 
+                    // module_description::stackExhausted): the function has a frame of its own and the handler's result (none: it traps))
+                    std::optional<std::uint32_t> exhausted_handler(module_description const& aModule, std::uint32_t aFunction)
+                    {
+                        auto const h = aModule.stackExhausted;
+                        if (!h || *h >= aModule.functions.size() || *h == aFunction || aFunction >= aModule.functions.size())
+                            return {};
+                        auto const& handler = aModule.functions[*h];
+                        auto const& f = aModule.functions[aFunction];
+                        if (handler.imported || !handler.parameters->empty() || handler.results->size() != 1u || f.imported || f.frameless ||
+                            *f.results != *handler.results)
+                            return {};
+                        return h;
+                    }
+                    // (a function without a frame of its own (a language's helper, e.g. one that a language's functions are called 
+                    // through) of a program that handles an exhausted stack: its entry does not check the stack (its frame is within the
+                    // stack's headroom), the functions that it calls do (so that it is a call of one of them that the handler is called 
+                    // in the place of, whose result the helper passes on, rather than a trap))
+                    bool unchecked_entry(module_description const& aModule, std::uint32_t aFunction)
+                    {
+                        return aModule.stackExhausted && aFunction < aModule.functions.size() && aModule.functions[aFunction].frameless &&
+                            !aModule.functions[aFunction].imported;
+                    }
+                    // (a function's entry that finds the stack exhausted, if it has a handler (see exhausted_handler): its frame left (by 
+                    // aLeave, as its epilogue leaves it), the handler called in its place (aCall: its result is the function's, as if the 
+                    // function had returned it) with StackExhaustedReserve more of the stack (the limit lowered while it runs); one that is
+                    // already running (it exhausted the stack again) traps (aTrap))
+                    template <typename Leave, typename Call>
+                    void emit_exhausted(assembler& a, std::size_t aTrap, Leave aLeave, Call aCall)
+                    {
+                        aLeave();
+                        a.alu_mi(7, true, R15, ContextExhausting, 0);
+                        a.jcc(NE, aTrap);
+                        a.store_imm(true, R15, ContextExhausting, 1);
+                        a.alu_mi(5, true, R15, ContextStackLimit, static_cast<std::int32_t>(StackExhaustedReserve));
+                        a.alu_ri(5, true, RSP, 8);     // (aligned as at a call)
+                        aCall();
+                        a.alu_ri(0, true, RSP, 8);
+                        a.alu_mi(0, true, R15, ContextStackLimit, static_cast<std::int32_t>(StackExhaustedReserve));
+                        a.store_imm(true, R15, ContextExhausting, 0);
+                        a.ret();
+                    }
+
                     class code_generator
                     {
                     private:
@@ -3432,8 +3479,14 @@ namespace neos
                             a.sub_rsp_imm32(0);
                             auto const frameSizePatch = a.offset() - 4u;
                             a.barrier(); // (it is patched: it does not move)
-                            a.alu_rm(7, true, RSP, R15, ContextStackLimit);
-                            a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                            // (the stack exhausted: the program's handler, if it has one (see emit_exhausted), else a trap)
+                            auto const handler = exhausted_handler(iModule, aIndex);
+                            auto const exhausted = handler ? a.new_label() : iTrapLabels[TrapStackExhausted];
+                            if (!unchecked_entry(iModule, aIndex))
+                            {
+                                a.alu_rm(7, true, RSP, R15, ContextStackLimit);
+                                a.jcc(B, exhausted);
+                            }
                             if (iMemoryBase >= 0 && iPrimaryMemory == 0u)
                                 a.mov_ri(iMemoryBase, reinterpret_cast<std::uint64_t>(external_memory(iMemoryBaseIndex).base), true);
                             for (std::size_t i = 0u; i < iUsedPinnedXmms.size(); ++i)
@@ -3481,6 +3534,35 @@ namespace neos
                                 a.pop(*r);
                             a.pop(RBP);
                             a.ret();
+                            if (handler)
+                            {
+                                a.bind(exhausted);
+                                emit_exhausted(a, iTrapLabels[TrapStackExhausted], [&]()
+                                {
+                                    a.lea(RSP, RBP, -pushed_bytes());
+                                    for (auto r = iUsedPinnedGprs.rbegin(); r != iUsedPinnedGprs.rend(); ++r)
+                                        a.pop(*r);
+                                    a.pop(RBP);
+                                }, [&]()
+                                {
+                                    if (iTier != nullptr || iLazy)
+                                    {
+                                        if (auto const cell = reinterpret_cast<std::uint64_t>(&static_cast<compiled_module::indirect_entry const*>(iIndirect)[*handler].target); 
+                                            cell <= 0x7FFFFFFFull)
+                                            a.call_abs32(static_cast<std::uint32_t>(cell));     // (call [cell])
+                                        else
+                                        {
+                                            a.mov_ri(R11, cell, true);
+                                            a.op_rm({ 0xFFu }, false, 2, R11, 0);   // call [r11]
+                                        }
+                                    }
+                                    else
+                                        a.call(iFunctionLabels[*handler]);
+                                    // (a frame making a call (see walk): the function's, at its entry)
+                                    iCallSites.emplace_back(a.new_label(), origin(f.codeBegin));
+                                    a.bind(iCallSites.back().first);
+                                });
+                            }
                             if (a.in_cold())
                                 throw std::logic_error("neos::jit: cold code");
                             a.append_cold();
@@ -7168,11 +7250,16 @@ namespace neos
                             // (a function that makes no calls (a leaf, with a frame within the stack's headroom (see stack_limit)): the stack
                             // is not checked (its callers' frames were))
                             // (one whose calls are all in cold code (e.g. a cache's miss): checked before each of them instead)
-                            iCallStackChecks = !iCalls.empty() && iHotCalls.empty() && iFrameBelowPushed <= LeafFrameLimit;
-                            if ((!iCalls.empty() || iFrameBelowPushed > LeafFrameLimit) && !iCallStackChecks)
+                            // (the stack exhausted: the program's handler, if it has one (see emit_exhausted: then checked here, where its
+                            // frame can be left as if it had not been entered), else a trap)
+                            auto const handler = exhausted_handler(iModule, f.index);
+                            auto const exhausted = handler ? a.new_label() : iTrapLabels[TrapStackExhausted];
+                            bool const unchecked = unchecked_entry(iModule, f.index) && iFrameBelowPushed <= LeafFrameLimit;
+                            iCallStackChecks = !handler && !unchecked && !iCalls.empty() && iHotCalls.empty() && iFrameBelowPushed <= LeafFrameLimit;
+                            if ((!iCalls.empty() || iFrameBelowPushed > LeafFrameLimit) && !iCallStackChecks && !unchecked)
                             {
                                 a.alu_rm(7, true, RSP, R15, ContextStackLimit);
-                                a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                                a.jcc(B, exhausted);
                             }
                             if (iVersion != nullptr && std::any_of(iVersion->deopts.begin(), iVersion->deopts.end(), [](auto const& d) { return !d.guard && !d.returned; }))
                             {
@@ -7239,6 +7326,29 @@ namespace neos
                                 a.pop(*r);
                             a.pop(RBP);
                             a.ret();
+                            if (handler)
+                            {
+                                a.bind(exhausted);
+                                emit_exhausted(a, iTrapLabels[TrapStackExhausted], [&]()
+                                {
+                                    a.lea(RSP, RBP, -8 * static_cast<std::int32_t>(iPushed.size()));
+                                    for (auto r = iPushed.rbegin(); r != iPushed.rend(); ++r)
+                                        a.pop(*r);
+                                    a.pop(RBP);
+                                }, [&]()
+                                {
+                                    if (auto const cell = reinterpret_cast<std::uint64_t>(&iTier.indirect[*handler].target); cell <= 0x7FFFFFFFull)
+                                        a.call_abs32(static_cast<std::uint32_t>(cell));     // (call [cell])
+                                    else
+                                    {
+                                        a.mov_ri(R11, cell, true);
+                                        a.op_rm({ 0xFFu }, false, 2, R11, 0);
+                                    }
+                                    // (a frame making a call (see walk): the function's, at its entry)
+                                    iCallSites.emplace_back(a.new_label(), iModule.functions[f.index].codeBegin);
+                                    a.bind(iCallSites.back().first);
+                                });
+                            }
                             a.append_cold();
                             std::int32_t const pushed = 8 * static_cast<std::int32_t>(iPushed.size());
                             std::int32_t const raw = iFrameBelowPushed + std::max(iOutgoing, ShadowSpace);
@@ -8128,6 +8238,17 @@ namespace neos
                                 return;     // (an exit's test: its branch's patch point)
                             switch (op)
                             {
+                            case ssa::StackLow:
+                                {
+                                    // (neos::stack_low: less than StackLowMargin of the stack left above its limit)
+                                    auto const r = target(v, RAX);
+                                    a.lea(r, RSP, -static_cast<std::int32_t>(StackLowMargin));
+                                    a.alu_rm(7, true, r, R15, ContextStackLimit);
+                                    a.setcc(B, r);
+                                    a.movzx8(r, r);
+                                    defined(v, r);
+                                }
+                                return;
                             case ssa::Param:
                                 if (where(v).kind == location::Register)
                                 {
@@ -10290,7 +10411,12 @@ namespace neos
                     }
 
                     constexpr std::uint8_t MaxStaleJobs = 2u;   ///< (a function's optimizations made in the background that were not installed
-                                                                ///< (see compiled_module::staleJobs): then made here)
+                                                                ///< (see compiled_module::staleJobs): then made here, on the program's thread
+                                                                ///< (which stops for it). Not for good (a function may have had two while the
+                                                                ///< program started, and each of its later optimizations would stop the 
+                                                                ///< program): after one made here, its next is made in the background again, 
+                                                                ///< and here only if that one is not installed either (a function that reads 
+                                                                ///< words that change all the time))
 
                     // (whether the words that an optimization (made in the background) read have the values it read (here, on the program's 
                     // thread: they do not change while this runs; a page that has been read once is read directly))
@@ -10416,6 +10542,7 @@ namespace neos
                         m.tierState[f] = 1u;
                         m.tokensHash[f] = aJob.tokensHash;
                         m.currentVersion[f] = version.get();
+                        m.staleJobs[f] = aJob.background ? std::uint8_t{ 0u } : std::min<std::uint8_t>(m.staleJobs[f], MaxStaleJobs - 1u);
                         m.versions.push_back(std::move(version));
                         for (std::size_t i = 0u; i < 3u; ++i)
                             m.phaseMicroseconds[i] += aJob.phases[i];

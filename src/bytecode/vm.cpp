@@ -440,6 +440,7 @@ namespace neos
                 {
                 public:
                     static constexpr std::size_t MaxCallDepth = 100000u;
+                    static constexpr std::size_t StackExhaustedFrames = 1000u;  ///< (see invoke's exhausted)
                     static constexpr std::size_t StackLowFrames = 64u;  ///< (neos::stack_low: the interpreter's frames near MaxCallDepth)
                 public:
                     machine(text const& aText, std::ostream& aOutput, std::istream& aInput, std::ostream& aErrorOutput, std::uint64_t& aInstructions, bool aRestricted,
@@ -476,6 +477,20 @@ namespace neos
                         if (existing != iFunctionExports.end())
                             return existing->second;
                         return std::nullopt;
+                    }
+                    // a program that handles a call that cannot be made because the stack is exhausted (e.g. as a language's exception)
+                    // exports a function (no parameters, one result) named __neos_stack_exhausted: it is called in the place of a callee
+                    // with a frame of its own and the same result (see jit::module_description::stackExhausted), whose result it returns
+                    std::optional<std::uint32_t> stack_exhausted_handler(std::uint32_t aCallee) const
+                    {
+                        auto const handler = export_function("__neos_stack_exhausted");
+                        if (!handler || *handler == aCallee || *handler >= iFunctions.size() || aCallee >= iFunctions.size() || iFunctions[*handler].import ||
+                            iFunctions[aCallee].import || aCallee >= iFrames.size() || !iFrames[aCallee].frame)
+                            return std::nullopt;
+                        auto const& h = type_of(*handler);
+                        if (!h.parameters.empty() || h.results.size() != 1u || h.results != type_of(aCallee).results)
+                            return std::nullopt;
+                        return handler;
                     }
                     // compile the module to native code (null if not supported: the interpreter is then used)
                     // (a function of the program's, as the JIT has it)
@@ -535,6 +550,7 @@ namespace neos
                         module.threadGlobals = iAnyThreadGlobals ? &iThreadGlobals : nullptr;
                         module.linearMemory = &iMemoryView;
                         module.objects = &iObjectTable;
+                        module.stackExhausted = export_function("__neos_stack_exhausted");
                         module.host = jit::host_interface{ this,
                             [](void* aHost, std::uint32_t aHandle) { return static_cast<machine*>(aHost)->object_pointer(aHandle); },
                             [](void* aHost, void* aObject) { return static_cast<machine*>(aHost)->object_handle(aObject); },
@@ -766,10 +782,24 @@ namespace neos
                         if (iDebug != nullptr)
                             debug_prepare();
                         decoded_reader code{ iTokens };
+                        // (the frames below the program's handler of an exhausted stack while it runs (see stack_exhausted_handler): it is 
+                        // called in the place of a callee that cannot be entered, with StackExhaustedFrames more frames; within it, such a 
+                        // call traps)
+                        std::optional<std::size_t> exhausted;
                         auto enter = [&](std::uint32_t aCallee, std::vector<value> aCallArguments)
                         {
                             if (frames.size() >= MaxCallDepth)
-                                throw trap{ "call stack exhausted" };
+                            {
+                                auto const handler = exhausted ? std::nullopt : stack_exhausted_handler(aCallee);
+                                if (handler)
+                                {
+                                    exhausted = frames.size();
+                                    aCallee = *handler;
+                                    aCallArguments.clear();
+                                }
+                                else if (!exhausted || frames.size() >= MaxCallDepth + StackExhaustedFrames)
+                                    throw trap{ "call stack exhausted" };
+                            }
                             auto const& callee = iFunctions.at(aCallee);
                             frames.push_back(frame{ aCallee, std::move(aCallArguments), stack.size(), {}, callee.codeBegin, callee.codeBegin, ++tFrameSerial });
                             frames.back().locals.resize(frames.back().locals.size() + callee.locals.size(), 0u);
@@ -782,6 +812,8 @@ namespace neos
                             std::copy(stack.end() - static_cast<std::ptrdiff_t>(arity), stack.end(), stack.begin() + static_cast<std::ptrdiff_t>(returning.base));
                             stack.resize(returning.base + arity);
                             frames.pop_back();
+                            if (exhausted && frames.size() == *exhausted)
+                                exhausted.reset();  // (the handler has returned: its result is the call's)
                             if (frames.empty())
                                 return true;
                             code.seek(frames.back().pc);

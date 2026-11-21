@@ -1285,6 +1285,16 @@ namespace neos::javascript_runtime
             return Exception;
         }
 
+        // (a call that cannot be made because the stack is exhausted (the program's __neos_stack_exhausted, which the VM calls in its 
+        // place): a RangeError)
+        value stack_exhausted()
+        {
+            return guard([&]() -> value
+            {
+                throw_range_error("Maximum call stack size exceeded");
+            });
+        }
+
         value sloppy_this(value aThis)
         {
             if (is_nullish(aThis))
@@ -3066,6 +3076,7 @@ namespace neos::javascript_runtime
             { "array_push_one", NEOS_RT_FUNCTION(array_push_one), I64, 3u, { I64, I64, I64 }, 0u },
             { "function_call_function", NEOS_RT_FUNCTION(function_call_function), I64, 0u, {}, 0u },
             { "sloppy_this", NEOS_RT_FUNCTION(sloppy_this), I64, 1u, { I64 }, 0u },
+            { "stack_exhausted", NEOS_RT_FUNCTION(stack_exhausted), I64, 0u, {}, 0u },
             { "arguments_object", NEOS_RT_FUNCTION(arguments_object), I64, 8u, { I64, I32, I64, I64, I64, I64, I32, I32 }, 0u },
             { "arguments_map", NEOS_RT_FUNCTION(arguments_map), I64, 4u, { I64, I64, I32, I32 }, 0u },
             { "rest", NEOS_RT_FUNCTION(rest), I64, 7u, { I32, I32, I64, I64, I64, I64, I32 }, 0u },

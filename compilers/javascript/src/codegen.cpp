@@ -531,6 +531,16 @@ namespace neos::compilers::javascript
                     }
                 }
             }
+            // (a call that cannot be made because the stack is exhausted (not an extension's: the program's handles it): the VM calls
+            // __neos_stack_exhausted in its place, which throws a RangeError (its result, the exception, is the call's))
+            if (!iUnitFirst)
+            {
+                function_signature signature;
+                signature.set_return_type(I64);
+                signature.set_name(neolib::string{ "__neos_stack_exhausted" });
+                auto const handler = generator().define_function(neolib::string{ "__neos_stack_exhausted" }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
+                function_generator{ *this, *all.front() }.generate_slow_function(handler, runtime_index("stack_exhausted", {}, I64), 0u);
+            }
             // the dispatcher's code: a binary search of the function numbers (each leaf calls its function and returns)
             {
                 std::vector<std::uint32_t> targets;
@@ -7146,31 +7156,23 @@ namespace neos::compilers::javascript
         }
         if (aTail)
         {
-            // (a tail call of the program's function: a call (through the dispatcher) while the program's tail calls made as calls are
-            // fewer than TailCallDepth (they are nested: each one's frame remains), else (and a tail call of another callee) made by 
-            // the caller once this function has returned (the stack does not grow); the arguments beyond the registers' (pushed above) 
-            // are popped once it returns)
-            auto const depth = iCompiler.tail_depth_global();
+            // (a tail call of the program's function: a call (through the dispatcher) while the call stack is not near its end 
+            // (neos::stack_low: the tail calls made as calls are nested, each one's frame remains; no count of them is kept, so that 
+            // such a call costs a test of the stack pointer, as a call's entry does), else (and a tail call of another callee) made by
+            // the caller once this function has returned (the stack does not grow further); the arguments beyond the registers' 
+            // (pushed above) are popped once it returns)
             auto const number = temporary(I32);
             callee_number_of(aCallee, aSite);
             tee(number);
             i32(0);
             op(opcode::I32GeS);
-            op(opcode::GlobalGet);
-            u32(depth);
-            i64(TailCallDepth);
-            op(opcode::I64LtS);
+            call(iCompiler.runtime_function("neos::stack_low", {}, type::I32));
+            op(opcode::I32Eqz);
             op(opcode::I32And);
             op(opcode::If);
             iCode.push_back(0x7Eu);
             iControls.push_back(control{ control_kind::Block });
             {
-                op(opcode::GlobalGet);
-                u32(depth);
-                i64(1);
-                op(opcode::I64Add);
-                op(opcode::GlobalSet);
-                u32(depth);
                 dispatch_number(number);
                 get(aCallee);
                 get(aThis);
@@ -7184,12 +7186,6 @@ namespace neos::compilers::javascript
                         undefined();
                 }
                 dispatch(number);
-                op(opcode::GlobalGet);
-                u32(depth);
-                i64(1);
-                op(opcode::I64Sub);
-                op(opcode::GlobalSet);
-                u32(depth);
             }
             op(opcode::Else);
             {

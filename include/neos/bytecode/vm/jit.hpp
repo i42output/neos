@@ -108,6 +108,9 @@ namespace neos
                 // the limit that its functions' entries check (which traps)): a language whose functions check it where they are entered
                 // (e.g. Ada's Storage_Error) raises its own exception there, before a call can exhaust the stack)
                 constexpr std::uint32_t StackLowMargin = 64u * 1024u;
+                // (see module_description::stackExhausted: the stack that a handler of an exhausted stack may use beyond its limit (of the
+                // headroom that generated code leaves for host functions: see thread_stack_limit))
+                constexpr std::uint32_t StackExhaustedReserve = 128u * 1024u;
 
                 struct function_description
                 {
@@ -186,6 +189,12 @@ namespace neos
                     memory const* linearMemory = nullptr;
                     object_table* objects = nullptr;    ///< (null: generated code calls the host's object functions)
                     host_interface host;
+                    // (the program's handler of a call that cannot be made because the stack is exhausted where the callee is entered (the 
+                    // function that it exports as __neos_stack_exhausted: no parameters, one result): a callee with a frame of its own (a
+                    // language's function, not a helper) and that result returns the handler's result instead (e.g. a language's exception
+                    // that it raises: a RangeError), the handler running with StackExhaustedReserve more of the stack; none, or within the
+                    // handler: such a call traps)
+                    std::optional<std::uint32_t> stackExhausted;
                     std::uint32_t extensionRoom = 0u;   ///< (the functions that the module's program may yet be extended by (see extend): its
                                                         ///< compiled module keeps room for them (what its code has the addresses of does not move))
                 };

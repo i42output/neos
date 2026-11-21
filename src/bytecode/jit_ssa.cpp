@@ -908,6 +908,12 @@ namespace neos
                                                 add(Keeps, Void, { kept, condition });
                                                 break;
                                             }
+                                            if (callee < iModule.functions.size() && iModule.functions[callee].imported && iModule.functions[callee].call == import_call::StackLow)
+                                            {
+                                                // (neos::stack_low: its value (not a call))
+                                                iStack.push_back(add(StackLow, I32, {}));
+                                                break;
+                                            }
                                             if (callee == optimizer::intrinsics::guard_failed(iModule))
                                                 parameters = { I32 };
                                             else if (callee < iModule.functions.size())

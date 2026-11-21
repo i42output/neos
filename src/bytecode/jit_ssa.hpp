@@ -93,9 +93,11 @@ namespace neos
                         Invalidated,        ///< (after a call (see optimizer::intrinsics::returned): not 0 if a word that the code's watched loads
                                             ///< read has changed (i32; no code: its branch (its only use) is a patch point); the loads' values
                                             ///< are theirs after the call too (see number_values))
-                        Keeps               ///< (neos::keeps (see import_call::Keeps): operands: a load's value, and a condition; where the
+                        Keeps,              ///< (neos::keeps (see import_call::Keeps): operands: a load's value, and a condition; where the
                                             ///< condition is a constant that is not 0 (made from words that the code assumes: see 
                                             ///< function::assume), a later load of the same word is the value, as a watched load's is (no code))
+                        StackLow            ///< (neos::stack_low (see import_call::StackLow): i32, not 0 if the call stack is near its end (not a
+                                            ///< call: no effect on memory; not pure: it is where it is))
                     };
 
                     enum flag : std::uint8_t

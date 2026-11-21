@@ -1664,25 +1664,25 @@ namespace neos
                                                 auto const shift = 64u - 8u * x.width;
                                                 value = static_cast<std::uint64_t>(static_cast<std::int64_t>(value << shift) >> shift);
                                             }
-                                                    value &= mask_of(x.type);
-                                                    // (one that is watched too, in code that assumes (see options::assume): the code depends on the words that it 
-                                                    // reads (it is made again when one changes, rather than keep the value that it had))
-                                                    if ((aMemarg & MemargWatched) != 0u && assumable(memory, at, x.width))
-                                                        for (auto w = at & ~std::uint64_t{ 7u }; w < at + x.width; w += 8u)
-                                                            iAssumed.emplace(memory, w);
-                                                    used(address.from);
-                                                    erase(address.begin, address.end);
-                                                    ++iFolded;
-                                                    push_constant(x.type, value, address.from);
-                                                    return;
-                                                }
-                                            }
-                                            if (address.constant && (aMemarg & MemargWatched) != 0u && iOptions.assume && iOptions.exits && iOptions.deopt && memory != 0u &&
-                                                memory <= NEOS_RT_EXTERNAL_MEMORIES && x.type != F32 && x.type != F64 && external_memory(memory).fixed)
-                                            {
-                                                // (a watched load: the value its word has now, assumed (see options::assume: no test; the code depends on it))
-                                                auto const at = address.bits + aOffset;
-                                                if (at >= address.bits && assumable(memory, at, x.width))
+                                            value &= mask_of(x.type);
+                                            // (one that is watched too, in code that assumes (see options::assume): the code depends on the words that it
+                                            // reads (it is made again when one changes, rather than keep the value that it had))
+                                            if ((aMemarg & MemargWatched) != 0u && assumable(memory, at, x.width))
+                                                for (auto w = at & ~std::uint64_t{ 7u }; w < at + x.width; w += 8u)
+                                                    iAssumed.emplace(memory, w);
+                                            used(address.from);
+                                            erase(address.begin, address.end);
+                                            ++iFolded;
+                                            push_constant(x.type, value, address.from);
+                                            return;
+                                        }
+                                }
+                                if (address.constant && (aMemarg & MemargWatched) != 0u && iOptions.assume && iOptions.exits && iOptions.deopt && memory != 0u &&
+                                    memory <= NEOS_RT_EXTERNAL_MEMORIES && x.type != F32 && x.type != F64 && external_memory(memory).fixed)
+                                {
+                                    // (a watched load: the value its word has now, assumed (see options::assume: no test; the code depends on it))
+                                    auto const at = address.bits + aOffset;
+                                    if (at >= address.bits && assumable(memory, at, x.width))
                                         if (auto const word = iMemoryWord(memory, at, x.width))
                                         {
                                             std::uint64_t value = *word;
@@ -1736,17 +1736,17 @@ namespace neos
                                                 push_constant(x.type, value, single(*id));
                                                 return;
                                             }
-                                            }
-                                        // (a watched load of a word that keeps changing (see options::unassumed): a load as any other (its test is made, and
-                                        // no exit leaves when the word changes))
-                                        if (address.constant && (aMemarg & MemargWatched) != 0u && address.bits + aOffset >= address.bits && unsteady(memory, address.bits + aOffset, x.width))
-                                            aMemarg &= ~MemargWatched;
-                                        emit(aOp);
-                                        emit(aMemarg);
-                                        emit(aOffset);
-                                        push(x.type);
                                     }
-                                    void arithmetic(std::uint8_t aOp, numeric const& aNumeric)
+                                // (a watched load of a word that keeps changing (see options::unassumed): a load as any other (its test is made, and
+                                // no exit leaves when the word changes))
+                                if (address.constant && (aMemarg & MemargWatched) != 0u && address.bits + aOffset >= address.bits && unsteady(memory, address.bits + aOffset, x.width))
+                                    aMemarg &= ~MemargWatched;
+                                emit(aOp);
+                                emit(aMemarg);
+                                emit(aOffset);
+                                push(x.type);
+                            }
+                            void arithmetic(std::uint8_t aOp, numeric const& aNumeric)
                             {
                                 if (aNumeric.count == 2u)
                                 {
@@ -1820,6 +1820,14 @@ namespace neos
                                     pop();
                                     emit(0x10u);
                                     emit(aCallee);
+                                    return;
+                                }
+                                if (callee.imported && callee.call == import_call::StackLow)
+                                {
+                                    // (neos::stack_low: not a call (no effect; see ssa::StackLow): its value is the stack's state where it is)
+                                    emit(0x10u);
+                                    emit(aCallee);
+                                    push(I32);
                                     return;
                                 }
                                 if (callee.imported && callee.call == import_call::Keeps)

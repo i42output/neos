@@ -4496,7 +4496,13 @@ namespace neos::language
             for (std::uint32_t g = 0u; g < iInference.globals.size(); ++g)
                 if (iInference.globals[g].first == "__neos_error")
                     errorGlobal = g + 1u;
-            put_u32(section, (entry ? 3u : 2u) + (errorGlobal ? 1u : 0u));
+            // (a function named __neos_stack_exhausted is exported: the VM calls it in the place of a call that cannot be made because
+            // the stack is exhausted)
+            std::optional<std::uint32_t> stackExhausted;
+            for (std::uint32_t id = 0u; id < iModule.functions.size(); ++id)
+                if (!iModule.functions[id].imported && iModule.functions[id].name == "__neos_stack_exhausted")
+                    stackExhausted = id;
+            put_u32(section, (entry ? 3u : 2u) + (errorGlobal ? 1u : 0u) + (stackExhausted ? 1u : 0u));
             put_name(section, "memory");
             section.push_back(0x02u);
             put_u32(section, 0u);
@@ -4514,6 +4520,12 @@ namespace neos::language
                 put_name(section, "main");
                 section.push_back(0x00u);
                 put_u32(section, finalIndex[*entry]);
+            }
+            if (stackExhausted)
+            {
+                put_name(section, "__neos_stack_exhausted");
+                section.push_back(0x00u);
+                put_u32(section, finalIndex[*stackExhausted]);
             }
             put_section(module, 7u, section);
         }
