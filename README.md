@@ -222,6 +222,7 @@ set NEOS_RUNTIME_PLUGIN_PATH=C:\usr\local\bin\plugins
 | `--bigint-promotion <on\|off>` | Integers of any size (a result that overflows is promoted to an arbitrary precision integer), overriding the schema's `bigint.promotion` |
 | `--parse-times` | Console: output the time of each parse (by default only the total) |
 | `--cache` | Keep the results of compilations (a program's bytecode, a schema's parsed grammars) in the user's cache folder (`$XDG_CACHE_HOME/neos` or `~/.cache/neos`; on Windows `%LOCALAPPDATA%\neos\cache`) and reuse them while nothing they depend on has changed; deleting the folder is always safe |
+| `--clear` | Clear the cache (see `--cache`): the results of compilations that it has are deleted (only its entries; any other file in the folder is left). With a program, the cache is cleared before the program is compiled; with none (and no `--console`), nothing else is done |
 
 ## Architecture
 A program goes from source to running code through these parts:

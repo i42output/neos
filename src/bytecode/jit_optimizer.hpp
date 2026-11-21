@@ -141,6 +141,8 @@ namespace neos
                                                         ///< the last's call is the call (of a function without a frame of its own) that the
                                                         ///< code makes instead; its values (see the optimizing code generator) are each 
                                                         ///< frame's locals and operand stack, then the call's arguments)
+                        std::size_t inlined = 0u;       ///< (a guard's, with frames: the inlined call (its position: options::noInline's) whose
+                                                        ///< guard failed (call is the innermost frame's call's position))
                     };
 
                     struct options
@@ -171,6 +173,10 @@ namespace neos
                                                                 ///< exits, and not entered again, once the word changes, as V8's code that depends
                                                                 ///< on what it assumed); only if every call it makes is followed by an exit
                                                                 ///< (result::unexited: else it is optimized again without))
+                                                                std::set<std::pair<std::uint32_t, std::uint64_t>> unassumed;    ///< (words (their memories and addresses: as result::assumed)
+                                                                                                        ///< that are not assumed (they have changed under code that assumed them more 
+                                                                                                        ///< than once): the code tests them (as V8's code stops depending on what 
+                                                                                                        ///< keeps changing))
                         // (where the code can leave for frames of inlined calls (see deopt::frames): whether a function (with aLocals 
                         // locals) can be left for at a call (at aPosition, of aArguments arguments, aDepth below them) that it makes; if 
                         // none, it does not)

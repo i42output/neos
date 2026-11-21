@@ -331,6 +331,7 @@ namespace neos::compilers::javascript
         void header_word(std::uint32_t aSlot, std::uint32_t aPattern, bool aShape);
         void proto_load(std::uint32_t aCell, std::size_t aMiss);
         void site_load(opcode aOpcode, std::uint32_t aOffset);  ///< (as mem_load, a site's entry's field (a cached load))
+        void site_word(opcode aOpcode, std::uint32_t aOffset);  ///< (as mem_load, a site's entry's field as it is now (a watched load))
         void cached_load(opcode aOpcode, std::uint32_t aOffset, alias aAlias, bool aHeapOffset = false);  ///< (a cached load of a word that
                                                                 ///< the code has checked does not change (e.g. a watched holder's property))
         void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
@@ -459,6 +460,7 @@ namespace neos::compilers::javascript
         void typed(node* aNode, numeric_rep aRep);  ///< (its value as aRep (an integer rep: num_type(aNode) is one))
         void to_int32();                            ///< (the f64 on the stack: its ToInt32 (an i32))
         void box(numeric_rep aRep);                 ///< (an f64 or i64 or i32: as a value)
+        void number_bits();                         ///< (the f64 that numbers' arithmetic made: its bits, a number's (claimed))
         void unbox(numeric_rep aRep);               ///< (a value (a number): as an f64 or i64 or i32)
         bool numeric_value(node* aNode);            ///< (a unary, conditional or intrinsic call expression of numbers: its value emitted (else false))
         bool numeric_binary(node* aNode);           ///< (an operation of numbers: emitted (else false))

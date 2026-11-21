@@ -1627,8 +1627,53 @@ namespace neos::javascript_runtime
                         }
             } };
 
+            // (a site's entries while the runtime has them (see site_of): when it lets go of them, the words of theirs that compiled
+            // code reads as they are (each entry's kind, its function and its function's number: watched loads, see the JS compiler's
+            // site_word) and that it changed are reported, so that optimized code that knows the site (which depends on those words
+            // rather than test them) is made again)
+            struct site_ref
+            {
+                site* entries;
+                struct word { std::uint8_t kind; value function; std::int32_t number; } before[jsl::SiteEntries];
+                explicit site_ref(site* aEntries) : entries{ aEntries }
+                {
+                    if (entries != nullptr)
+                        for (std::size_t e = 0u; e < jsl::SiteEntries; ++e)
+                            before[e] = { entries[e].kind, entries[e].function, entries[e].number };
+                }
+                site_ref(site_ref const&) = delete;
+                site_ref& operator=(site_ref const&) = delete;
+                ~site_ref()
+                {
+                    if (entries == nullptr)
+                        return;
+                    // (by the aligned words that have them (see validity_changed))
+                    static_assert(offsetof(site, kind) / 8u == 2u && offsetof(site, function) % 8u == 0u && offsetof(site, number) % 8u == 0u && 
+                        sizeof(site) % 8u == 0u);
+                    for (std::size_t e = 0u; e < jsl::SiteEntries; ++e)
+                    {
+                        auto const* const words = reinterpret_cast<std::uint64_t const*>(entries + e);
+                        if (entries[e].kind != before[e].kind)
+                            validity_changed(words + 2u);
+                        if (entries[e].function != before[e].function)
+                            validity_changed(words + offsetof(site, function) / 8u);
+                        if (entries[e].number != before[e].number)
+                            validity_changed(words + offsetof(site, number) / 8u);
+                    }
+                }
+                // (of one that is kept while its entries are used: not of a temporary)
+                operator site*() const & { return entries; }
+                operator site*() const && = delete;
+            };
+
+            site* site_entries_of(std::int32_t aSite);
             // (the running program's site (null: none (its table is not made yet)))
-            site* site_of(std::int32_t aSite)
+            site_ref site_of(std::int32_t aSite)
+            {
+                return site_ref{ site_entries_of(aSite) };
+            }
+
+            site* site_entries_of(std::int32_t aSite)
             {
                 auto& t = the_site_tables();
                 auto* const program = current_program();
@@ -1659,7 +1704,7 @@ namespace neos::javascript_runtime
             // others move down: the last is forgotten))
             void remember(std::int32_t aSite, site const& aEntry)
             {
-                auto* const entries = site_of(aSite);
+                site_ref const entries = site_of(aSite);
                 if (entries == nullptr)
                     return;
                 // (a megamorphic site: as it is; its first entry's misses (see get_named_cached): kept)
@@ -1918,7 +1963,7 @@ namespace neos::javascript_runtime
                 if (!before || f.constructions < SampledConstructions || f.derived || f.flavour == function_flavour::ClassConstructor || f.prototypeShape == nullptr ||
                     f.properties.layout() != f.prototypeShape || !is_object(f.properties.at(f.prototypePosition).data()))
                     return thisValue;
-                auto* const entries = site_of(aSite);
+                site_ref const entries = site_of(aSite);
                 if (entries == nullptr)
                     return thisValue;
                 for (std::size_t i = 0u; i < jsl::SiteEntries; ++i)
@@ -1969,7 +2014,7 @@ namespace neos::javascript_runtime
                 for (std::size_t i = 0u; i < count; ++i)
                     a.elements.push_back(Undefined);
                 a.length = static_cast<std::uint32_t>(count);
-                if (auto* const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone && a.properties.layout() != nullptr)
+                if (site_ref const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone && a.properties.layout() != nullptr)
                 {
                     auto& e = entries[0];
                     e.kind = jsl::SiteArray;
@@ -2005,7 +2050,7 @@ namespace neos::javascript_runtime
             auto const slotSize = h.class_size(sizeClass);
             if (h.slot_size_of(cell) != slotSize)
                 return Undefined;
-            auto* const entries = site_of(aSite);
+            site_ref const entries = site_of(aSite);
             if (entries == nullptr || entries[0].kind != jsl::SiteNone)
                 return Undefined;
             // (its fields are of any kind from now on: compiled code stores its literals' values as they are)
@@ -2140,12 +2185,12 @@ namespace neos::javascript_runtime
             // getter's (SiteTyped: see remember_typed_length))
             if (auto const* a = as_array(aObject); a != nullptr && !a->sparse)
             {
-                if (auto* const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone)
+                if (site_ref const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone)
                     entries[0].kind = jsl::SiteArray;
             }
             else if (auto const* t = as_typed_array(aObject); t != nullptr && typed_array_length_is_getter(*t))
             {
-                if (auto* const entries = site_of(aSite); entries != nullptr && (entries[0].kind == jsl::SiteNone || entries[0].kind == jsl::SiteArray))
+                if (site_ref const entries = site_of(aSite); entries != nullptr && (entries[0].kind == jsl::SiteNone || entries[0].kind == jsl::SiteArray))
                     entries[0].kind = jsl::SiteTyped;
                 remember_typed_length(*t);
                 return number(static_cast<double>(t->length()));
@@ -2158,7 +2203,7 @@ namespace neos::javascript_runtime
         void mark_typed_elements(value aObject, value aKey, std::int32_t aSite)
         {
             if (auto const* t = as_typed_array(aObject); t != nullptr && t->type == element_type::Uint8 && is_number(aKey))
-                if (auto* const entries = site_of(aSite); entries != nullptr)
+                if (auto* const entries = site_entries_of(aSite); entries != nullptr)
                     entries[0].reserved |= TypedElements;
         }
 
@@ -2211,7 +2256,7 @@ namespace neos::javascript_runtime
         value get_named_cached(value aObject, value aKey, std::int32_t aSite)
         {
             value result;
-            auto* const entries = site_of(aSite);
+            auto* const entries = site_entries_of(aSite);
             if (cached_get(entries, aObject, aKey, result))
                 return result;
             // (a site that misses often (its receivers have had more shapes than its entries): megamorphic (its gets look in the 
@@ -2220,6 +2265,7 @@ namespace neos::javascript_runtime
             if (entries != nullptr && entries[0].kind != jsl::SiteMegamorphic && entries[jsl::SiteEntries - 1u].kind != jsl::SiteNone &&
                 ++entries[0].reserved >= MegamorphicMisses)
             {
+                site_ref const changing{ entries };
                 site e{};
                 e.key = aKey;
                 e.kind = jsl::SiteMegamorphic;
@@ -2248,7 +2294,7 @@ namespace neos::javascript_runtime
                     aKey = equal;
                 }
             value result;
-            if (cached_get(site_of(aSite), aObject, aKey, result))
+            if (cached_get(site_entries_of(aSite), aObject, aKey, result))
                 return result;
             // (the megamorphic cache's (not remembered by the site: its entries are for keys that its compiled code's gets have, and
             // a computed key's are many))
@@ -2270,7 +2316,7 @@ namespace neos::javascript_runtime
                 if (layout != nullptr && ordinary_type(o) && !o.mirrored)
                 {
                     before = layout;
-                    auto* const entries = site_of(aSite);
+                    auto* const entries = site_entries_of(aSite);
                     if (entries != nullptr && entries[0].kind == jsl::SiteMegamorphic)
                     {
                         // (a megamorphic site: a writable own data property in the megamorphic cache)
@@ -2294,6 +2340,7 @@ namespace neos::javascript_runtime
                         constexpr std::uint16_t MegamorphicMisses = 16u;
                         if (!hit && ++entries[0].reserved >= MegamorphicMisses)
                         {
+                            site_ref const changing{ entries };
                             site e{};
                             e.key = aKey;
                             e.kind = jsl::SiteMegamorphic;

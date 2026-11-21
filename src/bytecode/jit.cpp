@@ -374,6 +374,12 @@ namespace neos
                     // MaxInvalidations times tests them (see optimizer::options::assume))
                     bool assume = true;
                     std::vector<std::uint8_t> invalidations;
+                    // (a word that has changed MaxWordInvalidations times under code that assumed it, or that read it with a watched load
+                    // (a watched test, an exit), keeps changing (e.g. a call site's entry of a call of many functions): code made from 
+                    // then on reads it as it is (no assumption, no watched test, no exit that leaves when it changes). By word (its
+                    // address) the times, and those words (their memories and addresses: optimizer::options::unassumed))
+                    std::unordered_map<std::uintptr_t, std::uint8_t> wordInvalidations;
+                    std::set<std::pair<std::uint32_t, std::uint64_t>> unassumed;
                     std::vector<std::shared_ptr<tier_job>> replacements;
                     std::vector<std::int32_t> pollCalls;                ///< (by function: its calls before it next looks for its optimization
                                                                         ///< being made (see optimize_function))
@@ -9829,6 +9835,7 @@ namespace neos
                     constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
                     constexpr std::int32_t RecompileCallsAfterDeopts = 200; ///< (... whose code left often for its own (not a guard's))
                     constexpr std::uint8_t MaxInvalidations = 4u;           ///< (see compiled_module::assume)
+                    constexpr std::uint8_t MaxWordInvalidations = 2u;       ///< (see compiled_module::unassumed)
                     constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
                     constexpr std::uint32_t DeoptStrikes = 2u;              ///< (an inlined call whose deopts made the function optimized again this often:
                                                                             ///< its code calls rather than deopts (e.g. a cache's miss: optimized again, 
@@ -9971,6 +9978,7 @@ namespace neos
                         // (exits: where watched tests are patch points (see find_watched_guards))
                         options.exits = options.deopt && m.exits && m.description.threadGlobals == nullptr && watched_tests();
                         options.assume = options.exits && m.assume && m.invalidations[f] < MaxInvalidations;
+                        options.unassumed = m.unassumed;
                         bool const fromLoop = f < m.loopTriggered.size() && m.loopTriggered[f] != 0u;
                         if (options.deopt)
                         {
@@ -10913,8 +10921,8 @@ namespace neos
                                 ;
                             else if (!d.guard)
                                 struck.insert(d.call);
-                            else if (++m.guardFailures[f][d.call] >= 2u)
-                                m.noInline[f].insert(d.call);
+                            else if (auto const inlined = d.frames.empty() ? d.call : d.inlined; ++m.guardFailures[f][inlined] >= 2u)
+                                m.noInline[f].insert(inlined);
                             for (std::size_t k = 0u; k < aVersion->deopts.size(); ++k)
                                 if (!aVersion->deopts[k].guard && !aVersion->deopts[k].returned && aVersion->deoptCounts[k] >= 1u)
                                     struck.insert(aVersion->deopts[k].call);
@@ -11162,10 +11170,37 @@ namespace neos
                         sExits.erase(firstExit, lastExit);
                         sAnyWatched.store(!sWatched.empty() || !sExits.empty(), std::memory_order_relaxed);
                     }
+                    // (the word has changed under a module's code that read it (a watched test, an exit's watched load) or assumed it: counted,
+                    // once for the module (see compiled_module::unassumed))
+                    compiled_module const* counted = nullptr;
+                    auto const changed_under = [&](compiled_module const& aModule)
+                    {
+                        if (&aModule == counted)
+                            return;
+                        counted = &aModule;
+                        auto& m = const_cast<compiled_module&>(aModule);
+                        std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
+                        auto const address = reinterpret_cast<std::uintptr_t>(aAddress);
+                        if (auto& times = m.wordInvalidations[address]; times < MaxWordInvalidations && ++times == MaxWordInvalidations)
+                            for (std::uint32_t memory = 1u; memory <= NEOS_RT_EXTERNAL_MEMORIES; ++memory)
+                                if (auto const& x = external_memory(memory); x.fixed && address >= reinterpret_cast<std::uintptr_t>(x.base) &&
+                                    address - reinterpret_cast<std::uintptr_t>(x.base) < x.size)
+                                {
+                                    m.unassumed.emplace(memory, address - reinterpret_cast<std::uintptr_t>(x.base));
+                                    if (m.verbose != 0u)
+                                        std::fprintf(stderr, "[tier2] a word (memory %u, at %llx) keeps changing: read as it is from now on\n", memory,
+                                            static_cast<unsigned long long>(address - reinterpret_cast<std::uintptr_t>(x.base)));
+                                }
+                    };
                     for (auto const& site : sites)
+                    {
+                        if (site.module != nullptr)
+                            changed_under(*site.module);
                         patch_watched(site);
+                    }
                     for (auto const& e : exits)
                     {
+                        changed_under(*e.group->module);
                         if (!e.group->left)
                         {
                             e.group->left = true;

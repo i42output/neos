@@ -461,6 +461,7 @@ int main(int argc, char* argv[])
             ("restricted", "restricted mode: programs cannot call runtime plugin functions that can change the host environment")
             ("debug,g", "debug the program (with gdb's commands: see the debugger's \"help\")")
             ("cache", "keep the results of compilations (programs' bytecode, schemas' grammars) in the user's cache folder and use them when nothing they depend on has changed")
+            ("clear", "clear the cache (see --cache): the results of compilations that it has are deleted (with no program and no --console, nothing else is done)")
             ("img", boost::program_options::value<std::string>(), "make an image of the program (an executable that runs it) rather than run it: --img=<path> (by default <program>.exe on Windows, else a.out)")
             ("img-default", "(--img with no path)")
             ("load,l", boost::program_options::value<std::vector<std::string>>(), "load program(s)");
@@ -471,6 +472,13 @@ int main(int argc, char* argv[])
             options(optionsDescription).positional(positionalOptionsDescription).extra_parser(img_option).run(), options);
         if (options.count("img-default") && !options.count("img"))
             options.emplace("img", boost::program_options::variable_value{ std::string{}, false });
+        // (--clear: before the cache is used (with --cache, the program is then compiled and its result kept again))
+        if (options.count("clear"))
+        {
+            neos::cache::clear();
+            if (!options.count("load") && !options.count("console"))
+                return EXIT_SUCCESS;
+        }
         if (options.count("cache"))
             neos::cache::enable();
         if (options.count("load") && !options.count("console"))

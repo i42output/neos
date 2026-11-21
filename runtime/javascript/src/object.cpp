@@ -368,10 +368,10 @@ namespace neos::javascript_runtime
             release_dictionary();
         leave_shape();
         if (auto* const root = aBase->root_for(prototype); root != nullptr)
-            iShape = root;
+            shape_is(root);
         else
         {
-            iShape = aBase;
+            shape_is(aBase);
             make_dictionary();
             dict().proto = prototype;
         }
@@ -387,7 +387,7 @@ namespace neos::javascript_runtime
             if (auto* const s = iShape->with_proto(aPrototype); s != nullptr)
             {
                 leave_shape();
-                iShape = s;
+                shape_is(s);
                 note_fields();
                 return;
             }
@@ -468,7 +468,7 @@ namespace neos::javascript_runtime
         }
         release_values();
         leave_shape();
-        iShape = nullptr;
+        shape_is(nullptr);
         iStorage = unit_of(d);
         note_owner(this);
         if (entries().size() > FewKeys)
@@ -486,7 +486,7 @@ namespace neos::javascript_runtime
                 auto const pushed = (aAttributes & AttributeAccessor) != 0u ? value_of(the_heap().make<accessor_pair>(aData, aSetter)) : aData;
                 next->note_field(pushed);
                 push(pushed);
-                iShape = next;
+                shape_is(next);
                 return property_ref{ *this, next->count - 1u };
             }
             make_dictionary();
@@ -505,7 +505,7 @@ namespace neos::javascript_runtime
         aShape->note_field(aData);
         push(aData);
         leave_shape();
-        iShape = aShape;
+        shape_is(aShape);
     }
 
     void property_table::remove(value aKey)

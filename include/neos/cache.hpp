@@ -55,6 +55,9 @@ namespace neos
         void enable(std::string const& aFolder = default_folder());
         // the cache's folder (none: the cache is not enabled)
         std::optional<std::string> folder();
+        // clears the cache (in the folder aFolder; neos's --clear): its entries (and the temporary files of entries that were not 
+        // completed) are deleted; any other file there is left
+        void clear(std::string const& aFolder = default_folder());
 
         // a hash (64-bit FNV-1a) of data added to it
         class hasher

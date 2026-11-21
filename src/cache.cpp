@@ -155,6 +155,29 @@ namespace neos
             return folder_set();
         }
 
+        void clear(std::string const& aFolder)
+        {
+            // (an entry's file is named <kind>.<its key: 16 hexadecimal digits> (see entry_path), one being written has ".tmp<number>"
+            // after that (see store))
+            auto const entry = [](std::string aName)
+            {
+                auto const digit = [](char aCharacter) { return aCharacter >= '0' && aCharacter <= '9'; };
+                if (auto const temporary = aName.rfind(".tmp"); temporary != std::string::npos && temporary + 4u < aName.size() &&
+                    std::all_of(aName.begin() + temporary + 4u, aName.end(), digit))
+                    aName.erase(temporary);
+                auto const key = aName.rfind('.');
+                return key != std::string::npos && key != 0u && aName.size() - key - 1u == 16u &&
+                    std::all_of(aName.begin() + key + 1u, aName.end(), [&](char aCharacter) { return digit(aCharacter) || (aCharacter >= 'a' && aCharacter <= 'f'); });
+            };
+            std::error_code ec;
+            std::vector<std::filesystem::path> entries;
+            for (std::filesystem::directory_iterator file{ std::filesystem::path{ aFolder }, ec }, end; !ec && file != end; file.increment(ec))
+                if (std::error_code ignored; file->is_regular_file(ignored) && entry(file->path().filename().string()))
+                    entries.push_back(file->path());
+            for (auto const& path : entries)
+                std::filesystem::remove(path, ec);
+        }
+
         hasher& hasher::add(std::string_view aData)
         {
             add(static_cast<std::uint64_t>(aData.size()));

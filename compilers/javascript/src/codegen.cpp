@@ -1145,6 +1145,17 @@ namespace neos::compilers::javascript
         u32(aOffset);
     }
 
+    void function_generator::site_word(opcode aOpcode, std::uint32_t aOffset)
+    {
+        // (a site's entry's field that is read as it is now (its kind, its function, its function's number: not a cached load): a
+        // watched load (memarg flag 0x400): the runtime reports each change of these words (see its site_ref), so optimized code that 
+        // knows the site does not test them (it depends on them: it is made again when one changes))
+        op(aOpcode);
+        u32(static_cast<std::uint32_t>(memory_flags(aOpcode)) | 0x400u | alias_flags(alias::Site));
+        u32(layout::Memory);
+        u32(aOffset);
+    }
+
     void function_generator::cached_load(opcode aOpcode, std::uint32_t aOffset, alias aAlias, bool aHeapOffset)
     {
         // (address -> the value there: a cached load (memarg flag 0x80: an optimizing tier can use the value that it has then), of a word
@@ -1392,11 +1403,11 @@ namespace neos::compilers::javascript
             u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
             u32(layout::Memory);
             u32(layout::ShapeLeft);
-                op(opcode::I64Eqz);
-                op(opcode::I64UConvertI32);
-                call(iCompiler.runtime_function("neos::keeps", { I64, I64 }, type::Void));
-            }
-            end_control();
+            op(opcode::I64Eqz);
+            op(opcode::I64UConvertI32);
+            call(iCompiler.runtime_function("neos::keeps", { I64, I64 }, type::Void));
+        }
+        end_control();
     }
 
     void function_generator::field_valid(std::uint32_t aEntry, std::uint32_t aKind, std::size_t aSlow)
@@ -2081,8 +2092,13 @@ namespace neos::compilers::javascript
                     set(address);
                     cell_of(address);
                     // (a watched object's shape (the runtime watches an add's prototypes): only the runtime changes it (compiled code
-                    // stores no watched object's shape), so its class is the validity words')
-                    mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Validity);
+                    // stores no watched object's shape), so its class is the validity words', and it reports each change of it (see the
+                    // runtime's property_table::shape_is): a watched load (memarg flag 0x400), which optimized code that knows the 
+                    // entry does not make (it depends on the word))
+                    op(opcode::I64LoadMem32U);
+                    u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem32U)) | 0x400u | alias_flags(alias::Validity));
+                    u32(layout::Memory);
+                    u32(layout::ObjectShape);
                     get(entry);
                     site_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u) + 8u);
                     op(opcode::I64Ne);
@@ -2373,16 +2389,16 @@ namespace neos::compilers::javascript
             // (an entry that is not used: nor are those after it (entries are used first to last), so that code that knows the site
             // reads none of theirs)
             get(entry);
-            mem_load(opcode::I32LoadMem8U, e * layout::SiteEntrySize + layout::SiteKind, alias::Site);
+            site_word(opcode::I32LoadMem8U, e * layout::SiteEntrySize + layout::SiteKind);
             op(opcode::I32Eqz);
             branch(slow, true);
             get(entry);
-            mem_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteFunction, alias::Site);
+            site_word(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteFunction);
             get(callee);
             op(opcode::I64Ne);
             branch(next, true);
             get(entry);
-            mem_load(opcode::I32LoadMem8U, e * layout::SiteEntrySize + layout::SiteKind, alias::Site);
+            site_word(opcode::I32LoadMem8U, e * layout::SiteEntrySize + layout::SiteKind);
             i32(static_cast<std::int32_t>(layout::SiteConstruct));
             op(opcode::I32Ne);
             branch(slow, true);
@@ -2503,7 +2519,7 @@ namespace neos::compilers::javascript
         auto const slow = iControls.size() - 1u;
         property_site(site);
         tee(entry);
-        mem_load(opcode::I32LoadMem8U, layout::SiteKind, alias::Site);
+        site_word(opcode::I32LoadMem8U, layout::SiteKind);
         i32(static_cast<std::int32_t>(layout::SiteArray));
         op(opcode::I32Ne);
         branch(slow, true);
@@ -2620,7 +2636,7 @@ namespace neos::compilers::javascript
         auto const slow = iControls.size() - 1u;
         property_site(site);
         tee(entry);
-        mem_load(opcode::I32LoadMem8U, layout::SiteKind, alias::Site);
+        site_word(opcode::I32LoadMem8U, layout::SiteKind);
         i32(static_cast<std::int32_t>(layout::SiteLiteral));
         op(opcode::I32Ne);
         branch(slow, true);
@@ -7015,24 +7031,24 @@ namespace neos::compilers::javascript
         auto const entry = temporary();
         property_site(site);
         tee(entry);
-        mem_load(opcode::I64LoadMem, jsl::SiteFunction, alias::Site);
+        site_word(opcode::I64LoadMem, jsl::SiteFunction);
         get(aCallee);
         op(opcode::I64Eq);
         op(opcode::If);
         iCode.push_back(0x7Fu);
         iControls.push_back(control{ control_kind::Block });
         get(entry);
-        mem_load(opcode::I32LoadMem, jsl::SiteNumber, alias::Site);
+        site_word(opcode::I32LoadMem, jsl::SiteNumber);
         op(opcode::Else);
         get(entry);
-        mem_load(opcode::I64LoadMem, jsl::SiteEntrySize + jsl::SiteFunction, alias::Site);
+        site_word(opcode::I64LoadMem, jsl::SiteEntrySize + jsl::SiteFunction);
         get(aCallee);
         op(opcode::I64Eq);
         op(opcode::If);
         iCode.push_back(0x7Fu);
         iControls.push_back(control{ control_kind::Block });
         get(entry);
-        mem_load(opcode::I32LoadMem, jsl::SiteEntrySize + jsl::SiteNumber, alias::Site);
+        site_word(opcode::I32LoadMem, jsl::SiteEntrySize + jsl::SiteNumber);
         op(opcode::Else);
         if (aStub == stub::CalleeNumber)
         {
@@ -7040,7 +7056,7 @@ namespace neos::compilers::javascript
             // dispatch key (a function of the program's: the program's serial and its number), not remembered (its entries stay); else
             // the runtime's (remembered))
             get(entry);
-            mem_load(opcode::I64LoadMem, jsl::SiteEntrySize + jsl::SiteFunction, alias::Site);
+            site_word(opcode::I64LoadMem, jsl::SiteEntrySize + jsl::SiteFunction);
             op(opcode::I64Eqz);
             op(opcode::If);
             iCode.push_back(0x7Fu);
@@ -8319,7 +8335,7 @@ namespace neos::compilers::javascript
                 op(opcode::I64Add);
             }
             else
-                op(opcode::I64ReinterpretF64);
+                number_bits();
             op(opcode::Else);
             if (aNode->is(construct::StrictEqual) || aNode->is(construct::StrictNotEqual))
             {
@@ -8980,7 +8996,7 @@ namespace neos::compilers::javascript
                 get(rhs);
                 op(opcode::F64ReinterpretI64);
                 op(*inlineOp);
-                op(opcode::I64ReinterpretF64);
+                number_bits();
                 op(opcode::Else);
             }
             get(current);
@@ -9053,7 +9069,7 @@ namespace neos::compilers::javascript
             op(opcode::F64ReinterpretI64);
             f64(1.0);
             op(increment ? opcode::F64Add : opcode::F64Sub);
-            op(opcode::I64ReinterpretF64);
+            number_bits();
             op(opcode::Else);
             get(old);
             runtime("to_numeric", { I64 }, I64);
@@ -11178,13 +11194,30 @@ namespace neos::compilers::javascript
             i32(1);
     }
 
+    void function_generator::number_bits()
+    {
+        // (the f64 on the stack, the result of numbers' arithmetic, as a value: its bits, which are a number's (a NaN that arithmetic
+        // makes of numbers is below the tags: see the runtime's number); optimized code may assume that (neos::assume: e.g. a store 
+        // of it in a field of numbers is not checked))
+        op(opcode::I64ReinterpretF64);
+        auto const value = temporary();
+        tee(value);
+        constant(values::TagSpecial);
+        op(opcode::I64LtU);
+        call(iCompiler.runtime_function("neos::assume", { I32 }, type::Void));
+        get(value);
+        release(value);
+    }
+
     void function_generator::box(numeric_rep aRep)
     {
         if (aRep == numeric_rep::I64)
             op(opcode::F64SConvertI64);
         else if (aRep == numeric_rep::I32)
             op(opcode::F64SConvertI32);
-        if (aRep != numeric_rep::None)
+        if (aRep == numeric_rep::F64)
+            number_bits();
+        else if (aRep != numeric_rep::None)
             op(opcode::I64ReinterpretF64);
     }
 
@@ -11882,7 +11915,7 @@ namespace neos::compilers::javascript
         case construct::Divide:
         case construct::Remainder:
             numeric(aNode);
-            op(opcode::I64ReinterpretF64);
+            number_bits();
             return true;
         case construct::BitAnd:
         case construct::BitOr:

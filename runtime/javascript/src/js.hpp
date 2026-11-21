@@ -103,8 +103,11 @@ namespace neos::javascript_runtime
     inline double as_number(value aValue) { return std::bit_cast<double>(aValue); }
     inline value number(double aNumber)
     {
-        auto const bits = std::bit_cast<value>(aNumber);
-        return bits >= TagSpecial ? CanonicalNaN : bits;
+        // (any NaN: the canonical one. Not only one whose bits are a tag's: arithmetic makes a signalling NaN quiet, which sets a
+        // bit, so one below the tags (e.g. read from a typed array) could become a value with a tag in compiled code, whose numbers'
+        // arithmetic does not check its results (a NaN that arithmetic makes of numbers is the canonical one or the processor's 
+        // default (0xFFF8000000000000): below the tags))
+        return aNumber != aNumber ? CanonicalNaN : std::bit_cast<value>(aNumber);
     }
     inline value tag_of(value aValue) { return aValue & TagMask; }
     inline std::uint32_t handle_of(value aValue) { return static_cast<std::uint32_t>(aValue); }
@@ -1119,7 +1122,7 @@ namespace neos::javascript_runtime
                 changed();
                 release();
                 leave_shape();
-                iShape = aOther.iShape;
+                shape_is(aOther.iShape);
                 iStorage = aOther.iStorage;
                 iCapacity = aOther.iCapacity;
                 aOther.forget_all();
@@ -1200,8 +1203,18 @@ namespace neos::javascript_runtime
             }
         }
         std::uint64_t* watch_dictionary();      ///< (a dictionary's validity word (made if it has none): see watch)
-        void reshape(shape* aShape) { changed(); leave_shape(); iShape = aShape; note_fields(); }    ///< (its shape: one of the same keys (and positions))
+        void reshape(shape* aShape) { changed(); leave_shape(); shape_is(aShape); note_fields(); }    ///< (its shape: one of the same keys (and positions))
         void leave_shape() { if (iShape != nullptr) iShape->leave(); }  ///< (it leaves its shape (see shape::left): before its shape changes)
+        // (its shape is set. A watched table's shape's word (see watch) is one that compiled code's watched loads read (a set that 
+        // adds a property to an object checks its prototypes' shapes: see the set stub's SiteAdd), so its change is reported, once
+        // the word has changed (as a validity word's is); by the word's own address's aligned word (see validity_changed))
+        void shape_is(shape* aShape)
+        {
+            bool const watched = iShape != nullptr && iShape->validity != nullptr;
+            iShape = aShape;
+            if (watched)
+                validity_changed(reinterpret_cast<std::uint64_t const*>(reinterpret_cast<std::uintptr_t>(&iShape) & ~std::uintptr_t{ 7u }));
+        }
         void note_fields()  ///< (its values are its shape's fields' (their kinds: see shape::note_field))
         {
             auto const* const v = values();
