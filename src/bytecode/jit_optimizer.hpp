@@ -174,10 +174,11 @@ namespace neos
                                                                 ///< exits, and not entered again, once the word changes, as V8's code that depends
                                                                 ///< on what it assumed); only if every call it makes is followed by an exit
                                                                 ///< (result::unexited: else it is optimized again without))
-                                                                std::set<std::pair<std::uint32_t, std::uint64_t>> unassumed;    ///< (words (their memories and addresses: as result::assumed)
-                                                                                                        ///< that are not assumed (they have changed under code that assumed them more 
-                                                                                                        ///< than once): the code tests them (as V8's code stops depending on what 
-                                                                                                        ///< keeps changing))
+                        // (words (their memories and addresses, as result::assumed's; memory 0: globals (their numbers)) that keep changing: they
+                        // have changed more than once under code that assumed them or read them with watched loads, or that speculated on them
+                        // (its guards failed). They are not assumed, speculated on or read with watched loads: loaded (as V8's code stops 
+                        // depending on what keeps changing))
+                        std::set<std::pair<std::uint32_t, std::uint64_t>> unassumed;
                         // (where the code can leave for frames of inlined calls (see deopt::frames): whether a function (with aLocals 
                         // locals) can be left for at a call (at aPosition, of aArguments arguments, aDepth below them) that it makes; if 
                         // none, it does not)
@@ -232,6 +233,10 @@ namespace neos
                         std::set<std::pair<std::uint64_t, std::uint64_t>> useful;  ///< (the speculations whose values were folded (see options::usefulHint))
                         std::set<std::pair<std::uint32_t, std::uint64_t>> assumed;  ///< (the words (their memories and addresses) that its code
                                                                                     ///< assumed (see options::assume))
+                        struct word { std::uint32_t memory; std::uint8_t width; std::uint64_t address; std::uint64_t value; };
+                        std::vector<word> speculated;           ///< (the loads that it speculated on (their memories, widths, addresses and the values
+                                                                ///< they had; memory 0: a global (its number is the address)): its code's guards test
+                                                                ///< them (those of calls tried and not inlined too))
                         bool unexited = false;                  ///< (a call that its code makes is not followed by an exit (see options::exits))
                     };
 

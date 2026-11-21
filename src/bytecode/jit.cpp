@@ -287,6 +287,7 @@ namespace neos
                         std::uint32_t function = 0u;
                         std::vector<optimizer::inline_site> sites;
                         std::vector<optimizer::deopt> deopts;
+                        std::vector<optimizer::result::word> speculated;    ///< (the loads that its code's guards test (see guard_words))
                         mutable std::vector<std::uint32_t> deoptCounts;     ///< (each deopt's (its code left for the baseline's))
                         mutable std::uint32_t deoptsTaken = 0u;             ///< (its deopts' (not guards'): all of them)
                         mutable std::uint64_t calls = 0u;                   ///< (its code's calls (counted if it has deopts that are not guards'))
@@ -380,6 +381,10 @@ namespace neos
                     // address) the times, and those words (their memories and addresses: optimizer::options::unassumed))
                     std::unordered_map<std::uintptr_t, std::uint8_t> wordInvalidations;
                     std::set<std::pair<std::uint32_t, std::uint64_t>> unassumed;
+                    // (and so does one that a guard that failed tested (a speculated load: see guard_words) and that has had 
+                    // MaxWordInvalidations values other than the code's: by word the last such value that was seen)
+                    std::unordered_map<std::uintptr_t, std::uint64_t> guardWords;
+                    std::unordered_map<std::uint64_t, std::pair<std::uint64_t, std::uint8_t>> guardGlobals;    ///< (a global's: that value, and the times)
                     std::vector<std::shared_ptr<tier_job>> replacements;
                     std::vector<std::int32_t> pollCalls;                ///< (by function: its calls before it next looks for its optimization
                                                                         ///< being made (see optimize_function))
@@ -10151,6 +10156,7 @@ namespace neos
                         aJob.version->function = f;
                         aJob.version->sites = r.sites;
                         aJob.version->deopts = r.deopts;
+                        aJob.version->speculated = r.speculated;
                         aJob.version->deoptCounts.assign(r.deopts.size(), 0u);
                         aJob.phases[0] = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - aJob.start).count());
                         aJob.rewritten = true;
@@ -10834,6 +10840,62 @@ namespace neos
                         return true;
                     }
 
+                    // (a guard of a version's code failed: those of the words that its guards test (the loads it speculated on) that do not
+                    // have the values the code was made with are counted (once for each other value seen); one that has had 
+                    // MaxWordInvalidations is a word that keeps changing (e.g. a property that the program writes each time round): code made
+                    // from then on loads it (see compiled_module::unassumed) rather than speculate on it again (each of the functions that
+                    // read it, and each call in them, would else fail twice before the call is no longer inlined))
+                    void guard_words(compiled_module& aModule, compiled_module::tier_version const& aVersion)
+                    {
+                        auto& m = aModule;
+                        for (auto const& w : aVersion.speculated)
+                        {
+                            if (w.memory == 0u)
+                            {
+                                // (a global: by its number (no address))
+                                auto const& globals = *m.description.globals;
+                                if (w.address >= globals.size())
+                                    continue;
+                                auto const now = globals[w.address] & (w.width == 4u ? std::uint64_t{ 0xFFFFFFFFu } : ~std::uint64_t{});
+                                if (now == w.value)
+                                    continue;
+                                auto const seen = m.guardGlobals.find(w.address);
+                                if (seen != m.guardGlobals.end() && seen->second.first == now)
+                                    continue;
+                                auto& entry = m.guardGlobals[w.address];
+                                entry.first = now;
+                                if (entry.second < MaxWordInvalidations && ++entry.second == MaxWordInvalidations)
+                                {
+                                    m.unassumed.emplace(0u, w.address);
+                                    if (m.verbose != 0u)
+                                        std::fprintf(stderr, "[tier2] global %llu, that guards test, keeps changing: read as it is from now on\n", static_cast<unsigned long long>(w.address));
+                                }
+                                continue;
+                            }
+                            if (w.memory > NEOS_RT_EXTERNAL_MEMORIES)
+                                continue;
+                            auto const& x = external_memory(w.memory);
+                            if (!x.fixed || w.width > 8u || w.address > x.size || x.size - w.address < w.width)
+                                continue;
+                            std::uint64_t now = 0u;
+                            if (!read_memory(x.base + w.address, &now, w.width) || now == w.value)
+                                continue;
+                            auto const address = reinterpret_cast<std::uintptr_t>(x.base + w.address);
+                            auto const seen = m.guardWords.find(address);
+                            if (seen != m.guardWords.end() && seen->second == now)
+                                continue;
+                            m.guardWords[address] = now;
+                            if (auto& times = m.wordInvalidations[address & ~std::uintptr_t{ 7u }]; times < MaxWordInvalidations && ++times == MaxWordInvalidations)
+                            {
+                                for (auto a = w.address & ~std::uint64_t{ 7u }; a < w.address + w.width; a += 8u)
+                                    m.unassumed.emplace(w.memory, a);
+                                if (m.verbose != 0u)
+                                    std::fprintf(stderr, "[tier2] a word (memory %u, at %llx) that guards test keeps changing: read as it is from now on\n", w.memory,
+                                        static_cast<unsigned long long>(w.address));
+                            }
+                        }
+                    }
+
                     void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept
                     {
                         auto& m = *aContext->module;
@@ -10841,6 +10903,7 @@ namespace neos
                         std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
                         try
                         {
+                            guard_words(m, *aVersion);
                             // (being replaced: nothing more until it is)
                             if (aVersion->osrLoop == NoOsrLoop && m.currentVersion[f] == aVersion && m.tierState[f] == 1u && m.replacements[f] &&
                                 replaced(m, f))
@@ -10899,6 +10962,8 @@ namespace neos
                             if (aDeopt >= aVersion->deopts.size())
                                 return;
                             auto const& d = aVersion->deopts[aDeopt];
+                            if (d.guard && !d.returned)
+                                guard_words(m, *aVersion);
                             // (the call continues in the function's own code: its loops count again (it may continue in optimized code
                             // from one, see tier_loop))
                             if (m.loopCounters[f] == NotAgain)

@@ -499,6 +499,7 @@ namespace neos
                                 r.folded = iFolded;
                                 r.guards = iGuards;
                                 r.assumed = std::move(iAssumed);
+                                r.speculated = std::move(iSpeculated);
                                 r.unexited = iUnexited;
                                 return r;
                             }
@@ -1547,10 +1548,12 @@ namespace neos
                                             std::optional<std::uint32_t> id;
                                             // (not a global that each thread has its own of: the module's value is not the thread's)
                                             bool const perThread = iModule.threadGlobals != nullptr && g < iModule.threadGlobals->size() && (*iModule.threadGlobals)[g] != 0u;
-                                            if (auto* c = speculating(); c != nullptr && !perThread && type != F32 && type != F64 && (id = speculation({ 1u, g })))
+                                            // (nor one that keeps changing (see options::unassumed: memory 0 is the globals))
+                                            if (auto* c = speculating(); c != nullptr && !perThread && type != F32 && type != F64 && !iOptions.unassumed.contains({ 0u, g }) && (id = speculation({ 1u, g })))
                                             {
                                                 // (its value now: a guard checks that it has it)
                                                 auto const value = (*iModule.globals)[g] & mask_of(type);
+                                                iSpeculated.push_back({ 0u, static_cast<std::uint8_t>(type == I32 ? 4u : 8u), g, value });
                                                 c->guards.push_back(0x23u);
                                                 c->guards.push_back(g);
                                                 c->guards.push_back(const_op(type));
@@ -1717,6 +1720,7 @@ namespace neos
                                                 }
                                                 value &= mask_of(x.type);
                                                 erase(address.begin, address.end);
+                                                iSpeculated.push_back({ memory, static_cast<std::uint8_t>(x.width), at, *word });
                                                 c->guards.push_back(0x42u);
                                                 c->guards.push_back(address.bits);
                                                 c->guards.push_back(aOp);
@@ -2392,6 +2396,7 @@ namespace neos
                             std::size_t iInlined = 0u;
                             std::size_t iFolded = 0u;
                             std::set<std::pair<std::uint32_t, std::uint64_t>> iAssumed;     ///< (see result::assumed)
+                            std::vector<result::word> iSpeculated;                          ///< (see result::speculated)
                             bool iUnexited = false;                                         ///< (see result::unexited)
                             std::size_t iGuards = 0u;
                         };
