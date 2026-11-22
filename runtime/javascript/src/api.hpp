@@ -49,8 +49,49 @@ namespace neos::javascript_runtime
     // (a compiled function by its index (of the program aProgram: null, the running one), e.g. a generator's body)
     value call_compiled_index(void* aProgram, std::uint32_t aIndex, value aCallee, value aThis, arguments aArguments, value aNewTarget);
 
-    // (the extra arguments stack)
-    std::vector<value>& extra_arguments();
+    // (the extra arguments stack: in the region (its words in the allocation state: compiled code pushes, reads and pops them))
+    class extra_stack
+    {
+    public:
+        extra_stack();
+        ~extra_stack();
+        extra_stack(extra_stack const&) = delete;
+        extra_stack& operator=(extra_stack const&) = delete;
+    public:
+        std::size_t size() const { return iState->extraSize; }
+        value* data() { return iState->extraCapacity != 0u ? reinterpret_cast<value*>(gRegionBase + iState->extraArguments) : nullptr; }
+        value* begin() { return data(); }
+        value* end() { return data() + size(); }
+        value& operator[](std::size_t aIndex) { return data()[aIndex]; }
+        void reserve(std::size_t aCapacity);
+        void push_back(value aValue)
+        {
+            if (iState->extraSize == iState->extraCapacity)
+                reserve(iState->extraCapacity < 16u ? 16u : static_cast<std::size_t>(iState->extraCapacity) * 2u);
+            data()[iState->extraSize++] = aValue;
+        }
+        void resize(std::size_t aSize)
+        {
+            if (aSize > iState->extraCapacity)
+                reserve(aSize);
+            for (auto i = static_cast<std::size_t>(iState->extraSize); i < aSize; ++i)
+                data()[i] = Undefined;
+            iState->extraSize = static_cast<std::uint32_t>(aSize);
+        }
+        void insert(value* aEnd, value const* aFirst, value const* aLast);
+        template <typename Iterator>
+        void insert(value* aEnd, Iterator aFirst, Iterator aLast)
+        {
+            for (; aFirst != aLast; ++aFirst)
+                push_back(*aFirst);
+            (void)aEnd;
+        }
+        void clear() { iState->extraSize = 0u; }
+        void shrink_to_fit();
+    private:
+        allocation_state* iState;
+    };
+    extra_stack& extra_arguments();
 
     // (a JavaScript exception that compiled code has not caught yet)
     value& pending_exception();

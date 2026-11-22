@@ -2077,6 +2077,81 @@ namespace neos
                             return changed;
                         }
 
+                        // (an integer value's range (as unsigned: [0, its result] for an i32 or an i64), if it is narrower than its type's: a 
+                        // narrow load zero extended, a constant, an and with a constant, a shift right (unsigned) by a constant, a zero extension 
+                        // of one, a phi of them)
+                        std::optional<std::uint64_t> unsigned_bound(std::vector<instruction> const& aValues, value aValue, int aDepth)
+                        {
+                            auto const& x = aValues[aValue];
+                            switch (x.op)
+                            {
+                            case 0x41u:
+                                return x.imm0 & 0xFFFFFFFFull;
+                            case 0x42u:
+                                return x.imm0;
+                            case 0x2Du: case 0x31u:     // (load8_u)
+                                return 0xFFu;
+                            case 0x2Fu: case 0x33u:     // (load16_u)
+                                return 0xFFFFu;
+                            case 0x35u:                 // (i64.load32_u)
+                                return 0xFFFFFFFFu;
+                            case 0xADu:                 // (i64.extend_i32_u)
+                                if (x.operands.size() == 1u)
+                                {
+                                    if (aDepth > 0)
+                                        if (auto const b = unsigned_bound(aValues, x.operands[0], aDepth - 1))
+                                            return b;
+                                    return 0xFFFFFFFFu;
+                                }
+                                return {};
+                            case 0x71u: case 0x83u:     // (and)
+                                if (x.operands.size() == 2u)
+                                {
+                                    std::optional<std::uint64_t> result;
+                                    for (auto o : x.operands)
+                                        if (auto const& c = aValues[o]; c.constant())
+                                            result = std::min<std::uint64_t>(result.value_or(~0ull), x.op == 0x71u ? c.imm0 & 0xFFFFFFFFull : c.imm0);
+                                        else if (aDepth > 0)
+                                            if (auto const b = unsigned_bound(aValues, o, aDepth - 1))
+                                                result = std::min<std::uint64_t>(result.value_or(~0ull), *b);
+                                    return result;
+                                }
+                                return {};
+                            case 0x76u: case 0x88u:     // (shr_u)
+                                if (x.operands.size() == 2u && aValues[x.operands[1]].constant())
+                                {
+                                    auto const width = x.op == 0x76u ? 32u : 64u;
+                                    auto const shift = static_cast<unsigned>(aValues[x.operands[1]].imm0 % width);
+                                    std::uint64_t whole = x.op == 0x76u ? 0xFFFFFFFFull : ~0ull;
+                                    if (aDepth > 0)
+                                        if (auto const b = unsigned_bound(aValues, x.operands[0], aDepth - 1))
+                                            whole = *b;
+                                    if (shift == 0u && whole == (x.op == 0x76u ? 0xFFFFFFFFull : ~0ull))
+                                        return {};
+                                    return whole >> shift;
+                                }
+                                return {};
+                            case Phi:
+                                if (aDepth > 0 && !x.operands.empty())
+                                {
+                                    std::uint64_t result = 0u;
+                                    for (auto o : x.operands)
+                                    {
+                                        if (o == None || o == aValue)
+                                            return {};
+                                        auto const b = unsigned_bound(aValues, o, aDepth - 1);
+                                        if (!b)
+                                            return {};
+                                        result = std::max(result, *b);
+                                    }
+                                    return result;
+                                }
+                                return {};
+                            default:
+                                return {};
+                            }
+                        }
+
                         // (an f64 value that is an integer: its range (each value of it an integer within it, exactly: none beyond 2^53 in
                         // magnitude), if it is one: an integer converted to f64, an integral constant, their sums and differences, phis of them)
                         std::optional<std::pair<double, double>> integral_range(std::vector<instruction> const& aValues, value aValue, int aDepth)
@@ -2093,8 +2168,14 @@ namespace neos
                                     return {};
                                 }
                             case 0xB7u:     // (f64.convert_i32_s)
+                                if (x.operands.size() == 1u && aDepth > 0)
+                                    if (auto const b = unsigned_bound(aValues, x.operands[0], 3); b && *b <= 0x7FFFFFFFu)
+                                        return std::pair{ 0.0, static_cast<double>(*b) };
                                 return std::pair{ -2147483648.0, 2147483647.0 };
                             case 0xB8u:     // (f64.convert_i32_u)
+                                if (x.operands.size() == 1u && aDepth > 0)
+                                    if (auto const b = unsigned_bound(aValues, x.operands[0], 3))
+                                        return std::pair{ 0.0, static_cast<double>(*b) };
                                 return std::pair{ 0.0, 4294967295.0 };
                             case 0xB9u:     // (f64.convert_i64_s, of an extended i32)
                             case 0xBAu:     // (f64.convert_i64_u, of a zero extended i32)
@@ -2325,6 +2406,21 @@ namespace neos
                                             o = replaced.resolved(o);
                                     auto& i = values[v];
                                     auto const op = i.op;
+                                    if ((op == 0xAAu || op == 0xABu) && i.operands.size() == 1u && (values[i.operands[0]].op == 0xB7u ||
+                                        values[i.operands[0]].op == 0xB8u) && values[i.operands[0]].operands.size() == 1u)
+                                    {
+                                        // (an i32's truncation of the i32's conversion: the i32, if it is within the truncation's range)
+                                        auto const& c = values[i.operands[0]];
+                                        bool const same = (op == 0xAAu) == (c.op == 0xB7u);
+                                        auto const bound = same ? std::nullopt : unsigned_bound(values, c.operands[0], 3);
+                                        if (same || (bound && *bound <= 0x7FFFFFFFu))
+                                        {
+                                            i.dead = true;
+                                            replaced.add(v, c.operands[0]);
+                                            changed = true;
+                                            continue;
+                                        }
+                                    }
                                     if ((op == 0xBFu || op == 0xBDu) && i.operands.size() == 1u)
                                     {
                                         // (a reinterpretation of a reinterpretation: the value)
@@ -3054,6 +3150,16 @@ namespace neos
                                     default: break;
                                     }
                                 };
+                                // (an integer's range (see integral_range))
+                                if (auto const r = integral_range(values, aValue, 4))
+                                {
+                                    lower = std::max(lower, r->first);
+                                    if (r->second < upper)
+                                    {
+                                        upper = r->second;
+                                        upperInclusive = true;
+                                    }
+                                }
                                 for (auto c : knownOrder)
                                     if (known[c] >= 0)
                                         consider(c, known[c] != 0, 4);

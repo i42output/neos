@@ -74,7 +74,7 @@ namespace neos::javascript_runtime
         struct call_state
         {
             value pending = Undefined;
-            std::vector<value> extraArguments;
+            extra_stack extraArguments;
             tail_call_record tail;
             bool deferTail = false;     ///< (the next compiled call leaves its tail call pending (the trampoline makes it))
             std::uint32_t nativeTailCalls = 0u;     ///< (built-ins' tail calls made as calls, running (see tail_call))
@@ -147,6 +147,8 @@ namespace neos::javascript_runtime
                 offsetof(allocation_state, bump) == jsl::AllocBump && offsetof(allocation_state, bumpLimit) == jsl::AllocBumpLimit &&
                 offsetof(allocation_state, plainArrays) == jsl::AllocPlainArrays &&
                 offsetof(allocation_state, typedLengthProto) == jsl::AllocTypedLength &&
+                offsetof(allocation_state, extraArguments) == jsl::AllocExtra && offsetof(allocation_state, extraSize) == jsl::AllocExtraSize &&
+                offsetof(allocation_state, extraCapacity) == jsl::AllocExtraCapacity &&
                 property_table::dictionary_proto_field() == jsl::DictionaryProto &&
                 MegamorphicEntries == jsl::MegamorphicEntries && sizeof(megamorphic_entry) == jsl::MegamorphicEntrySize &&
                 offsetof(megamorphic_entry, key) == jsl::MegamorphicKey && offsetof(megamorphic_entry, position) == jsl::MegamorphicPosition &&
@@ -339,9 +341,45 @@ namespace neos::javascript_runtime
         return calls().pending;
     }
 
-    std::vector<value>& extra_arguments()
+    extra_stack& extra_arguments()
     {
         return calls().extraArguments;
+    }
+
+    extra_stack::extra_stack() : iState{ &the_heap().the_allocation_state() }
+    {
+    }
+
+    extra_stack::~extra_stack()
+    {
+        shrink_to_fit();
+    }
+
+    void extra_stack::reserve(std::size_t aCapacity)
+    {
+        if (aCapacity <= iState->extraCapacity)
+            return;
+        auto* const storage = static_cast<value*>(region_allocate(aCapacity * sizeof(value)));
+        if (iState->extraSize != 0u)
+            std::memcpy(storage, data(), static_cast<std::size_t>(iState->extraSize) * sizeof(value));
+        if (iState->extraCapacity != 0u)
+            region_release(data());
+        iState->extraArguments = region_offset(storage);
+        iState->extraCapacity = static_cast<std::uint32_t>(aCapacity);
+    }
+
+    void extra_stack::insert(value* aEnd, value const* aFirst, value const* aLast)
+    {
+        insert<value const*>(aEnd, aFirst, aLast);
+    }
+
+    void extra_stack::shrink_to_fit()
+    {
+        if (iState->extraSize != 0u || iState->extraCapacity == 0u)
+            return;
+        region_release(data());
+        iState->extraArguments = 0u;
+        iState->extraCapacity = 0u;
     }
 
     value call_compiled(function_object& aFunction, value aThis, arguments aArguments, value aNewTarget)
@@ -2122,16 +2160,6 @@ namespace neos::javascript_runtime
                     e.added = h.object_template(sizeClass, (slotSize - base) / sizeof(value));
                     e.reserved2 = slotSize;
                     e.prototypes[0] = { prototype, shape_word(root) };
-                    // (the constructor is watched (its validity word changes when its properties do): compiled code that finds the word's 
-                    // value the entry's knows its prototype without testing it; watching it gives it a shape of its own, which the entry 
-                    // and the constructor's prototype shape then are)
-                    e.prototypes[1] = { 0u, 0u };
-                    if (auto* const word = watch(f); word != nullptr && f.properties.layout() != nullptr)
-                    {
-                        f.prototypeShape = f.properties.layout();
-                        e.shape = shape_word(f.prototypeShape);
-                        e.prototypes[1] = { region_offset(word), *word };
-                    }
                     break;
                 }
                 return thisValue;

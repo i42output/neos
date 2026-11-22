@@ -1332,6 +1332,62 @@ namespace neos::compilers::javascript
         }
     }
 
+    void function_generator::push_extra()
+    {
+        // (a value (on the stack) -> pushed on the extra arguments stack (in the region: see the allocation state's AllocExtra); the 
+        // runtime's push_arg if it has no room)
+        auto const v = temporary();
+        set(v);
+        auto const size = temporary(I32);
+        op(opcode::GlobalGet);
+        u32(iCompiler.allocation_state_global());
+        volatile_load(opcode::I32LoadMem, layout::AllocExtraSize, false, alias::Alloc);
+        tee(size);
+        op(opcode::GlobalGet);
+        u32(iCompiler.allocation_state_global());
+        volatile_load(opcode::I32LoadMem, layout::AllocExtraCapacity, false, alias::Alloc);
+        op(opcode::I32LtU);
+        op(opcode::If);
+        iCode.push_back(0x40u);
+        iControls.push_back(control{ control_kind::Block });
+        op(opcode::GlobalGet);
+        u32(iCompiler.allocation_state_global());
+        volatile_load(opcode::I64LoadMem, layout::AllocExtra, true, alias::Alloc);
+        get(size);
+        op(opcode::I64UConvertI32);
+        i64(3);
+        op(opcode::I64Shl);
+        op(opcode::I64Add);
+        get(v);
+        mem_store(opcode::I64StoreMem, 0u, alias::Alloc);
+        op(opcode::GlobalGet);
+        u32(iCompiler.allocation_state_global());
+        get(size);
+        i32(1);
+        op(opcode::I32Add);
+        mem_store(opcode::I32StoreMem, layout::AllocExtraSize, alias::Alloc);
+        op(opcode::Else);
+        get(v);
+        runtime("push_arg", { I64 }, I64);
+        drop();
+        end_control();
+        release(size);
+        release(v);
+    }
+
+    void function_generator::pop_extra(std::uint32_t aCount)
+    {
+        // (aCount values popped from the extra arguments stack)
+        op(opcode::GlobalGet);
+        u32(iCompiler.allocation_state_global());
+        op(opcode::GlobalGet);
+        u32(iCompiler.allocation_state_global());
+        volatile_load(opcode::I32LoadMem, layout::AllocExtraSize, false, alias::Alloc);
+        i32(static_cast<std::int32_t>(aCount));
+        op(opcode::I32Sub);
+        mem_store(opcode::I32StoreMem, layout::AllocExtraSize, alias::Alloc);
+    }
+
     void function_generator::slot_load(binding const* aBinding)
     {
         // (a binding's slot (its address) -> its value; a fixed binding's (see compiler::fix_bindings): a watched load (memarg flag 0x400:
@@ -2478,28 +2534,7 @@ namespace neos::compilers::javascript
             i32(static_cast<std::int32_t>(layout::SiteConstruct));
             op(opcode::I32Ne);
             branch(slow, true);
-            // (the prototype: a watched constructor's (the entry has its validity word: see the holders') is the entry's while the word
-            // has the entry's value (an optimizing tier that knows the site tests nothing); else its shape and prototype property are tested)
-            begin(control_kind::Block);
-            auto const known = iControls.size() - 1u;
-            get(entry);
-            site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteConstructValidity);
-            tee(prototype);
-            i64(0);
-            op(opcode::I64Ne);
-            op(opcode::If);
-            iCode.push_back(0x40u);
-            iControls.push_back(control{ control_kind::Block });
-            get(prototype);
-            op(opcode::I64LoadMem);
-            u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
-            u32(layout::Memory);
-            u32(0u);
-            get(entry);
-            site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteConstructValidityValue);
-            op(opcode::I64Eq);
-            branch(known, true);
-            end_control();
+            // (the prototype)
             cell_of(callee);
             tee(cell);
             mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
@@ -2515,12 +2550,12 @@ namespace neos::compilers::javascript
             op(opcode::I64Shl);
             op(opcode::I64Add);
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
+            tee(prototype);
             // (the entry's (its objects' root shape is the entry's: an object's shape is its prototype's))
             get(entry);
             site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SitePrototype);
             op(opcode::I64Ne);
             branch(slow, true);
-            end_control();
             // (its slot: the next of its size class's run of free slots (if it is within it: none (0) is not; the run's bytes were 
             // counted as allocated when the runtime took it); else the runtime's (allocate_slot: it may collect). The object is made 
             // after (one path: what it has is known to the code that follows))
@@ -4009,12 +4044,30 @@ namespace neos::compilers::javascript
                 environment_value();
                 if (!aInitialize && (aReference.target->tdz || aReference.target->lexical()) && !(aReference.hops == 0u && initialized_at(aReference.target, aSite)))
                 {
+                    // (the slot, if it is initialized (not Empty); else the runtime's assignment, which throws)
+                    environment_slot(aReference.hops, aReference.target->slot);
+                    auto const address = temporary();
+                    tee(address);
+                    mem_load(opcode::I64LoadMem, 0u, alias::EnvSlot);
+                    constant(values::Empty);
+                    op(opcode::I64Eq);
+                    op(opcode::If);
+                    iCode.push_back(0x40u);
+                    iControls.push_back(control{ control_kind::Block });
+                    environment_value();
                     i32(static_cast<std::int32_t>(aReference.hops));
                     i32(static_cast<std::int32_t>(aReference.target->slot));
                     get(value);
                     key(aReference.name);
                     runtime("env_set_checked", { I64, I32, I32, I64, I64 }, I64);
                     check_void();
+                    op(opcode::Else);
+                    get(address);
+                    get(value);
+                    mem_store(opcode::I64StoreMem, 0u, alias::EnvSlot);
+                    slot_written(aReference.target, aReference.hops);
+                    end_control();
+                    release(address);
                 }
                 else
                 {
@@ -4606,8 +4659,19 @@ namespace neos::compilers::javascript
         {
             // (more than four arguments: the extra arguments)
             iArgumentsBase = local(I32);
+            // (the extra arguments stack's size, less those beyond the first four)
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            volatile_load(opcode::I32LoadMem, layout::AllocExtraSize, false, alias::Alloc);
             get(ArgcLocal);
-            runtime("args_base", { I32 }, I32);
+            i32(static_cast<std::int32_t>(RegisterArguments));
+            op(opcode::I32Sub);
+            i32(0);
+            get(ArgcLocal);
+            i32(static_cast<std::int32_t>(RegisterArguments));
+            op(opcode::I32GtS);
+            op(opcode::Select);
+            op(opcode::I32Sub);
             set(iArgumentsBase);
         }
         enter_scope(iFunction.top);
@@ -4723,10 +4787,25 @@ namespace neos::compilers::javascript
                     get(FirstArgumentLocal + aIndex);
                 else
                 {
-                    get(ArgcLocal);
-                    get(iArgumentsBase);
+                    // (undefined if it was not passed; else on the extra arguments stack)
                     i32(static_cast<std::int32_t>(aIndex));
-                    runtime("argument", { I32, I32, I32 }, I64);
+                    get(ArgcLocal);
+                    op(opcode::I32LtS);
+                    op(opcode::If);
+                    iCode.push_back(0x7Eu);
+                    iControls.push_back(control{ control_kind::Block });
+                    op(opcode::GlobalGet);
+                    u32(iCompiler.allocation_state_global());
+                    volatile_load(opcode::I64LoadMem, layout::AllocExtra, true, alias::Alloc);
+                    get(iArgumentsBase);
+                    op(opcode::I64UConvertI32);
+                    i64(3);
+                    op(opcode::I64Shl);
+                    op(opcode::I64Add);
+                    volatile_load(opcode::I64LoadMem, static_cast<std::uint32_t>((aIndex - RegisterArguments) * 8u), false, alias::Alloc);
+                    op(opcode::Else);
+                    undefined();
+                    end_control();
                 }
             };
             if (p->is(construct::Rest))
@@ -6762,8 +6841,7 @@ namespace neos::compilers::javascript
         for (std::size_t i = RegisterArguments; i < values.size(); ++i)
         {
             get(values[i]);
-            runtime("push_arg", { I64 }, I64);
-            drop();
+            push_extra();
         }
         get(callee);
         get(thisValue);
@@ -6779,13 +6857,7 @@ namespace neos::compilers::javascript
         runtime(tail ? "tail_call" : "call", { I64, I64, I32, I64, I64, I64, I64 }, I64);
         if (argc > RegisterArguments)
         {
-            auto const result = temporary();
-            set(result);
-            i32(static_cast<std::int32_t>(argc - RegisterArguments));
-            runtime("pop_args", { I32 }, I64);
-            drop();
-            get(result);
-            release(result);
+            pop_extra(argc - RegisterArguments);
         }
         if (!tail)
             check();
@@ -7269,8 +7341,7 @@ namespace neos::compilers::javascript
         for (std::size_t i = RegisterArguments; i < values.size(); ++i)
         {
             get(values[i]);
-            runtime("push_arg", { I64 }, I64);
-            drop();
+            push_extra();
         }
         if (aTail)
         {
@@ -7323,13 +7394,7 @@ namespace neos::compilers::javascript
             release(number);
             if (argc > RegisterArguments)
             {
-                auto const result = temporary();
-                set(result);
-                i32(static_cast<std::int32_t>(argc - RegisterArguments));
-                runtime("pop_args", { I32 }, I64);
-                drop();
-                get(result);
-                release(result);
+                pop_extra(argc - RegisterArguments);
             }
             return;
         }
@@ -7437,13 +7502,7 @@ namespace neos::compilers::javascript
         release(number);
         if (argc > RegisterArguments)
         {
-            auto const result = temporary();
-            set(result);
-            i32(static_cast<std::int32_t>(argc - RegisterArguments));
-            runtime("pop_args", { I32 }, I64);
-            drop();
-            get(result);
-            release(result);
+            pop_extra(argc - RegisterArguments);
         }
         check_call();
     }
@@ -7874,8 +7933,7 @@ namespace neos::compilers::javascript
             for (std::size_t i = RegisterArguments; i < values.size(); ++i)
             {
                 get(values[i]);
-                runtime("push_arg", { I64 }, I64);
-                drop();
+                push_extra();
             }
             auto const construct = [&](std::uint32_t aNumber)
             {
@@ -7915,13 +7973,7 @@ namespace neos::compilers::javascript
                 construct(number);
             if (argc > RegisterArguments)
             {
-                auto const popped = temporary();
-                set(popped);
-                i32(static_cast<std::int32_t>(argc - RegisterArguments));
-                runtime("pop_args", { I32 }, I64);
-                drop();
-                get(popped);
-                release(popped);
+                pop_extra(argc - RegisterArguments);
             }
             check_call();
             auto const result = temporary();
@@ -8481,9 +8533,19 @@ namespace neos::compilers::javascript
                 op(opcode::If);
                 iCode.push_back(0x7Eu);
                 iControls.push_back(control{ control_kind::Block });
+                // (the empty string's concatenation with a string: that string)
+                cell_of(lhs);
+                mem_load(opcode::I32LoadMem, layout::StringLength, alias::String);
+                op(opcode::I32Eqz);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                get(rhs);
+                op(opcode::Else);
                 get(lhs);
                 get(rhs);
                 runtime("concat", { I64, I64 }, I64);
+                end_control();
                 op(opcode::Else);
                 get(lhs);
                 get(rhs);

@@ -1919,7 +1919,8 @@ namespace neos::javascript_runtime
         root_tracer const sApiRoots{ [](tracer& aTracer)
         {
             aTracer.mark(pending_exception());
-            aTracer.mark(extra_arguments());
+            auto& extra = extra_arguments();
+            aTracer.mark(std::span<value const>{ extra.data(), extra.size() });
         } };
     }
 }

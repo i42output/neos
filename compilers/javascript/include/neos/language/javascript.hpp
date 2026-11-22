@@ -319,11 +319,6 @@ namespace neos::language::javascript
                                                                     ///< knows the holder's properties (their values: cached loads))
         inline constexpr std::uint32_t SiteValidityValue = SitePrototype + 24u;    ///< (u64: the validity word's value (the second prototype's
                                                                     ///< shape's field: a holder's entry has one prototype))
-        inline constexpr std::uint32_t SiteConstructValidity = SitePrototype + 16u;    ///< (u64: SiteConstruct: the region offset of the 
-                                                                    ///< constructor's validity word (0: none): while it has the entry's value
-                                                                    ///< (SiteConstructValidityValue) the constructor's properties are the entry's
-                                                                    ///< (its shape and prototype property))
-        inline constexpr std::uint32_t SiteConstructValidityValue = SitePrototype + 24u;
         inline constexpr std::uint32_t SiteFunction = 64u;          ///< (value: the property's value, a function of the program's ...)
         inline constexpr std::uint32_t SiteNumber = 72u;            ///< (i32: ... whose number (for the dispatcher) this is (else -1))
         inline constexpr std::uint32_t SiteSlotSize = 76u;          ///< (u32: a new expression's (SiteConstruct): the size of the object's slot)
@@ -358,6 +353,11 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t AllocPlainArrays = 984u;     ///< (u64 each: %Array.prototype%'s shape, its prototype (%Object.prototype%) and
                                                                     ///< that one's shape when they were last known to have no elements (all ones:
                                                                     ///< not known): the push stub compares them with what they are)
+        inline constexpr std::uint32_t AllocExtra = 1016u;          ///< (u64: the extra arguments stack's values' region offset; u32 at +8: how 
+                                                                    ///< many it has; u32 at +12: room for how many (the arguments after the 
+                                                                    ///< first RegisterArguments' of the calls being made))
+        inline constexpr std::uint32_t AllocExtraSize = 1024u;
+        inline constexpr std::uint32_t AllocExtraCapacity = 1028u;
         inline constexpr std::uint32_t AllocTypedLength = 1008u;    ///< (value: the prototype of the typed arrays whose length the runtime
                                                                     ///< last found to be %TypedArray.prototype%'s getter's (0: none): one with
                                                                     ///< no properties of its own and that prototype has the getter's length

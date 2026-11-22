@@ -426,6 +426,9 @@ namespace neos::javascript_runtime
                                             ///< one's shape when they were last plain (see remember_plain_arrays); all ones: not known)
         std::uint64_t typedLengthProto;     ///< (compiled code's length stub: the prototype (a value) of the typed arrays whose length is
                                             ///< %TypedArray.prototype%'s getter's (see api's remember_typed_length); 0: none)
+        std::uint64_t extraArguments;       ///< (the extra arguments stack (see api's extra_stack): its values' region offset, ...
+        std::uint32_t extraSize;            ///< (... how many it has ...
+        std::uint32_t extraCapacity;        ///< (... and room for: compiled code pushes, reads and pops them)
     };
     // (an entry of the megamorphic cache (MegamorphicEntries of them): an own data property's position in the objects of a shape (a key 
     // and shape whose entry it is: by their hash (see megamorphic_index)); shapes do not change, so an entry is never wrong)

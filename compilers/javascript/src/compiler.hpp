@@ -340,6 +340,8 @@ namespace neos::compilers::javascript
                                                                 ///< the code has checked does not change (e.g. a watched holder's property))
         void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
         void environment_slot(std::uint32_t aHops, std::uint32_t aSlot);  ///< (environment -> the address of its (or an outer one's) slot)
+        void push_extra();                          ///< (a value -> pushed on the extra arguments stack (see layout::AllocExtra))
+        void pop_extra(std::uint32_t aCount);       ///< (aCount values popped from it)
         void slot_load(binding const* aBinding);    ///< (a binding's slot -> its value (a fixed binding's: a watched load))
         void slot_written(binding const* aBinding, std::uint32_t aHops);    ///< (a fixed binding's slot was written: reported if watched)
         void callee_number_of(std::uint32_t aCallee, std::optional<std::uint32_t> aSite);    ///< (-> the callee's number for the dispatcher (else -1))
