@@ -277,6 +277,10 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t ArraySparse = 37u;           ///< (u8: its elements are its properties' (not ArrayElements'))
         inline constexpr std::uint32_t StringLength = 4u;          ///< (u32: a string's length (its code units))
         inline constexpr std::uint32_t StringChars = 8u;           ///< (u64: the offset of its code units (u16), if it is flat (else 0))
+        inline constexpr std::uint32_t StringLeft = 16u;           ///< (value: a rope's left part, a slice's base; then the right, the hash 
+                                                                    ///< and array index, the flags (all 0 in a new small string))
+        inline constexpr std::uint32_t EmptyLiteralRoom = 4u;      ///< (an empty object literal's object: room for this many values in its cell)
+        inline constexpr std::uint32_t StringSize = 48u;           ///< (a small string's code units are after it, in its cell)
         inline constexpr std::uint32_t PropertySize = 32u;          ///< (a dictionary's property: its key, its value (an accessor's getter), its
                                                                     ///< setter, its attributes)
         inline constexpr std::uint32_t PropertyKey = 0u;
@@ -363,6 +367,12 @@ namespace neos::language::javascript
                                                                     ///< first RegisterArguments' of the calls being made))
         inline constexpr std::uint32_t AllocExtraSize = 1024u;
         inline constexpr std::uint32_t AllocExtraCapacity = 1028u;
+        inline constexpr std::uint32_t AllocStringHeader = 1032u;   ///< (u64: a string cell's first word (type, kind), its length (the high
+                                                                    ///< half) 0: the slice stub's new strings')
+        inline constexpr std::uint32_t AllocSmallStrings = 1040u;   ///< (u32 each (SmallStrings): a small string's of that length: its size 
+                                                                    ///< class (low 8 bits) and its slot's size)
+        inline constexpr std::uint32_t SmallStrings = 17u;
+        inline constexpr std::uint32_t AllocAsciiStrings = 1112u;   ///< (values (128): the one code unit ASCII strings (0: not made yet))
         inline constexpr std::uint32_t AllocTypedLength = 1008u;    ///< (value: the prototype of the typed arrays whose length the runtime
                                                                     ///< last found to be %TypedArray.prototype%'s getter's (0: none): one with
                                                                     ///< no properties of its own and that prototype has the getter's length

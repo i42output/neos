@@ -256,12 +256,8 @@ namespace neos::javascript_runtime
         // (single code unit strings (ASCII) are shared)
         if (aCharacter < 0x80u)
         {
-            struct ascii_strings
-            {
-                value strings[0x80] = {};
-            };
-            static isolate_local<ascii_strings> sStrings;
-            auto& s = sStrings->strings[aCharacter];
+            // (in the allocation state: compiled code's slice stub uses them)
+            auto& s = the_heap().the_allocation_state().asciiStrings[aCharacter];
             if (s == 0u)
                 s = intern(std::u16string_view{ &aCharacter, 1u });
             return s;

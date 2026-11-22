@@ -1406,6 +1406,7 @@ namespace neos
                         void movq_gx(bool aW, int aG, int aX) { sse_rr(0x66, 0x7E, aW, aX, aG); }
                         void ucomis(bool aDouble, int aA, int aB) { sse_rr(aDouble ? 0x66 : -1, 0x2E, false, aA, aB); }
                         void ucomis_m(bool aDouble, int aA, int aBase, std::int32_t aDisp) { sse_rm(aDouble ? 0x66 : -1, 0x2E, false, aA, aBase, aDisp); }
+                        void shift_x(bool aQuad, bool aLeft, int aX, std::uint8_t aCount) { op_rr({ 0x0F, static_cast<std::uint8_t>(aQuad ? 0x73 : 0x72) }, false, aLeft ? 6 : 2, aX, 0x66); emit8(aCount); }  ///< (psllq/psrlq, pslld/psrld by a count)
                         void round(bool aDouble, int aDst, int aSrc, std::uint8_t aMode) { op_rr({ 0x0F, 0x3A, static_cast<std::uint8_t>(aDouble ? 0x0B : 0x0A) }, false, aDst, aSrc, 0x66); emit8(aMode); }
                         // [rip + constant]
                         void sse_rip(int aPrefix, std::uint8_t aOp, int aReg, std::size_t aLabel)
@@ -9558,6 +9559,21 @@ namespace neos
                                 static std::uint8_t const sModes[] = { 2, 1, 3, 0 };
                                 auto const x = xmm(i.operands[0], 1);
                                 a.round(d, r, x, sModes[k - 2u]);
+                                defined(v, r);
+                                return;
+                            }
+                            if (k == 13u)
+                            {
+                                // (copysign: x with y's sign bit: x ^ ((x ^ y) & sign), the sign by shifting right and left)
+                                auto const y = i.operands[1];
+                                if (in_register(y) && where(y).reg == r && !(in_register(i.operands[0]) && where(i.operands[0]).reg == r))
+                                    r = 0;
+                                xmm_into(i.operands[0], r);
+                                xmm_into(y, 1);
+                                a.sse_rr(d ? 0x66 : -1, 0x57, false, 1, r);
+                                a.shift_x(d, false, 1, d ? 63u : 31u);
+                                a.shift_x(d, true, 1, d ? 63u : 31u);
+                                a.sse_rr(d ? 0x66 : -1, 0x57, false, r, 1);
                                 defined(v, r);
                                 return;
                             }

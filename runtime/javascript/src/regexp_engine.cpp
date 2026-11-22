@@ -2681,15 +2681,17 @@ namespace neos::javascript_runtime::regexp
             aCaptures[1] = static_cast<std::int32_t>(aInput.size());
             return match_result::Match;
         }
-        // (no code unit (from the start; sticky: at it) that a match can start with: none (the matcher's state is not read))
+        // (no code unit (from the start; sticky: at it) that a match can start with: none (the matcher's state is not read); else the
+        // search starts at the first that can (not in unicode mode, where a position within a surrogate pair is the search's to skip))
+        auto from = aStart;
         if (!aProgram.prefix.empty())
         {
-            if (!aSticky && find_prefix(aProgram, aInput, aStart) == std::u16string_view::npos)
+            if (!aSticky && (from = find_prefix(aProgram, aInput, aStart)) == std::u16string_view::npos)
                 return match_result::NoMatch;
         }
         else if (aProgram.hasFirstChar)
         {
-            if (aSticky ? (aStart >= aInput.size() || aInput[aStart] != aProgram.firstChar) : aInput.find(aProgram.firstChar, aStart) == std::u16string_view::npos)
+            if (aSticky ? (aStart >= aInput.size() || aInput[aStart] != aProgram.firstChar) : (from = aInput.find(aProgram.firstChar, aStart)) == std::u16string_view::npos)
                 return match_result::NoMatch;
         }
         else if (aProgram.hasFirstSet)
@@ -2708,9 +2710,11 @@ namespace neos::javascript_runtime::regexp
                     ++pos;
                 if (pos >= aInput.size())
                     return match_result::NoMatch;
+                from = pos;
             }
         }
-        return run(aProgram, aInput, aStart, aSticky, aCaptures);
+        bool const unicode = (aProgram.flags & (FlagUnicode | FlagUnicodeSets)) != 0u;
+        return run(aProgram, aInput, aSticky || unicode ? aStart : from, aSticky, aCaptures);
     }
 
     namespace

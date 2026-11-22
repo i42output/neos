@@ -60,6 +60,38 @@ namespace neos::javascript_runtime
                 if (is_nullish(source))
                     continue;
                 auto const from = to_object(source);
+                if (auto& o = obj(from); o.cellKind == KindObject && o.ordinaryGet)
+                {
+                    // (an ordinary object: its own properties are its table's (none: nothing to copy); up to a few of string keys (not array
+                    // indices: those come first, in their order) in the table's order (its keys taken first, as OwnPropertyKeys'))
+                    auto const count = o.properties.size();
+                    if (count == 0u)
+                        continue;
+                    constexpr std::size_t MaxKeys = 16u;
+                    if (count <= MaxKeys)
+                    {
+                        value keys[MaxKeys];
+                        std::size_t n = 0u;
+                        bool plain = true;
+                        o.properties.for_each([&](property const& p)
+                        {
+                            if (n == MaxKeys || is_symbol(p.key) || array_index(p.key))
+                                plain = false;
+                            else
+                                keys[n++] = p.key;
+                        });
+                        if (plain && n == count)
+                        {
+                            for (std::size_t k = 0u; k < n; ++k)
+                            {
+                                auto const desc = obj(from).get_own_property(keys[k]);
+                                if (desc && desc->enumerable.value_or(false))
+                                    set(to, keys[k], get(from, keys[k]), true);
+                            }
+                            continue;
+                        }
+                    }
+                }
                 for (auto const key : obj(from).own_property_keys())
                 {
                     auto const desc = obj(from).get_own_property(key);

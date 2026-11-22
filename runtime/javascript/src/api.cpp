@@ -149,6 +149,10 @@ namespace neos::javascript_runtime
                 offsetof(allocation_state, typedLengthProto) == jsl::AllocTypedLength &&
                 offsetof(allocation_state, extraArguments) == jsl::AllocExtra && offsetof(allocation_state, extraSize) == jsl::AllocExtraSize &&
                 offsetof(allocation_state, extraCapacity) == jsl::AllocExtraCapacity &&
+                offsetof(allocation_state, stringHeader) == jsl::AllocStringHeader &&
+                offsetof(allocation_state, smallStrings) == jsl::AllocSmallStrings &&
+                offsetof(allocation_state, asciiStrings) == jsl::AllocAsciiStrings && string::SmallCapacity + 1u == jsl::SmallStrings &&
+                std::size(allocation_state{}.smallStrings) == jsl::SmallStrings && sizeof(string) == jsl::StringSize &&
                 property_table::dictionary_proto_field() == jsl::DictionaryProto &&
                 MegamorphicEntries == jsl::MegamorphicEntries && sizeof(megamorphic_entry) == jsl::MegamorphicEntrySize &&
                 offsetof(megamorphic_entry, key) == jsl::MegamorphicKey && offsetof(megamorphic_entry, position) == jsl::MegamorphicPosition &&
@@ -169,7 +173,9 @@ namespace neos::javascript_runtime
                     field(probe, &probe.slots), field(probe, &probe.watched), field(f, &f.environment));
             javascript_runtime::string const text{};
             bool const stringOk = field(text, &text.length) == jsl::StringLength && sizeof(text.length) == 4u &&
-                field(text, &text.charsOffset) == jsl::StringChars;
+                field(text, &text.charsOffset) == jsl::StringChars && field(text, &text.left) == jsl::StringLeft &&
+                field(text, &text.right) == jsl::StringLeft + 8u && field(text, &text.hashValue) == jsl::StringLeft + 16u &&
+                field(text, &text.arrayIndex) == jsl::StringLeft + 20u;
             if (!stringOk)
                 std::fprintf(stderr, "JavaScript runtime: string length %zu, chars %zu\n", field(text, &text.length), field(text, &text.charsOffset));
             array_object const array{ Undefined };
@@ -2239,10 +2245,11 @@ namespace neos::javascript_runtime
             auto* const cell = reinterpret_cast<std::byte*>(&o);
             if (o.properties.values_offset() != region_offset(cell + base))
                 return Undefined;   // (its values are not in its cell)
+            // (its cell's size class (it may have room for more than its properties: an empty literal's): its template's)
             auto& h = the_heap();
-            auto const sizeClass = h.size_class(base + static_cast<std::size_t>(aCount) * sizeof(value));
-            auto const slotSize = h.class_size(sizeClass);
-            if (h.slot_size_of(cell) != slotSize)
+            auto const slotSize = h.slot_size_of(cell);
+            auto const sizeClass = h.size_class(slotSize);
+            if (h.class_size(sizeClass) != slotSize || slotSize < base + static_cast<std::size_t>(aCount) * sizeof(value))
                 return Undefined;
             site_ref const entries = site_of(aSite);
             if (entries == nullptr || entries[0].kind != jsl::SiteNone)

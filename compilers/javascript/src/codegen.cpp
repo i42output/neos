@@ -2869,8 +2869,9 @@ namespace neos::compilers::javascript
 
     bool function_generator::simple_object_literal(node* aNode)
     {
-        // (an object literal whose properties are data properties of identifier keys (not __proto__), each once)
-        if (aNode->size() == 0u || aNode->size() > layout::MaxLiteralProperties)
+        // (an object literal whose properties (none, or up to MaxLiteralProperties) are data properties of identifier keys (not __proto__),
+        // each once)
+        if (aNode->size() > layout::MaxLiteralProperties)
             return false;
         std::set<std::string> keys;
         for (auto* p : aNode->children)
@@ -3053,6 +3054,277 @@ namespace neos::compilers::javascript
         runtime("char_code_at", { I64, I64, I64 }, I64);
         end_control();
         end_control();
+        release(chars);
+        release(cell);
+    }
+
+    void function_generator::string_slice_stub()
+    {
+        // (the slice stub's code (its parameters: callee (the realm's %String.prototype.slice%), this, start, end): s.slice(i, j) of a 
+        // flat string s, i and j (or undefined) integers in [0, its length) whose result has 1 to string::SmallCapacity code units and 
+        // is shorter than s: a one code unit ASCII string (the runtime's shared one, once made), else a small string made in line (its
+        // cell from its size class's run of free slots: as the runtime's make_small_string makes it). Else the runtime's slice_direct)
+        std::uint32_t const callee = 0u, thisValue = 1u, start = 2u, end = 3u;
+        auto const cell = temporary();
+        auto const chars = temporary();
+        auto const length = temporary();
+        auto const from = temporary();
+        auto const count = temporary();
+        auto const state = temporary();
+        auto const list = temporary();
+        auto const slot = temporary();
+        auto const info = temporary();
+        auto const index = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            get(thisValue);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagString);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            cell_of(thisValue);
+            tee(cell);
+            offset_load(layout::StringChars, alias::String);
+            tee(chars);
+            op(opcode::I64Eqz);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::StringLength, alias::String);
+            set(length);
+            // (a position: a number that is an integer in [0, the length]; else the runtime's)
+            auto const position = [&](std::uint32_t aPosition)
+            {
+                get(aPosition);
+                constant(values::TagSpecial);
+                op(opcode::I64GeU);
+                branch(miss, true);
+                get(aPosition);
+                op(opcode::F64ReinterpretI64);
+                f64(0.0);
+                op(opcode::F64Ge);
+                get(aPosition);
+                op(opcode::F64ReinterpretI64);
+                get(length);
+                op(opcode::F64SConvertI64);
+                op(opcode::F64Le);
+                op(opcode::I32And);
+                op(opcode::I32Eqz);
+                branch(miss, true);
+                get(aPosition);
+                op(opcode::F64ReinterpretI64);
+                op(opcode::I64SConvertF64);
+                tee(index);
+                op(opcode::F64SConvertI64);
+                get(aPosition);
+                op(opcode::F64ReinterpretI64);
+                op(opcode::F64Ne);
+                branch(miss, true);
+                get(index);
+            };
+            position(start);
+            set(from);
+            get(end);
+            undefined();
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Eu);
+            iControls.push_back(control{ control_kind::Block });
+            get(length);
+            op(opcode::Else);
+            position(end);
+            end_control();
+            get(from);
+            op(opcode::I64Sub);
+            tee(count);
+            i64(1);
+            op(opcode::I64LtS);
+            get(count);
+            i64(static_cast<std::int64_t>(layout::SmallStrings - 1u));
+            op(opcode::I64GtS);
+            op(opcode::I32Ior);
+            get(count);
+            get(length);
+            op(opcode::I64GeU);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            set(state);
+            get(chars);
+            get(from);
+            i64(1);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            set(chars);
+            // (one code unit: the shared string, if it is ASCII and has been made)
+            get(count);
+            i64(1);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            {
+                get(chars);
+                mem_load(opcode::I64LoadMem16U, 0u, alias::String);
+                tee(index);
+                i64(0x80);
+                op(opcode::I64GeU);
+                branch(miss, true);
+                get(state);
+                get(index);
+                i64(3);
+                op(opcode::I64Shl);
+                op(opcode::I64Add);
+                volatile_load(opcode::I64LoadMem, layout::AllocAsciiStrings, false, alias::Alloc);
+                tee(index);
+                op(opcode::I64Eqz);
+                branch(miss, true);
+                get(index);
+                branch(done, false);
+            }
+            end_control();
+            // (its cell: its size class's next free slot (that run's bytes were counted when the runtime took it); none: the runtime's)
+            get(state);
+            get(count);
+            i64(2);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            mem_load(opcode::I64LoadMem32U, layout::AllocSmallStrings, alias::Alloc);
+            tee(info);
+            i64(0xFF);
+            op(opcode::I64And);
+            i64(3);
+            op(opcode::I64Shl);
+            get(state);
+            op(opcode::I64Add);
+            tee(list);
+            volatile_load(opcode::I64LoadMem, layout::AllocBump, true, alias::Alloc);
+            tee(slot);
+            get(info);
+            i64(8);
+            op(opcode::I64ShrU);
+            op(opcode::I64Add);
+            tee(index);
+            get(list);
+            volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
+            op(opcode::I64GtU);
+            get(slot);
+            op(opcode::I64Eqz);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(list);
+            get(index);
+            mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
+            // (a region offset (of a cell: within the handles' range): masked, as the construct stub's)
+            get(slot);
+            i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
+            op(opcode::I64And);
+            set(slot);
+            // (the string: its first word (type, kind, length), its code units' offset (after its members), the rest of its members 0,
+            // then its code units; stores of a new cell's words (Header: no code reads them yet))
+            get(slot);
+            get(state);
+            volatile_load(opcode::I64LoadMem, layout::AllocStringHeader, false, alias::Alloc);
+            get(count);
+            i64(32);
+            op(opcode::I64Shl);
+            op(opcode::I64Ior);
+            mem_store(opcode::I64StoreMem, 0u, alias::Header);
+            get(slot);
+            get(slot);
+            i64(static_cast<std::int64_t>(layout::StringSize));
+            op(opcode::I64Add);
+            mem_store(opcode::I64StoreMem, layout::StringChars, alias::Header);
+            for (std::uint32_t word = layout::StringLeft; word < layout::StringSize; word += 8u)
+            {
+                get(slot);
+                i64(0);
+                mem_store(opcode::I64StoreMem, word, alias::Header);
+            }
+            // (its code units: by words (4 code units each) if the source has as many after them (its region's next words are not 
+            // read beyond its end); else one by one. The cell has room for the words (its size class's size is a multiple of 8))
+            get(from);
+            get(count);
+            i64(3);
+            op(opcode::I64Add);
+            i64(~std::int64_t{ 3 });
+            op(opcode::I64And);
+            op(opcode::I64Add);
+            get(length);
+            op(opcode::I64LeU);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            for (std::uint32_t word = 0u; word < (layout::SmallStrings - 1u) / 4u; ++word)
+            {
+                if (word != 0u)
+                {
+                    get(count);
+                    i64(static_cast<std::int64_t>(word * 4u));
+                    op(opcode::I64GtU);
+                    op(opcode::If);
+                    iCode.push_back(0x40u);
+                    iControls.push_back(control{ control_kind::Block });
+                }
+                get(slot);
+                get(chars);
+                mem_load(opcode::I64LoadMem, word * 8u, alias::String);
+                mem_store(opcode::I64StoreMem, layout::StringSize + word * 8u, alias::Header);
+            }
+            for (std::uint32_t word = 1u; word < (layout::SmallStrings - 1u) / 4u; ++word)
+                end_control();
+            op(opcode::Else);
+            i64(0);
+            set(index);
+            begin(control_kind::Loop);
+            {
+                get(slot);
+                get(index);
+                op(opcode::I64Add);
+                get(chars);
+                get(index);
+                op(opcode::I64Add);
+                mem_load(opcode::I32LoadMem16U, 0u, alias::String);
+                mem_store(opcode::I32StoreMem16, layout::StringSize, alias::Header);
+                get(index);
+                i64(2);
+                op(opcode::I64Add);
+                tee(index);
+                get(count);
+                i64(1);
+                op(opcode::I64Shl);
+                op(opcode::I64LtU);
+                op(opcode::BrIf);
+                u32(0u);
+            }
+            end_control();
+            end_control();
+            get(slot);
+            i64(static_cast<std::int64_t>(layout::HandleShift));
+            op(opcode::I64ShrU);
+            constant(values::TagString);
+            op(opcode::I64Ior);
+            branch(done, false);
+        }
+        end_control();
+        get(callee);
+        get(thisValue);
+        get(start);
+        get(end);
+        runtime("slice_direct", { I64, I64, I64, I64 }, I64);
+        end_control();
+        release(index);
+        release(info);
+        release(slot);
+        release(list);
+        release(state);
+        release(count);
+        release(from);
+        release(length);
         release(chars);
         release(cell);
     }
@@ -3505,7 +3777,8 @@ namespace neos::compilers::javascript
             { "%js.object_literal", { I32, I32 }, I64 },
             { "%js.array_push", { I64, I64, I64 }, I64 },
             { "%js.array_pop", { I64, I64 }, I64 },
-            { "%js.get_named_first", { I64, I64, I32 }, I64 }
+            { "%js.get_named_first", { I64, I64, I32 }, I64 },
+            { "%js.string_slice", { I64, I64, I64, I64 }, I64 }
         };
         static_assert(std::size(sStubs) == static_cast<std::size_t>(function_generator::stub::Count));
         auto const& s = sStubs[static_cast<std::size_t>(aStub)];
@@ -3554,6 +3827,10 @@ namespace neos::compilers::javascript
         case stub::CharCodeAt:
             iParameterCount = 4u;
             char_code_at_stub();
+            break;
+        case stub::StringSlice:
+            iParameterCount = 4u;
+            string_slice_stub();
             break;
         case stub::ToBoolean:
             iParameterCount = 1u;
@@ -7823,7 +8100,10 @@ namespace neos::compilers::javascript
                         else
                             undefined();
                     }
-                    runtime(direct.runtime != nullptr ? std::string{ direct.runtime } : "native_direct" + std::to_string(count), parameters, I64);
+                    if (direct.method == "slice")
+                        call_stub(stub::StringSlice);   // (its in-line path, else slice_direct)
+                    else
+                        runtime(direct.runtime != nullptr ? std::string{ direct.runtime } : "native_direct" + std::to_string(count), parameters, I64);
                     if (!tail)
                         check();
                 }
@@ -9532,7 +9812,8 @@ namespace neos::compilers::javascript
             iCode.push_back(0x40u);
             iControls.push_back(control{ control_kind::Block });
             {
-                i32(count);
+                // (an empty literal's object has room for a few properties (as V8 gives it): those added to it soon after are in its cell)
+                i32(count != 0 ? count : static_cast<std::int32_t>(layout::EmptyLiteralRoom));
                 runtime("object_with", { I32 }, I64);
                 set(object);
                 for (std::size_t i = 0u; i < values.size(); ++i)
