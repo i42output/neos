@@ -629,6 +629,31 @@ namespace neos::compilers::javascript
                 call("javascript::template_sites", { I32, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
+            if (closure_table_used())
+            {
+                // (the closure table's words of the program's functions (or of an extension's: numbered from its first function's 
+                // number), whose offset is the global's)
+                std::int32_t count = 0;
+                for (auto const& f : iFunctions)
+                    count += (f.generator || f.async) && !f.script ? 2 : 1;
+                put_op(code, opcode::I32Const);
+                if (iUnitFirst)
+                {
+                    statement.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), iFunctions.front().index });
+                    code.resize(code.size() + 5u);
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(*iUnitFirst));
+                    put_op(code, opcode::I32Sub);
+                }
+                else
+                    put_s64(code, 0);
+                put_op(code, opcode::I32Const);
+                put_s64(code, count);
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(closure_table_global()));
+                call("javascript::closure_table", { I32, I32, I32 }, I64);
+                put_op(code, opcode::Drop);
+            }
             if (!iUnitFirst && iPropertySites != 0u)
             {
                 // (the program's property cache sites: their table, whose offset is the global's)
@@ -1307,19 +1332,60 @@ namespace neos::compilers::javascript
         }
     }
 
+    void function_generator::slot_load(binding const* aBinding)
+    {
+        // (a binding's slot (its address) -> its value; a fixed binding's (see compiler::fix_bindings): a watched load (memarg flag 0x400:
+        // the runtime reports each write of a slot of an environment that an optimizing tier may know (see slot_written)))
+        op(opcode::I64LoadMem);
+        u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | (aBinding->fixed ? 0x400u : 0u) | alias_flags(alias::EnvSlot));
+        u32(layout::Memory);
+        u32(0u);
+    }
+
+    void function_generator::slot_written(binding const* aBinding, std::uint32_t aHops)
+    {
+        // (a fixed binding's slot was written: if its environment is watched (it is the one that a function's objects all have, or an
+        // ancestor of it (see the runtime's closure_made): an optimizing tier may know it) the runtime reports the write)
+        if (!aBinding->fixed)
+            return;
+        auto const environment = temporary();
+        environment_value();
+        set(environment);
+        for (std::uint32_t i = 0u; i < aHops; ++i)
+        {
+            cell_of(environment);
+            cached_load(opcode::I64LoadMem, layout::EnvironmentParent, alias::Env, false);
+            set(environment);
+        }
+        cell_of(environment);
+        volatile_load(opcode::I64LoadMem, layout::EnvironmentWatched, false, alias::Env);
+        op(opcode::I64Eqz);
+        op(opcode::I32Eqz);
+        op(opcode::If);
+        iCode.push_back(0x40u);
+        iControls.push_back(control{ control_kind::Block });
+        get(environment);
+        i32(static_cast<std::int32_t>(aBinding->slot));
+        runtime("environment_written", { I64, I32 }, I64);
+        drop();
+        end_control();
+        release(environment);
+    }
+
     void function_generator::environment_slot(std::uint32_t aHops, std::uint32_t aSlot)
     {
-        // (an environment (on the stack) -> the address of the slot of the environment aHops above it)
+        // (an environment (on the stack) -> the address of the slot of the environment aHops above it; an environment's parent and its
+        // slots' offset do not change (cached loads: an optimizing tier that knows the environment knows them))
         auto const environment = temporary();
         set(environment);
         for (std::uint32_t i = 0u; i < aHops; ++i)
         {
             cell_of(environment);
-            mem_load(opcode::I64LoadMem, layout::EnvironmentParent, alias::Env);
+            cached_load(opcode::I64LoadMem, layout::EnvironmentParent, alias::Env, false);
             set(environment);
         }
         cell_of(environment);
-        offset_load(layout::EnvironmentSlots, alias::Env);
+        cached_load(opcode::I64LoadMem, layout::EnvironmentSlots, alias::Env, true);
         if (aSlot != 0u)
         {
             i64(static_cast<std::int64_t>(aSlot) * 8);
@@ -2412,7 +2478,28 @@ namespace neos::compilers::javascript
             i32(static_cast<std::int32_t>(layout::SiteConstruct));
             op(opcode::I32Ne);
             branch(slow, true);
-            // (the prototype)
+            // (the prototype: a watched constructor's (the entry has its validity word: see the holders') is the entry's while the word
+            // has the entry's value (an optimizing tier that knows the site tests nothing); else its shape and prototype property are tested)
+            begin(control_kind::Block);
+            auto const known = iControls.size() - 1u;
+            get(entry);
+            site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteConstructValidity);
+            tee(prototype);
+            i64(0);
+            op(opcode::I64Ne);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            get(prototype);
+            op(opcode::I64LoadMem);
+            u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
+            u32(layout::Memory);
+            u32(0u);
+            get(entry);
+            site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteConstructValidityValue);
+            op(opcode::I64Eq);
+            branch(known, true);
+            end_control();
             cell_of(callee);
             tee(cell);
             mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
@@ -2428,12 +2515,12 @@ namespace neos::compilers::javascript
             op(opcode::I64Shl);
             op(opcode::I64Add);
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
-            tee(prototype);
             // (the entry's (its objects' root shape is the entry's: an object's shape is its prototype's))
             get(entry);
             site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SitePrototype);
             op(opcode::I64Ne);
             branch(slow, true);
+            end_control();
             // (its slot: the next of its size class's run of free slots (if it is within it: none (0) is not; the run's bytes were 
             // counted as allocated when the runtime took it); else the runtime's (allocate_slot: it may collect). The object is made 
             // after (one path: what it has is known to the code that follows))
@@ -3803,7 +3890,7 @@ namespace neos::compilers::javascript
             }
             // (the slot (in the runtime's heap: read here))
             environment_slot(aReference.hops, aReference.target->slot);
-            mem_load(opcode::I64LoadMem, 0u, alias::EnvSlot);
+            slot_load(aReference.target);
             if ((aReference.target->tdz || aReference.target->lexical()) && !(aReference.hops == 0u && initialized_at(aReference.target, aSite)))
             {
                 // (an uninitialized binding (Empty): a ReferenceError)
@@ -3935,6 +4022,7 @@ namespace neos::compilers::javascript
                     environment_slot(aReference.hops, aReference.target->slot);
                     get(value);
                     mem_store(opcode::I64StoreMem, 0u, alias::EnvSlot);
+                    slot_written(aReference.target, aReference.hops);
                 }
             }
             break;
@@ -4012,7 +4100,7 @@ namespace neos::compilers::javascript
         }
         environment_value();
         environment_slot(hops, aBinding->slot);
-        mem_load(opcode::I64LoadMem, 0u, alias::EnvSlot);
+        slot_load(aBinding);
     }
 
     void function_generator::initialize_binding(binding* aBinding)
@@ -4038,6 +4126,7 @@ namespace neos::compilers::javascript
         get(value);
         mem_store(opcode::I64StoreMem, 0u, alias::EnvSlot);
         release(value);
+        slot_written(aBinding, hops);
     }
 
     // --- the function
@@ -4369,8 +4458,37 @@ namespace neos::compilers::javascript
         if (!iFunction.script && needsEnvironment)
         {
             iFunctionEnvironment = local();
-            cell_of(CalleeLocal);
-            mem_load(opcode::I64LoadMem, layout::FunctionEnvironment, alias::Function);     // (the callee's closure)
+            if (iCompiler.closure_table_used())
+            {
+                // (the environment that the function's objects all have (its closure table's word: a watched load (see site_word); an
+                // optimizing tier knows it), else the callee's)
+                auto const word = temporary();
+                op(opcode::GlobalGet);
+                u32(iCompiler.closure_table_global());
+                i64(static_cast<std::int64_t>(iFunction.number) * 8);
+                op(opcode::I64Add);
+                op(opcode::I64LoadMem);
+                u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Site));
+                u32(layout::Memory);
+                u32(0u);
+                tee(word);
+                i64(static_cast<std::int64_t>(layout::ClosuresMany));
+                op(opcode::I64GtU);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                get(word);
+                op(opcode::Else);
+                cell_of(CalleeLocal);
+                mem_load(opcode::I64LoadMem, layout::FunctionEnvironment, alias::Function);     // (the callee's closure)
+                end_control();
+                release(word);
+            }
+            else
+            {
+                cell_of(CalleeLocal);
+                mem_load(opcode::I64LoadMem, layout::FunctionEnvironment, alias::Function);     // (the callee's closure)
+            }
             set(*iFunctionEnvironment);
         }
         if (iFunction.script && iCompiler.iModule)

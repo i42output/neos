@@ -158,12 +158,13 @@ namespace neos::javascript_runtime
             };
             function_object const f{ Undefined, function_kind::Native };
             bool const environmentOk = field(probe, &probe.parent) == jsl::EnvironmentParent &&
-                field(probe, &probe.slots) == jsl::EnvironmentSlots && field(f, &f.environment) == jsl::FunctionEnvironment &&
+                field(probe, &probe.slots) == jsl::EnvironmentSlots && field(probe, &probe.watched) == jsl::EnvironmentWatched &&
+                field(f, &f.environment) == jsl::FunctionEnvironment &&
                 field(f, &f.dispatch) == jsl::FunctionDispatch && static_cast<std::uint32_t>(object_class::Function) == jsl::ClassFunction &&
                 field(f, &f.cls) == jsl::ObjectClass;
             if (!environmentOk)
-                std::fprintf(stderr, "JavaScript runtime: environment parent %zu, slots %zu; function environment %zu\n", field(probe, &probe.parent),
-                    field(probe, &probe.slots), field(f, &f.environment));
+                std::fprintf(stderr, "JavaScript runtime: environment parent %zu, slots %zu, watched %zu; function environment %zu\n", field(probe, &probe.parent),
+                    field(probe, &probe.slots), field(probe, &probe.watched), field(f, &f.environment));
             javascript_runtime::string const text{};
             bool const stringOk = field(text, &text.length) == jsl::StringLength && sizeof(text.length) == 4u &&
                 field(text, &text.charsOffset) == jsl::StringChars;
@@ -823,27 +824,48 @@ namespace neos::javascript_runtime
             return v;
         }
 
+        void slot_written(environment const& aEnvironment, value const& aSlot)
+        {
+            // (a slot of a watched environment (see closure_made) was written: reported (an optimizing tier may know its value))
+            if (aEnvironment.watched != 0u)
+                validity_changed(&aSlot);
+        }
+
+        value environment_written(value aEnvironment, std::int32_t aSlot)
+        {
+            // (compiled code wrote a fixed binding's slot of a watched environment)
+            auto const& e = cell_of<environment>(aEnvironment);
+            slot_written(e, e.slots[static_cast<std::size_t>(aSlot)]);
+            return Undefined;
+        }
+
         value env_set(value aEnvironment, std::int32_t aHops, std::int32_t aSlot, value aValue)
         {
-            cell_of<environment>(environment_at(aEnvironment, aHops)).slots[static_cast<std::size_t>(aSlot)] = aValue;
+            auto& e = cell_of<environment>(environment_at(aEnvironment, aHops));
+            e.slots[static_cast<std::size_t>(aSlot)] = aValue;
+            slot_written(e, e.slots[static_cast<std::size_t>(aSlot)]);
             return aValue;
         }
 
         value env_set_checked(value aEnvironment, std::int32_t aHops, std::int32_t aSlot, value aValue, value aName)
         {
-            auto& slot = cell_of<environment>(environment_at(aEnvironment, aHops)).slots[static_cast<std::size_t>(aSlot)];
+            auto& e = cell_of<environment>(environment_at(aEnvironment, aHops));
+            auto& slot = e.slots[static_cast<std::size_t>(aSlot)];
             if (slot == Empty)
                 return throw_tdz(aName);
             slot = aValue;
+            slot_written(e, slot);
             return aValue;
         }
 
         value env_bind_this(value aEnvironment, std::int32_t aHops, std::int32_t aSlot, value aValue)
         {
-            auto& slot = cell_of<environment>(environment_at(aEnvironment, aHops)).slots[static_cast<std::size_t>(aSlot)];
+            auto& e = cell_of<environment>(environment_at(aEnvironment, aHops));
+            auto& slot = e.slots[static_cast<std::size_t>(aSlot)];
             if (slot != Empty)
                 return throw_super_twice();
             slot = aValue;
+            slot_written(e, slot);
             return aValue;
         }
 
@@ -864,11 +886,113 @@ namespace neos::javascript_runtime
 
         // --- functions
 
+        // (the programs' closure tables: for each function of a program's (by its number) the environment that its function objects
+        // have, while they all have the same one (see layout::ClosuresNone): compiled code reads its function's word (a watched load:
+        // each change is reported), so that optimized code knows the environment (and what it holds) of a function whose objects all
+        // have it (e.g. a module's functions); a program's table: its own functions' words, then those of each of its extensions (see
+        // deferred_function): none of them moves (compiled code has their offsets))
+        struct closure_chunk
+        {
+            std::uint32_t first = 0u;       ///< (its first function's number)
+            region_vector<value> words;
+        };
+        struct closure_tables
+        {
+            std::unordered_map<void*, std::deque<closure_chunk>> tables;
+            void* lastProgram = nullptr;
+            std::deque<closure_chunk>* lastTable = nullptr;
+        };
+        closure_tables& the_closure_tables()
+        {
+            static isolate_local<closure_tables> sTables;
+            return *sTables;
+        }
+        // (the environments that the words have: kept (another environment that had the same handle would seem to be the same one))
+        root_tracer const sClosureRoots{ [](tracer& aTracer)
+        {
+            for (auto& [program, table] : the_closure_tables().tables)
+                for (auto& chunk : table)
+                    for (std::size_t i = 0u; i < chunk.words.size(); ++i)
+                        if (auto const w = chunk.words[i]; w != neos::language::javascript::layout::ClosuresNone && 
+                            w != neos::language::javascript::layout::ClosuresMany)
+                            aTracer.mark(w);
+        } };
+
+        value closure_table(std::int32_t aFirst, std::int32_t aCount, std::int32_t aGlobal)
+        {
+            // (the closure table's words of the program's functions (aFirst 0) or of an extension's (numbered from aFirst): their
+            // offset is the global aGlobal's)
+            return guard([&]() -> value
+            {
+                auto& t = the_closure_tables();
+                auto& table = t.tables[current_program()];
+                // (a program whose code is run again (e.g. Function's, for the same source) keeps its words: its code may have their 
+                // offset, and its function objects of the earlier run are still those of its functions)
+                closure_chunk* chunk = nullptr;
+                for (auto& c : table)
+                    if (c.first == static_cast<std::uint32_t>(aFirst) && c.words.size() == static_cast<std::size_t>(std::max(aCount, 1)))
+                        chunk = &c;
+                if (chunk == nullptr)
+                {
+                    chunk = &table.emplace_back();
+                    chunk->first = static_cast<std::uint32_t>(aFirst);
+                    chunk->words.resize(static_cast<std::size_t>(std::max(aCount, 1)), neos::language::javascript::layout::ClosuresNone);
+                }
+                t.lastProgram = nullptr;
+                t.lastTable = nullptr;
+                *program_word(aGlobal) = region_offset(chunk->words.data());
+                fix_program_word(aGlobal);
+                publish_heap();
+                return Undefined;
+            });
+        }
+
+        void closure_made(std::uint32_t aNumber, value aEnvironment)
+        {
+            // (a function object of the running program's function aNumber, closed over aEnvironment: its word (each change reported)) 
+            namespace jsl = neos::language::javascript::layout;
+            auto& t = the_closure_tables();
+            auto* const program = current_program();
+            if (program != t.lastProgram || t.lastTable == nullptr)
+            {
+                auto const existing = t.tables.find(program);
+                if (existing == t.tables.end())
+                    return;
+                t.lastProgram = program;
+                t.lastTable = &existing->second;
+            }
+            for (auto chunk = t.lastTable->rbegin(); chunk != t.lastTable->rend(); ++chunk)
+                if (aNumber >= chunk->first)
+                {
+                    if (aNumber - chunk->first >= chunk->words.size())
+                        return;
+                    auto& word = chunk->words[aNumber - chunk->first];
+                    if (word == aEnvironment || word == jsl::ClosuresMany)
+                        return;
+                    if (word == jsl::ClosuresNone)
+                    {
+                        // (the environment and its ancestors are watched: writes of their fixed bindings' slots are reported (an optimizing
+                        // tier that knows the environment knows them))
+                        for (auto e = aEnvironment; is_internal(e); e = cell_of<environment>(e).parent)
+                        {
+                            auto& c = cell_of<environment>(e);
+                            if (c.watched != 0u)
+                                break;
+                            c.watched = 1u;
+                        }
+                    }
+                    word = word == jsl::ClosuresNone ? aEnvironment : jsl::ClosuresMany;
+                    validity_changed(&word);
+                    return;
+                }
+        }
+
         value closure(std::int32_t aNumber, std::int32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::int32_t aLength, value aSource,
             std::uint64_t aSourceRange)
         {
             return guard([&]() -> value
             {
+                closure_made(static_cast<std::uint32_t>(aNumber), aEnvironment);
                 return make_closure(static_cast<std::uint32_t>(aNumber), static_cast<std::uint32_t>(aIndex), aEnvironment, aFlags, aName,
                     static_cast<std::uint32_t>(aLength), aSource, aSourceRange);
             });
@@ -1998,6 +2122,16 @@ namespace neos::javascript_runtime
                     e.added = h.object_template(sizeClass, (slotSize - base) / sizeof(value));
                     e.reserved2 = slotSize;
                     e.prototypes[0] = { prototype, shape_word(root) };
+                    // (the constructor is watched (its validity word changes when its properties do): compiled code that finds the word's 
+                    // value the entry's knows its prototype without testing it; watching it gives it a shape of its own, which the entry 
+                    // and the constructor's prototype shape then are)
+                    e.prototypes[1] = { 0u, 0u };
+                    if (auto* const word = watch(f); word != nullptr && f.properties.layout() != nullptr)
+                    {
+                        f.prototypeShape = f.properties.layout();
+                        e.shape = shape_word(f.prototypeShape);
+                        e.prototypes[1] = { region_offset(word), *word };
+                    }
                     break;
                 }
                 return thisValue;
@@ -3085,6 +3219,8 @@ namespace neos::javascript_runtime
             { "get_named", NEOS_RT_FUNCTION(get_named), I64, 2u, { I64, I64 }, 0u },
             { "get_named_cached", NEOS_RT_FUNCTION(get_named_cached), I64, 3u, { I64, I64, I32 }, 0u },
             { "property_sites", NEOS_RT_FUNCTION(property_sites), I64, 2u, { I32, I32 }, 0u },
+            { "closure_table", NEOS_RT_FUNCTION(closure_table), I64, 3u, { I32, I32, I32 }, 0u },
+            { "environment_written", NEOS_RT_FUNCTION(environment_written), I64, 2u, { I64, I32 }, 0u },
             { "fixed_global", NEOS_RT_FUNCTION(fixed_global), I64, 2u, { I64, I32 }, 0u },
             { "get_cached", NEOS_RT_FUNCTION(get_cached), I64, 3u, { I64, I64, I32 }, 0u },
             { "callee_number_cached", NEOS_RT_FUNCTION(callee_number_cached), I32, 2u, { I64, I32 }, 0u },
@@ -3286,5 +3422,14 @@ namespace neos::javascript_runtime
             }
         }
         std::erase_if(words, [&](api::program_word_use const& w) { return w.program == program; });
+        // (and the environments of its closure tables' words are no longer kept (their words stay: compiled code has their offsets))
+        if (auto const table = api::the_closure_tables().tables.find(program); table != api::the_closure_tables().tables.end())
+            for (auto& chunk : table->second)
+                for (std::size_t i = 0u; i < chunk.words.size(); ++i)
+                    if (chunk.words[i] != neos::language::javascript::layout::ClosuresNone && chunk.words[i] != neos::language::javascript::layout::ClosuresMany)
+                    {
+                        chunk.words[i] = neos::language::javascript::layout::ClosuresMany;
+                        validity_changed(&chunk.words[i]);
+                    }
     }
 }

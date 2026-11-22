@@ -944,6 +944,8 @@ namespace neos::compilers::javascript
                 if (!(aScope->kind != scope_kind::Function && !aScope->function->strict && existing->kind == binding_kind::Function && aKind == binding_kind::Function))
                     error(aDeclaration != nullptr ? aDeclaration->source : iSource, "Identifier '" + aName + "' has already been declared");
             }
+            if (aDeclaration == nullptr || existing->declaration != aDeclaration)
+                existing->assigned = true;
             if (aKind == binding_kind::Function && existing->kind != binding_kind::Parameter)
                 existing->kind = binding_kind::Function;
             if (aKind == binding_kind::Function)
@@ -1193,6 +1195,11 @@ namespace neos::compilers::javascript
             if (function->body->find(name) == nullptr && function->top->find(name) == nullptr)
                 declare(function->body, name, binding_kind::Var, nullptr);     // (the var scope: the body's, if parameters have expressions)
             declaration->annexB = true;
+            // (its var binding is written when the block's function declaration is evaluated)
+            if (auto* b = function->body->find(name); b != nullptr)
+                b->assigned = true;
+            if (auto* b = function->top->find(name); b != nullptr)
+                b->assigned = true;
         }
         iAnnexBFunctions.clear();
         // (a script's top-level lexical declarations are bindings of the global lexical environment that other scripts (e.g. eval code,
@@ -1210,6 +1217,7 @@ namespace neos::compilers::javascript
         // (references: captured bindings)
         for (auto* statement : aScript->children)
             resolve_uses(statement, script->top, script);
+        fix_bindings();
         analyse_function(*script);
     }
 
@@ -2060,6 +2068,31 @@ namespace neos::compilers::javascript
             collect(c, aScope, aFunction);
     }
 
+    namespace
+    {
+        bool assignment_target(node const* aSite)
+        {
+            // (a reference that an assignment, an update or a for-in/of statement may write (perhaps in a pattern, perhaps parenthesized);
+            // an identifier of a pattern's computed key or default value may be counted too (it is not then fixed: see fix_bindings))
+            node const* n = aSite;
+            for (node const* p = n->parent; p != nullptr; n = p, p = p->parent)
+            {
+                if (p->is(construct::Assign))
+                    return p->size() > 0u && p->child(0u) == n;
+                if (p->is(construct::PreIncrement) || p->is(construct::PreDecrement) || p->is(construct::PostIncrement) || p->is(construct::PostDecrement))
+                    return true;
+                if (p->is(construct::ForIn) || p->is(construct::ForOf) || p->is(construct::ForAwaitOf))
+                    return p->children.empty() || p->children.back() != n;
+                if (!(p->is(construct::Parenthesized) || p->is(construct::Array) || p->is(construct::Object) || p->is(construct::Property) ||
+                    p->is(construct::Shorthand) || p->is(construct::ShorthandDefault) || p->is(construct::Computed) || p->is(construct::Spread) ||
+                    p->is(construct::Hole) || p->is(construct::ObjectPattern) || p->is(construct::ArrayPattern) || p->is(construct::PatternProperty) ||
+                    p->is(construct::Rest) || p->is(construct::Initializer)))
+                    return false;
+            }
+            return false;
+        }
+    }
+
     void compiler::use(std::string const& aName, scope* aScope, function_info* aFunction, node* aSite)
     {
         // (a reference to a binding: bindings of functions other than the one that uses them are captured)
@@ -2069,6 +2102,8 @@ namespace neos::compilers::javascript
             {
                 if (aSite != nullptr)
                     iUses[aSite] = b;
+                if (aSite != nullptr && assignment_target(aSite))
+                    b->assigned = true;
                 if (s->function != aFunction)
                 {
                     b->captured = true;
@@ -2084,6 +2119,37 @@ namespace neos::compilers::javascript
             if (s->kind == scope_kind::With || sloppy_eval_var_scope(s) || (s->kind == scope_kind::Script && eval_code()))
                 for (auto* f = aFunction; f != nullptr && f != s->function; f = f->parent)
                     f->needsOuterEnvironment = true;
+        }
+    }
+
+    void compiler::fix_bindings()
+    {
+        // (captured bindings whose slots keep their values once written (an optimizing tier that knows the environment may use the value:
+        // see function_generator::environment_slot): a var, let, const, function or class binding that only its one declaration writes,
+        // and not in a loop of its scope (each environment of the scope is then written once))
+        if (eval_code())
+            return;
+        for (auto& s : iScopes)
+        {
+            if (s.dynamic || !(s.kind == scope_kind::Function || s.kind == scope_kind::Block || s.kind == scope_kind::Class ||
+                (s.kind == scope_kind::Script && iModule)))
+                continue;
+            for (auto& b : s.bindings)
+            {
+                b->fixed = false;
+                if (!b->captured || b->assigned || b->declaration == nullptr || !(b->kind == binding_kind::Var || b->kind == binding_kind::Let ||
+                    b->kind == binding_kind::Const || b->kind == binding_kind::Function || b->kind == binding_kind::Class))
+                    continue;
+                bool loop = false;
+                for (node const* p = b->declaration; p != nullptr && !loop; p = p->parent)
+                {
+                    loop = p->is(construct::For) || p->is(construct::ForIn) || p->is(construct::ForOf) || p->is(construct::ForAwaitOf) ||
+                        p->is(construct::While) || p->is(construct::Do);
+                    if (p == s.owner || (p != b->declaration && is_function_node(p)))
+                        break;
+                }
+                b->fixed = !loop;
+            }
         }
     }
 
@@ -2466,6 +2532,18 @@ namespace neos::compilers::javascript
     std::uint32_t compiler::property_sites_global()
     {
         return global_index("%jssites", type::I64);
+    }
+
+    std::uint32_t compiler::closure_table_global()
+    {
+        return global_index("%jsclosures", type::I64);
+    }
+
+    bool compiler::closure_table_used() const
+    {
+        // (an extension's functions' numbers are those of the program's (see function_generator::closure): their words are found by
+        // their position in its functions, if their indices are consecutive)
+        return !iFunctions.empty() && (!iUnitFirst || iDirectDispatch);
     }
 
     std::uint32_t compiler::char_code_at_global()

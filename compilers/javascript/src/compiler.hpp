@@ -94,6 +94,10 @@ namespace neos::compilers::javascript
         bool tdz = false;                   ///< (it can be used before it is initialized)
         std::uint32_t slot = 0u;            ///< (captured: its slot in its scope's environment; otherwise its local)
         node* declaration = nullptr;
+        bool assigned = false;              ///< (it is written other than by its declaration (an assignment, Annex B's copy of a block's
+                                            ///< function), or it is declared more than once)
+        bool fixed = false;                 ///< (captured and written at most once in each of its environments (see compiler::fix_bindings):
+                                            ///< once written its slot keeps its value)
         bool lexical() const { return kind == binding_kind::Let || kind == binding_kind::Const || kind == binding_kind::Class; }
     };
 
@@ -336,6 +340,8 @@ namespace neos::compilers::javascript
                                                                 ///< the code has checked does not change (e.g. a watched holder's property))
         void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
         void environment_slot(std::uint32_t aHops, std::uint32_t aSlot);  ///< (environment -> the address of its (or an outer one's) slot)
+        void slot_load(binding const* aBinding);    ///< (a binding's slot -> its value (a fixed binding's: a watched load))
+        void slot_written(binding const* aBinding, std::uint32_t aHops);    ///< (a fixed binding's slot was written: reported if watched)
         void callee_number_of(std::uint32_t aCallee, std::optional<std::uint32_t> aSite);    ///< (-> the callee's number for the dispatcher (else -1))
         void callee_number_at(std::uint32_t aCallee, std::uint32_t aSite, bool aCallSite);
         void site_dispatch_matches(std::uint32_t aCallee, std::uint32_t aSite);
@@ -642,6 +648,7 @@ namespace neos::compilers::javascript
         void hoist_var(node* aNode, scope* aVarScope, function_info* aFunction);
         void resolve_uses(node* aNode, scope* aScope, function_info* aFunction);
         void use(std::string const& aName, scope* aScope, function_info* aFunction, node* aSite);
+        void fix_bindings();
         bool directive_strict(node* aStatements) const;
         // code generation
         void generate(node* aScript);
@@ -655,6 +662,8 @@ namespace neos::compilers::javascript
         function_info* script_function(std::string const& aName);   ///< (the script's function declaration that defines a global function)
         std::uint32_t function_closure(function_info const& aFunction);   ///< (the global (an i64) that holds its function object)
         std::uint32_t property_sites_global();  ///< (the global (an i64) that holds the offset of the program's property cache sites)
+        std::uint32_t closure_table_global();   ///< (the global (an i64) that holds the offset of its functions' closure table words)
+        bool closure_table_used() const;        ///< (its functions read their closure table's words (see the runtime's closure_table))
         std::uint32_t char_code_at_global();    ///< (the global that holds %String.prototype.charCodeAt% (see function_generator::stub))
         std::uint32_t function_call_global();   ///< (the global that holds %Function.prototype.call% (f.call(t, ...) calls f if the callee is it))
         std::uint32_t array_push_global();      ///< (the global that holds %Array.prototype.push% (see function_generator::stub))

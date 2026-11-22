@@ -285,10 +285,16 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t PropertyAttributes = 24u;    ///< (u8)
         inline constexpr std::uint32_t EnvironmentParent = 8u;     ///< (value: an environment's parent)
         inline constexpr std::uint32_t EnvironmentSlots = 16u;      ///< (u64: the offset of its slots (values))
+        inline constexpr std::uint32_t EnvironmentWatched = 48u;    ///< (u64: not 0 if an optimizing tier may know the environment (the
+                                                                    ///< runtime reports writes of its fixed bindings' slots))
         inline constexpr std::uint32_t FunctionEnvironment = 96u;  ///< (value: a function's environment (its closure's))
         inline constexpr std::uint32_t FunctionDispatch = 104u;     ///< (u64: a function's dispatch key: a function of a program's that the
                                                                     ///< dispatcher calls: its program's serial (32 bits, not 0) then its number
                                                                     ///< (for the dispatcher: the low 32 bits); else all ones)
+        inline constexpr std::uint64_t ClosuresNone = 0u;           ///< (a word of a program's closure table (see the runtime's closure_table):
+                                                                    ///< no function object of its function has been made yet; else the
+                                                                    ///< environment (value) that all of them have, or ...)
+        inline constexpr std::uint64_t ClosuresMany = 1u;           ///< (... they have more than one)
         inline constexpr std::uint32_t ClassFunction = 2u;          ///< (a function (ObjectClass))
         inline constexpr std::uint32_t AttributeWritable = 0x01u;
         inline constexpr std::uint32_t AttributeAccessor = 0x08u;
@@ -313,6 +319,11 @@ namespace neos::language::javascript
                                                                     ///< knows the holder's properties (their values: cached loads))
         inline constexpr std::uint32_t SiteValidityValue = SitePrototype + 24u;    ///< (u64: the validity word's value (the second prototype's
                                                                     ///< shape's field: a holder's entry has one prototype))
+        inline constexpr std::uint32_t SiteConstructValidity = SitePrototype + 16u;    ///< (u64: SiteConstruct: the region offset of the 
+                                                                    ///< constructor's validity word (0: none): while it has the entry's value
+                                                                    ///< (SiteConstructValidityValue) the constructor's properties are the entry's
+                                                                    ///< (its shape and prototype property))
+        inline constexpr std::uint32_t SiteConstructValidityValue = SitePrototype + 24u;
         inline constexpr std::uint32_t SiteFunction = 64u;          ///< (value: the property's value, a function of the program's ...)
         inline constexpr std::uint32_t SiteNumber = 72u;            ///< (i32: ... whose number (for the dispatcher) this is (else -1))
         inline constexpr std::uint32_t SiteSlotSize = 76u;          ///< (u32: a new expression's (SiteConstruct): the size of the object's slot)

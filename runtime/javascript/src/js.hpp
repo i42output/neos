@@ -1822,6 +1822,7 @@ namespace neos::javascript_runtime
         region_vector<value> slots;
         value withObject = Undefined;   ///< (a with statement's object environment: its object)
         value names = Undefined;        ///< (an environment whose bindings can be found by name (direct eval): an array of their names)
+        std::uint64_t watched = 0u;     ///< (an optimizing tier may know it (see api::closure_made): writes of its slots are reported)
     };
 
     // --- exceptions
