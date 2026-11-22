@@ -4469,9 +4469,11 @@ namespace neos
                             };
                             bool changed = false;
                             replacements replaced;
-                            auto const order = aFunction.order;
-                            for (auto j : order)
+                            // (by index: the order does not change here (a copy of it made GCC 14 warn falsely of a delete of a pointer that is not 
+                            // the heap's: -Wfree-nonheap-object))
+                            for (std::size_t k = 0u, orderSize = aFunction.order.size(); k < orderSize; ++k)
                             {
+                                auto const j = aFunction.order[k];
                                 if (blocks[j].predecessors.size() < 2u || blocks[j].loopHeader)
                                     continue;
                                 for (std::size_t n = 0u; n < blocks[j].code.size(); ++n)

@@ -2159,7 +2159,29 @@ namespace neos::javascript_runtime
                     e.position = f.prototypePosition;
                     e.added = h.object_template(sizeClass, (slotSize - base) / sizeof(value));
                     e.reserved2 = slotSize;
+                    auto const rootBefore = e.prototypes[0].shape;
                     e.prototypes[0] = { prototype, shape_word(root) };
+                    if (rootBefore != e.prototypes[0].shape)
+                        validity_changed(&e.prototypes[0].shape);
+                    // (the constructor is watched (its validity word changes when its properties do): compiled code that finds the word's 
+                    // value the entry's knows its prototype without testing it; watching it gives it a shape of its own, which the entry 
+                    // and the constructor's prototype shape then are. The word's offset and value in the entry are watched words (compiled
+                    // code's other reads of the entry are cached: any value that they have had; a change of the prototype is a change of
+                    // the value, reported: code that may have the entry's earlier prototype and its later value leaves))
+                    auto const before = e.prototypes[1];
+                    auto validity = before;
+                    validity = { 0u, 0u };
+                    if (auto* const word = watch(f); word != nullptr && f.properties.layout() != nullptr)
+                    {
+                        f.prototypeShape = f.properties.layout();
+                        e.shape = shape_word(f.prototypeShape);
+                        validity = { region_offset(word), *word };
+                    }
+                    e.prototypes[1] = validity;
+                    if (before.object != validity.object)
+                        validity_changed(&e.prototypes[1].object);
+                    if (before.shape != validity.shape)
+                        validity_changed(&e.prototypes[1].shape);
                     break;
                 }
                 return thisValue;

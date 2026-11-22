@@ -2534,7 +2534,28 @@ namespace neos::compilers::javascript
             i32(static_cast<std::int32_t>(layout::SiteConstruct));
             op(opcode::I32Ne);
             branch(slow, true);
-            // (the prototype)
+            // (the prototype: a watched constructor's (the entry has its validity word: see the holders') is the entry's while the word
+            // has the entry's value (an optimizing tier that knows the site tests nothing); else its shape and prototype property are tested)
+            begin(control_kind::Block);
+            auto const known = iControls.size() - 1u;
+            get(entry);
+            site_word(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteConstructValidity);
+            tee(prototype);
+            i64(0);
+            op(opcode::I64Ne);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            get(prototype);
+            op(opcode::I64LoadMem);
+            u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
+            u32(layout::Memory);
+            u32(0u);
+            get(entry);
+            site_word(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteConstructValidityValue);
+            op(opcode::I64Eq);
+            branch(known, true);
+            end_control();
             cell_of(callee);
             tee(cell);
             mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
@@ -2550,12 +2571,12 @@ namespace neos::compilers::javascript
             op(opcode::I64Shl);
             op(opcode::I64Add);
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
-            tee(prototype);
             // (the entry's (its objects' root shape is the entry's: an object's shape is its prototype's))
             get(entry);
             site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SitePrototype);
             op(opcode::I64Ne);
             branch(slow, true);
+            end_control();
             // (its slot: the next of its size class's run of free slots (if it is within it: none (0) is not; the run's bytes were 
             // counted as allocated when the runtime took it); else the runtime's (allocate_slot: it may collect). The object is made 
             // after (one path: what it has is known to the code that follows))
@@ -2607,7 +2628,9 @@ namespace neos::compilers::javascript
             header_word(slot, pattern, false);
             get(slot);
             get(entry);
-            site_load(opcode::I64LoadMem32U, e * layout::SiteEntrySize + layout::SitePrototype + 8u);
+            // (a watched word (as the validity word's offset and value: the runtime reports their changes): code that may have the entry's
+            // validity value as it is now has its root shape as it is now)
+            site_word(opcode::I64LoadMem32U, e * layout::SiteEntrySize + layout::SitePrototype + 8u);
             mem_store(opcode::I64StoreMem32, layout::ObjectShape, alias::Shape);
             values_word(slot, pattern);
             get(slot);
