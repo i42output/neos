@@ -239,7 +239,7 @@ namespace neos::compilers::javascript
         // change a word of another; Any: any word (the default))
         enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header, Validity };
         static alias alias_of_word(std::uint32_t aOffset, bool aArray);     ///< (a word (its offset) of an object's cell (an array's))
-        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, ArrayPop, GetNamedFirst, StringSlice, RegExpTest, Count };
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, ArrayPop, GetNamedFirst, StringSlice, RegExpTest, ToBooleanOther, Count };
         void generate_stub(stub aStub);
         void generate_slow_function(std::uint32_t aFunction, std::optional<std::uint32_t> aRuntime, std::size_t aParameters);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
@@ -317,7 +317,7 @@ namespace neos::compilers::javascript
         void regexp_test_stub();
         void array_push_stub();
         void array_pop_stub();
-        void to_boolean_stub();
+        void to_boolean_stub(bool aBooleans = true);
         void construct_this_stub();
         void array_literal_stub();
         void object_literal_stub();

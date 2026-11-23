@@ -2892,11 +2892,12 @@ namespace neos::compilers::javascript
         return true;
     }
 
-    void function_generator::to_boolean_stub()
+    void function_generator::to_boolean_stub(bool aBooleans)
     {
         // (the ToBoolean stub's code (its parameter: a value)): a boolean's, undefined's and null's (false), an object's (not [[IsHTMLDDA]]),
         // a number's (not 0, -0 or NaN) and a string's (not empty) here, else the runtime's (e.g. a bigint's). False and true, undefined and 
-        // null differ in their low bits only (values::TagSpecial | 2, | 3; | 0, | 1): each pair is one comparison (of the value | 1)
+        // null differ in their low bits only (values::TagSpecial | 2, | 3; | 0, | 1): each pair is one comparison (of the value | 1).
+        // !aBooleans (the ToBooleanOther stub): of a value that is not a boolean (truth's, which tests booleans first): no test of them
         static_assert((values::False | 1u) == values::True && (values::Undefined | 1u) == values::Null && (values::True & 1u) == 1u);
         std::uint32_t const v = 0u;
         auto const tag = temporary();
@@ -2909,20 +2910,23 @@ namespace neos::compilers::javascript
             get(v);
             i64(1);
             op(opcode::I64Ior);
-            tee(tag);
-            constant(values::True);
-            op(opcode::I64Eq);
-            op(opcode::If);
-            iCode.push_back(0x40u);
-            iControls.push_back(control{ control_kind::Block });
-            get(v);
-            op(opcode::I32ConvertI64);
-            i32(1);
-            op(opcode::I32And);
-            branch(done, false);
-            end_control();
+            if (aBooleans)
+            {
+                tee(tag);
+                constant(values::True);
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x40u);
+                iControls.push_back(control{ control_kind::Block });
+                get(v);
+                op(opcode::I32ConvertI64);
+                i32(1);
+                op(opcode::I32And);
+                branch(done, false);
+                end_control();
+                get(tag);
+            }
             // (undefined, null: false)
-            get(tag);
             constant(values::Null);
             op(opcode::I64Eq);
             op(opcode::If);
@@ -3919,7 +3923,8 @@ namespace neos::compilers::javascript
             { "%js.array_pop", { I64, I64 }, I64 },
             { "%js.get_named_first", { I64, I64, I32 }, I64 },
             { "%js.string_slice", { I64, I64, I64, I64 }, I64 },
-            { "%js.regexp_test", { I64, I64, I64 }, I64 }
+            { "%js.regexp_test", { I64, I64, I64 }, I64 },
+            { "%js.to_boolean_other", { I64 }, I32 }
         };
         static_assert(std::size(sStubs) == static_cast<std::size_t>(function_generator::stub::Count));
         auto const& s = sStubs[static_cast<std::size_t>(aStub)];
@@ -3978,8 +3983,9 @@ namespace neos::compilers::javascript
             regexp_test_stub();
             break;
         case stub::ToBoolean:
+        case stub::ToBooleanOther:
             iParameterCount = 1u;
-            to_boolean_stub();
+            to_boolean_stub(aStub == stub::ToBoolean);
             break;
         case stub::ArrayPush:
             iParameterCount = 3u;
@@ -4008,7 +4014,8 @@ namespace neos::compilers::javascript
             callee_number_stub(aStub);
             break;
         default:
-            if (aStub == stub::CalleeNumber || aStub == stub::MethodNumber || aStub == stub::ConstructNumber || aStub == stub::ToBoolean)
+            if (aStub == stub::CalleeNumber || aStub == stub::MethodNumber || aStub == stub::ConstructNumber || aStub == stub::ToBoolean ||
+                aStub == stub::ToBooleanOther)
                 i32(0);
             else
                 i64(0);
@@ -4798,9 +4805,6 @@ namespace neos::compilers::javascript
             iCode.push_back(0x40u);
             iControls.push_back(control{ control_kind::Block });
             version_check();
-            op(opcode::I32Eqz);
-            op(opcode::BrIf);
-            u32(0u);
             auto const scopes = iScopes;
             generate_code();
             op(opcode::Br);
@@ -5807,7 +5811,7 @@ namespace neos::compilers::javascript
     void function_generator::truth()
     {
         // (the value's ToBoolean (an i32): booleans inline (true: 1, else false: 0 (constants: a branch on the result goes to its 
-        // target from them directly)), else the stub's)
+        // target from them directly)), else the ToBooleanOther stub's (it does not test them again))
         tee(iScratch);
         constant(values::True);
         op(opcode::I64Eq);
@@ -5823,7 +5827,7 @@ namespace neos::compilers::javascript
         i32(0);
         op(opcode::Else);
         get(iScratch);
-        call_stub(stub::ToBoolean);
+        call_stub(stub::ToBooleanOther);
         op(opcode::End);
         op(opcode::End);
     }
@@ -7564,7 +7568,18 @@ namespace neos::compilers::javascript
     void function_generator::strict_equality_of_others(std::uint32_t aLhs, std::uint32_t aRhs)
     {
         // (-> i32: IsStrictlyEqual(lhs, rhs) of values that are not both numbers: the same if they are the same (bits), else different 
-        // unless both are strings (of the same length) or both are bigints (the runtime's))
+        // unless both are strings (of the same length) or both are bigints (the runtime's). Branches, most often taken first: values 
+        // of different tags, then of the same tag that is not a string's or a bigint's (e.g. two objects))
+        auto const bigintOrString = [&]()
+        {
+            // (both strings (unless their lengths differ) or both bigints: the runtime's)
+            get(aLhs);
+            get(aRhs);
+            slow_runtime("strict_equal_value", { I64, I64 }, I64);
+            check();
+            constant(values::True);
+            op(opcode::I64Eq);
+        };
         get(aLhs);
         get(aRhs);
         op(opcode::I64Eq);
@@ -7573,46 +7588,49 @@ namespace neos::compilers::javascript
         iControls.push_back(control{ control_kind::Block });
         i32(1);
         op(opcode::Else);
-        // (the same tags (their xor's top 16 bits: 0), the lhs's (its top 16 bits) a string's or a bigint's)
+        // (the same tags: their xor's top 16 bits are 0)
         get(aLhs);
         get(aRhs);
         op(opcode::I64Xor);
         i64(48);
         op(opcode::I64ShrU);
         op(opcode::I64Eqz);
-        get(aLhs);
-        i64(48);
-        op(opcode::I64ShrS);    // (a tag's top 16 bits, sign extended: small (negative) immediates)
-        tee(iScratch);
-        i64(static_cast<std::int64_t>(values::TagString) >> 48);
-        op(opcode::I64Eq);
-        get(iScratch);
-        i64(static_cast<std::int64_t>(values::TagBigInt) >> 48);
-        op(opcode::I64Eq);
-        op(opcode::I32Ior);
-        op(opcode::I32And);
         op(opcode::If);
         iCode.push_back(0x7Fu);
         iControls.push_back(control{ control_kind::Block });
         {
-            get(iScratch);
+            get(aLhs);
+            i64(48);
+            op(opcode::I64ShrS);    // (a tag's top 16 bits, sign extended: small (negative) immediates)
+            tee(iScratch);
             i64(static_cast<std::int64_t>(values::TagString) >> 48);
             op(opcode::I64Eq);
-            get(aLhs);
-            get(aRhs);
-            string_lengths_differ();
-            op(opcode::I32And);
             op(opcode::If);
             iCode.push_back(0x7Fu);
             iControls.push_back(control{ control_kind::Block });
-            i32(0);
+            {
+                get(aLhs);
+                get(aRhs);
+                string_lengths_differ();
+                op(opcode::If);
+                iCode.push_back(0x7Fu);
+                iControls.push_back(control{ control_kind::Block });
+                i32(0);
+                op(opcode::Else);
+                bigintOrString();
+                end_control();
+            }
             op(opcode::Else);
-            get(aLhs);
-            get(aRhs);
-            slow_runtime("strict_equal_value", { I64, I64 }, I64);
-            check();
-            constant(values::True);
+            get(iScratch);
+            i64(static_cast<std::int64_t>(values::TagBigInt) >> 48);
             op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            bigintOrString();
+            op(opcode::Else);
+            i32(0);
+            end_control();
             end_control();
         }
         op(opcode::Else);
@@ -11820,27 +11838,27 @@ namespace neos::compilers::javascript
 
     void function_generator::version_check()
     {
-        // (the numeric version's parameters' arguments are numbers and its intrinsics' bindings the built-in functions)
-        bool first = true;
+        // (the numeric version's parameters' arguments are numbers and its intrinsics' bindings the built-in functions: each tested,
+        // leaving the numeric version's block (br_if 0) if it is not (a branch each: no conjunction of flags made and kept))
+        auto const leave = [&]()
+        {
+            op(opcode::I32Eqz);
+            op(opcode::BrIf);
+            u32(0u);
+        };
         for (auto const& a : iNumericArguments)
         {
             get(FirstArgumentLocal + a.first);
             constant(values::TagSpecial);
             op(opcode::I64LtU);
-            if (!first)
-                op(opcode::I32And);
-            first = false;
+            leave();
         }
         if (iIntrinsicMask != 0u)
         {
             i32(static_cast<std::int32_t>(iIntrinsicMask));
             runtime("intrinsics_original", { I32 }, I32);
-            if (!first)
-                op(opcode::I32And);
-            first = false;
+            leave();
         }
-        if (first)
-            i32(1);
     }
 
     void function_generator::number_bits()

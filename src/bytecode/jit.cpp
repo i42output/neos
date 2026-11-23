@@ -2502,6 +2502,7 @@ namespace neos
                         // --- function level state
                         void reset_function()
                         {
+                            iBlockEndsOf = nullptr;
                             iStack.clear();
                             iControl.clear();
                             iLocals.clear();
@@ -2964,8 +2965,10 @@ namespace neos
                             materialize_cond();
                             thread_local std::vector<bool> tWritten; // (scratch kept for reuse (one per block, loop and if compiled))
                             tWritten.assign(iLocals.size(), false);
+                            // (the block's writes are looked for only if an entry refers to a local (the stack is often empty here))
+                            bool const locals = std::any_of(iStack.begin(), iStack.end(), [](entry const& e) { return e.k == kind::Local; });
                             std::size_t depth = 0u;
-                            for (std::size_t p = aBody; p < iFunction->codeEnd;)
+                            for (std::size_t p = aBody; locals && p < iFunction->codeEnd;)
                             {
                                 auto const op = static_cast<std::uint8_t>(iTokens[p]);
                                 if (op == 0x02 || op == 0x03 || op == 0x04)
@@ -3661,6 +3664,31 @@ namespace neos
                         // the position of the end of the block whose body starts at aBody
                         std::size_t block_end(std::size_t aBody) const
                         {
+                            // (from a table of the function's blocks' ends by their bodies' starts, made by one pass over its code the first
+                            // time (a scan from each block was quadratic in the function's nesting); else (not a body's start) by a scan)
+                            auto const begin = iFunction->codeBegin;
+                            if (iBlockEndsOf != iFunction)
+                            {
+                                iBlockEndsOf = iFunction;
+                                iBlockEnds.assign(iFunction->codeEnd - begin + 1u, 0u);
+                                thread_local std::vector<std::size_t> tBodies; // (scratch kept for reuse)
+                                tBodies.assign(1u, begin);
+                                for (std::size_t p = begin; p < iFunction->codeEnd;)
+                                {
+                                    auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                    auto const next = p + 1u + immediate_count(op, iTokens, p);
+                                    if (op == 0x02 || op == 0x03 || op == 0x04)
+                                        tBodies.push_back(next);
+                                    else if (op == 0x0B && !tBodies.empty())
+                                    {
+                                        iBlockEnds[tBodies.back() - begin] = static_cast<std::uint32_t>(p - begin + 1u);
+                                        tBodies.pop_back();
+                                    }
+                                    p = next;
+                                }
+                            }
+                            if (aBody >= begin && aBody - begin < iBlockEnds.size() && iBlockEnds[aBody - begin] != 0u)
+                                return begin + iBlockEnds[aBody - begin] - 1u;
                             std::size_t depth = 0u;
                             for (std::size_t p = aBody; p < iFunction->codeEnd;)
                             {
@@ -6193,6 +6221,8 @@ namespace neos
                         assembler a;
                         module_description const& iModule;
                         std::vector<std::uint64_t> const& iTokens;
+                        mutable std::vector<std::uint32_t> iBlockEnds;              ///< (see block_end: position after the end, or 0)
+                        mutable function_description const* iBlockEndsOf = nullptr; ///< (the function that iBlockEnds is of)
                         bool const iSse41;
                         std::size_t iTrapLabels[TrapCount] = {};
                         void const* iIndirect = nullptr;    // (call_indirect's table (see compiled_module::indirect))

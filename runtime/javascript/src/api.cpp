@@ -1765,13 +1765,14 @@ namespace neos::javascript_runtime
             using site_table = std::deque<site_chunk>;
             site* site_entries(site_table& aTable, std::size_t aSite)
             {
-                for (auto chunk = aTable.rbegin(); chunk != aTable.rend(); ++chunk)
-                    if (aSite >= chunk->first)
-                    {
-                        auto const index = (aSite - chunk->first) * jsl::SiteEntries;
-                        return index < chunk->entries.size() ? &chunk->entries[index] : nullptr;
-                    }
-                return nullptr;
+                // (the last chunk whose first site is not after it: the chunks are in the order of their first sites (an extension's 
+                // continue the program's count); a binary search (a large bundle's program has a chunk per deferred unit))
+                auto chunk = std::upper_bound(aTable.begin(), aTable.end(), aSite, [](std::size_t aNumber, site_chunk const& aChunk) { return aNumber < aChunk.first; });
+                if (chunk == aTable.begin())
+                    return nullptr;
+                --chunk;
+                auto const index = (aSite - chunk->first) * jsl::SiteEntries;
+                return index < chunk->entries.size() ? &chunk->entries[index] : nullptr;
             }
             struct site_tables
             {
