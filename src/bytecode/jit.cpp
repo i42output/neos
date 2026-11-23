@@ -8242,12 +8242,11 @@ namespace neos
                             case ssa::StackLow:
                                 {
                                     // (neos::stack_low: less than StackLowMargin of the stack left above its limit)
+                                    // (a condition: fused with the branch that uses it, if one does (as a comparison's))
                                     auto const r = target(v, RAX);
                                     a.lea(r, RSP, -static_cast<std::int32_t>(StackLowMargin));
                                     a.alu_rm(7, true, r, R15, ContextStackLimit);
-                                    a.setcc(B, r);
-                                    a.movzx8(r, r);
-                                    defined(v, r);
+                                    condition(v, B);
                                 }
                                 return;
                             case ssa::Param:

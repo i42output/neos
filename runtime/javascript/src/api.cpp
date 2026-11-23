@@ -152,6 +152,10 @@ namespace neos::javascript_runtime
                 offsetof(allocation_state, stringHeader) == jsl::AllocStringHeader &&
                 offsetof(allocation_state, smallStrings) == jsl::AllocSmallStrings &&
                 offsetof(allocation_state, asciiStrings) == jsl::AllocAsciiStrings && string::SmallCapacity + 1u == jsl::SmallStrings &&
+                offsetof(allocation_state, regexpShape) == jsl::AllocRegExpShape && offsetof(allocation_state, regexpLastIndex) == jsl::AllocRegExpLastIndex &&
+                offsetof(allocation_state, regexpPrototype) == jsl::AllocRegExpPrototype &&
+                offsetof(allocation_state, regexpPrototypeShape) == jsl::AllocRegExpPrototypeShape &&
+                offsetof(allocation_state, regexpExecPosition) == jsl::AllocRegExpExecPosition && offsetof(allocation_state, regexpExec) == jsl::AllocRegExpExec &&
                 std::size(allocation_state{}.smallStrings) == jsl::SmallStrings && sizeof(string) == jsl::StringSize &&
                 property_table::dictionary_proto_field() == jsl::DictionaryProto &&
                 MegamorphicEntries == jsl::MegamorphicEntries && sizeof(megamorphic_entry) == jsl::MegamorphicEntrySize &&
@@ -181,6 +185,7 @@ namespace neos::javascript_runtime
             array_object const array{ Undefined };
             bool const arrayOk = field(array, &array.cls) == jsl::ObjectClass && static_cast<std::uint32_t>(object_class::Array) == jsl::ClassArray &&
                 static_cast<std::uint32_t>(object_class::HTMLDDA) == jsl::ClassHTMLDDA &&
+                static_cast<std::uint32_t>(object_class::RegExp) == jsl::ClassRegExp &&
                 field(array, array.elements.offset_field()) == jsl::ArrayElements && field(array, &array.sparse) == jsl::ArraySparse &&
                 field(array, &array.length) == jsl::ArrayLength && sizeof(array.length) == 4u &&
                 field(array, &array.lengthWritable) == jsl::ArrayLengthWritable && sizeof(array.lengthWritable) == 1u &&

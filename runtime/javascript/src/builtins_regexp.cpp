@@ -40,6 +40,7 @@
 #include "api.hpp"
 #include "regexp_engine.hpp"
 #include "unicode.hpp"
+#include <neos/language/javascript.hpp>
 
 namespace neos::javascript_runtime
 {
@@ -50,7 +51,14 @@ namespace neos::javascript_runtime
         {
         public:
             explicit regexp_object(value aPrototype) : object{ aPrototype, object_class::RegExp } {}
+            ~regexp_object() { set_fast_test(0u); }
         public:
+            void set_fast_test(std::uint64_t aTable)
+            {
+                if (fastTest != 0u)
+                    region_release(gRegionBase + fastTest);
+                fastTest = aTable;
+            }
             void do_trace(tracer& aTracer) 
             {
                 object::do_trace(aTracer);
@@ -58,6 +66,9 @@ namespace neos::javascript_runtime
                 aTracer.mark(flags);
             }
         public:
+            std::uint64_t fastTest = 0u;            ///< (compiled code's test stub (layout::RegExpFastTest): a set of words, neither global nor 
+                                                    ///< sticky, whose longest has fewer than FastTestLengths code units: its filters (see 
+                                                    ///< regexp::word_bit) by length, in the region (0: none))
             value source = Undefined;
             value flags = Undefined;
             std::uint32_t flagBits = 0u;
@@ -144,6 +155,9 @@ namespace neos::javascript_runtime
             aTracer.conservative(&the_keys(), &the_keys() + 1);
             aTracer.mark(the_legacy().input);
             aTracer.mark(the_legacy().subject);
+            auto const& state = the_heap().the_allocation_state();
+            aTracer.mark(state.regexpPrototype);
+            aTracer.mark(state.regexpExec);
         } };
 
         void update_legacy_statics(legacy_statics& legacy, value aSubject, std::vector<std::int32_t> const& aCaptures, std::int32_t aStart, std::uint32_t aCount)
@@ -266,6 +280,28 @@ namespace neos::javascript_runtime
             r.flags = f;
             r.flagBits = *bits;
             r.matcher = std::move(program);
+            // (its words' filters for compiled code's test stub (see RegExpFastTest: the field's offset is checked once))
+            static bool const sFieldOk = [&r]()
+            {
+                auto const offset = static_cast<std::size_t>(reinterpret_cast<std::byte const*>(&r.fastTest) - reinterpret_cast<std::byte const*>(&r));
+                if (offset != neos::language::javascript::layout::RegExpFastTest)
+                {
+                    std::fprintf(stderr, "JavaScript runtime: regexp fast test at %zu\n", offset);
+                    std::abort();
+                }
+                return true;
+            }();
+            (void)sFieldOk;
+            std::uint64_t table = 0u;
+            if (auto const& m = *r.matcher; m.wordSet && (r.flagBits & (regexp::FlagGlobal | regexp::FlagSticky)) == 0u && m.longestWord < neos::language::javascript::layout::FastTestLengths)
+            {
+                auto* const t = static_cast<std::uint64_t*>(region_allocate(neos::language::javascript::layout::FastTestLengths * sizeof(std::uint64_t)));
+                for (std::size_t length = 0u; length < neos::language::javascript::layout::FastTestLengths; ++length)
+                    t[length] = length >= m.shortestWord && length <= m.longestWord && length < m.wordFilter.size() && length < m.words.size() && !m.words[length].empty() ? 
+                        (length == 0u ? ~std::uint64_t{} : m.wordFilter[length]) : 0u;
+                table = region_offset(t);
+            }
+            r.set_fast_test(table);
             set(aObject, the_names().lastIndex, number(0.0), true);
             return aObject;
         }
@@ -534,6 +570,18 @@ namespace neos::javascript_runtime
             aState.execPrototype = prototypeShape;
             aState.execPrototypeObject = &p;
             aState.execPosition = exec.position();
+            // (for compiled code's test stub: the same, if the shapes are shaped (their words) and lastIndex is a data property)
+            auto& alloc = the_heap().the_allocation_state();
+            alloc.regexpShape = 0u;
+            if (auto const lastIndex = r.own(the_names().lastIndex); ownShape != nullptr && prototypeShape != nullptr && lastIndex && !lastIndex->accessor())
+            {
+                alloc.regexpLastIndex = lastIndex.position();
+                alloc.regexpPrototype = r.proto();
+                alloc.regexpPrototypeShape = p.properties.shape_word();
+                alloc.regexpExecPosition = exec.position();
+                alloc.regexpExec = keys.execFunction;
+                alloc.regexpShape = r.properties.shape_word();
+            }
             return true;
         }
         bool has_builtin_exec(value aR)

@@ -262,6 +262,7 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t ObjectExtensible = 2u;      ///< (u8: it is extensible (checked by the runtime: see check_layout))
         inline constexpr std::uint32_t ClassArray = 1u;             ///< (an array (exotic): its elements)
         inline constexpr std::uint32_t ClassHTMLDDA = 40u;          ///< (an object that [[IsHTMLDDA]] (ToBoolean: false))
+        inline constexpr std::uint32_t ClassRegExp = 10u;           ///< (a regexp (ObjectClass): its RegExpFastTest)
         inline constexpr std::uint32_t ClassTypedArray = 23u;       ///< (a typed array (it has no shape: its dictionary has its prototype))
         inline constexpr std::uint32_t TypedArrayType = 16u;        ///< (u8: a typed array's elements' type (TypeUint8 ...))
         inline constexpr std::uint32_t TypeUint8 = 1u;              ///< (a Uint8Array's)
@@ -373,6 +374,15 @@ namespace neos::language::javascript
                                                                     ///< class (low 8 bits) and its slot's size)
         inline constexpr std::uint32_t SmallStrings = 17u;
         inline constexpr std::uint32_t AllocAsciiStrings = 1112u;   ///< (values (128): the one code unit ASCII strings (0: not made yet))
+        inline constexpr std::uint32_t AllocRegExpShape = 2136u;    ///< (u64 each: the test stub's regexps' shape (their own: no exec),
+        inline constexpr std::uint32_t AllocRegExpLastIndex = 2144u;    ///< their lastIndex's position, their prototype (a value),
+        inline constexpr std::uint32_t AllocRegExpPrototype = 2152u;    ///< its shape, its exec's position and %RegExp.prototype.exec%
+        inline constexpr std::uint32_t AllocRegExpPrototypeShape = 2160u;   ///< (0s: none known))
+        inline constexpr std::uint32_t AllocRegExpExecPosition = 2168u;
+        inline constexpr std::uint32_t AllocRegExpExec = 2176u;
+        inline constexpr std::uint32_t RegExpFastTest = 16u;        ///< (u64: a regexp's table of its words' filters by length (see the test 
+                                                                    ///< stub), a region offset (0: none))
+        inline constexpr std::uint32_t FastTestLengths = 64u;       ///< (the table's lengths (0 to 63): u64 each, 0 if it has no word of that length)
         inline constexpr std::uint32_t AllocTypedLength = 1008u;    ///< (value: the prototype of the typed arrays whose length the runtime
                                                                     ///< last found to be %TypedArray.prototype%'s getter's (0: none): one with
                                                                     ///< no properties of its own and that prototype has the getter's length

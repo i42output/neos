@@ -3187,6 +3187,17 @@ namespace neos::compilers::javascript
                 branch(done, false);
             }
             end_control();
+            // (its code units read by words: the source has them (else the runtime's))
+            get(from);
+            get(count);
+            i64(3);
+            op(opcode::I64Add);
+            i64(~std::int64_t{ 3 });
+            op(opcode::I64And);
+            op(opcode::I64Add);
+            get(length);
+            op(opcode::I64GtU);
+            branch(miss, true);
             // (its cell: its size class's next free slot (that run's bytes were counted when the runtime took it); none: the runtime's)
             get(state);
             get(count);
@@ -3245,20 +3256,9 @@ namespace neos::compilers::javascript
                 i64(0);
                 mem_store(opcode::I64StoreMem, word, alias::Header);
             }
-            // (its code units: by words (4 code units each) if the source has as many after them (its region's next words are not 
-            // read beyond its end); else one by one. The cell has room for the words (its size class's size is a multiple of 8))
-            get(from);
-            get(count);
-            i64(3);
-            op(opcode::I64Add);
-            i64(~std::int64_t{ 3 });
-            op(opcode::I64And);
-            op(opcode::I64Add);
-            get(length);
-            op(opcode::I64LeU);
-            op(opcode::If);
-            iCode.push_back(0x40u);
-            iControls.push_back(control{ control_kind::Block });
+            // (its code units: by words (4 code units each); the source has as many after them (checked before the cell was taken: else
+            // the runtime's), so that its region's next words are not read beyond its end. The cell has room for the words (its size 
+            // class's size is a multiple of 8). No loop (a loop in a helper that is inlined costs the code that inlines it))
             for (std::uint32_t word = 0u; word < (layout::SmallStrings - 1u) / 4u; ++word)
             {
                 if (word != 0u)
@@ -3277,32 +3277,6 @@ namespace neos::compilers::javascript
             }
             for (std::uint32_t word = 1u; word < (layout::SmallStrings - 1u) / 4u; ++word)
                 end_control();
-            op(opcode::Else);
-            i64(0);
-            set(index);
-            begin(control_kind::Loop);
-            {
-                get(slot);
-                get(index);
-                op(opcode::I64Add);
-                get(chars);
-                get(index);
-                op(opcode::I64Add);
-                mem_load(opcode::I32LoadMem16U, 0u, alias::String);
-                mem_store(opcode::I32StoreMem16, layout::StringSize, alias::Header);
-                get(index);
-                i64(2);
-                op(opcode::I64Add);
-                tee(index);
-                get(count);
-                i64(1);
-                op(opcode::I64Shl);
-                op(opcode::I64LtU);
-                op(opcode::BrIf);
-                u32(0u);
-            }
-            end_control();
-            end_control();
             get(slot);
             i64(static_cast<std::int64_t>(layout::HandleShift));
             op(opcode::I64ShrU);
@@ -3326,6 +3300,172 @@ namespace neos::compilers::javascript
         release(from);
         release(length);
         release(chars);
+        release(cell);
+    }
+
+    void function_generator::regexp_test_stub()
+    {
+        // (the test stub's code (its parameters: callee (the realm's %RegExp.prototype.test%), this, string): r.test(s) of a regexp that
+        // is a set of words (its RegExpFastTest table), of the shape known not to have its own exec (the allocation state's: see the 
+        // runtime's has_builtin_exec), whose lastIndex is a number (its ToLength calls nothing), whose prototype has %RegExp.prototype.exec%
+        // (as it had then), and a flat string that no word of its length can be (none of that length, or its filter's bit clear: see 
+        // regexp::word_bit): false (RegExpBuiltinExec's: no match, nothing changed). Else the runtime's test_direct)
+        std::uint32_t const callee = 0u, thisValue = 1u, text = 2u;
+        auto const cell = temporary();
+        auto const table = temporary();
+        auto const state = temporary();
+        auto const prototype = temporary();
+        auto const chars = temporary();
+        auto const length = temporary();
+        auto const filter = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            auto const tag_is = [&](std::uint32_t aValue, std::uint64_t aTag)
+            {
+                get(aValue);
+                constant(0xFFFF000000000000ull);
+                op(opcode::I64And);
+                constant(aTag);
+                op(opcode::I64Ne);
+                branch(miss, true);
+            };
+            tag_is(thisValue, values::TagObject);
+            tag_is(text, values::TagString);
+            cell_of(thisValue);
+            tee(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectClass, alias::Header);
+            i32(static_cast<std::int32_t>(layout::ClassRegExp));
+            op(opcode::I32Ne);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::RegExpFastTest, alias::Any);
+            tee(table);
+            op(opcode::I64Eqz);
+            branch(miss, true);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            set(state);
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
+            get(state);
+            volatile_load(opcode::I64LoadMem, layout::AllocRegExpShape, false, alias::Alloc);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            // (its lastIndex: a number)
+            get(cell);
+            unit_load(layout::ObjectValues, alias::Values);
+            get(state);
+            volatile_load(opcode::I64LoadMem, layout::AllocRegExpLastIndex, false, alias::Alloc);
+            i64(3);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            mem_load(opcode::I64LoadMem, 0u, alias::Slot);
+            constant(values::TagSpecial);
+            op(opcode::I64GeU);
+            branch(miss, true);
+            // (its prototype (its shape's: the known one's) of the shape it had, with the built-in exec)
+            get(state);
+            volatile_load(opcode::I64LoadMem, layout::AllocRegExpPrototype, false, alias::Alloc);
+            set(prototype);
+            cell_of(prototype);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
+            get(state);
+            volatile_load(opcode::I64LoadMem, layout::AllocRegExpPrototypeShape, false, alias::Alloc);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            cell_of(prototype);
+            unit_load(layout::ObjectValues, alias::Values);
+            get(state);
+            volatile_load(opcode::I64LoadMem, layout::AllocRegExpExecPosition, false, alias::Alloc);
+            i64(3);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            mem_load(opcode::I64LoadMem, 0u, alias::Slot);
+            get(state);
+            volatile_load(opcode::I64LoadMem, layout::AllocRegExpExec, false, alias::Alloc);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            // (the string: flat, not empty)
+            cell_of(text);
+            offset_load(layout::StringChars, alias::String);
+            tee(chars);
+            op(opcode::I64Eqz);
+            branch(miss, true);
+            cell_of(text);
+            mem_load(opcode::I64LoadMem32U, layout::StringLength, alias::String);
+            tee(length);
+            op(opcode::I64Eqz);
+            branch(miss, true);
+            // (longer than any word (the longest is shorter than FastTestLengths), or no word of its length: false)
+            auto const no_word = [&]()
+            {
+                op(opcode::If);
+                iCode.push_back(0x40u);
+                iControls.push_back(control{ control_kind::Block });
+                constant(values::False);
+                branch(done, false);
+                end_control();
+            };
+            get(length);
+            i64(static_cast<std::int64_t>(layout::FastTestLengths));
+            op(opcode::I64GeU);
+            no_word();
+            get(table);
+            get(length);
+            i64(3);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            mem_load(opcode::I64LoadMem, 0u, alias::Any);
+            tee(filter);
+            op(opcode::I64Eqz);
+            no_word();
+            // (its bit: of its first, middle and last code units)
+            get(filter);
+            get(chars);
+            mem_load(opcode::I64LoadMem16U, 0u, alias::String);
+            i64(37);
+            op(opcode::I64Mul);
+            get(chars);
+            get(length);
+            i64(1);
+            op(opcode::I64ShrU);
+            i64(1);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            mem_load(opcode::I64LoadMem16U, 0u, alias::String);
+            i64(11);
+            op(opcode::I64Mul);
+            op(opcode::I64Add);
+            get(chars);
+            get(length);
+            i64(1);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            i64(2);
+            op(opcode::I64Sub);
+            mem_load(opcode::I64LoadMem16U, 0u, alias::String);
+            op(opcode::I64Add);
+            op(opcode::I64ShrU);    // (the shift's count: mod 64)
+            i64(1);
+            op(opcode::I64And);
+            op(opcode::I64Eqz);
+            no_word();
+        }
+        end_control();
+        get(callee);
+        get(thisValue);
+        get(text);
+        runtime("test_direct", { I64, I64, I64 }, I64);
+        end_control();
+        release(filter);
+        release(length);
+        release(chars);
+        release(prototype);
+        release(state);
+        release(table);
         release(cell);
     }
 
@@ -3778,7 +3918,8 @@ namespace neos::compilers::javascript
             { "%js.array_push", { I64, I64, I64 }, I64 },
             { "%js.array_pop", { I64, I64 }, I64 },
             { "%js.get_named_first", { I64, I64, I32 }, I64 },
-            { "%js.string_slice", { I64, I64, I64, I64 }, I64 }
+            { "%js.string_slice", { I64, I64, I64, I64 }, I64 },
+            { "%js.regexp_test", { I64, I64, I64 }, I64 }
         };
         static_assert(std::size(sStubs) == static_cast<std::size_t>(function_generator::stub::Count));
         auto const& s = sStubs[static_cast<std::size_t>(aStub)];
@@ -3831,6 +3972,10 @@ namespace neos::compilers::javascript
         case stub::StringSlice:
             iParameterCount = 4u;
             string_slice_stub();
+            break;
+        case stub::RegExpTest:
+            iParameterCount = 3u;
+            regexp_test_stub();
             break;
         case stub::ToBoolean:
             iParameterCount = 1u;
@@ -6189,8 +6334,30 @@ namespace neos::compilers::javascript
                 search(middle, aEnd);
                 end_control();
             };
-            search(0u, sorted.size());
-            otherwise();
+            auto const range = static_cast<std::int64_t>(max) - static_cast<std::int64_t>(min) + 1;
+            if (sorted.size() >= 8u && range <= 4 * static_cast<std::int64_t>(sorted.size()) && range <= 1024)
+            {
+                // (dense: a table of the values from the least (br_table: one indirect jump, not a search's chain of tests))
+                auto const defaultDepth = defaultClause ? clause_depth(*defaultClause) : static_cast<std::uint32_t>(depth_of(exit));
+                get(index);
+                i32(min);
+                op(opcode::I32Sub);
+                op(opcode::BrTable);
+                u32(static_cast<std::uint32_t>(range));
+                std::size_t k = 0u;
+                for (std::int64_t v = min; v <= max; ++v)
+                {
+                    while (k < sorted.size() && sorted[k].first < v)
+                        ++k;
+                    u32(k < sorted.size() && sorted[k].first == v ? clause_depth(sorted[k].second) : defaultDepth);
+                }
+                u32(defaultDepth);
+            }
+            else
+            {
+                search(0u, sorted.size());
+                otherwise();
+            }
         }
         else
         for (std::size_t i = 0u; i < n; ++i)
@@ -8102,6 +8269,8 @@ namespace neos::compilers::javascript
                     }
                     if (direct.method == "slice")
                         call_stub(stub::StringSlice);   // (its in-line path, else slice_direct)
+                    else if (direct.method == "test")
+                        call_stub(stub::RegExpTest);    // (its in-line path, else test_direct)
                     else
                         runtime(direct.runtime != nullptr ? std::string{ direct.runtime } : "native_direct" + std::to_string(count), parameters, I64);
                     if (!tail)
