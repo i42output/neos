@@ -506,10 +506,20 @@ namespace neos::javascript_runtime
                 return true;
             if (is_nullish(aLhs) || is_nullish(aRhs) || aLhs == Empty || aRhs == Empty)
                 return false;
+            // (a string whose first code unit no numeric literal (StringNumericLiteral) can start with is NaN: not equal (not converted))
+            auto const not_numeric = [](value aString)
+            {
+                auto const text = str(aString);
+                if (text.empty())
+                    return false;
+                auto const c = text[0];
+                return c < 0x80u && !(c >= u'0' && c <= u'9') && c != u'+' && c != u'-' && c != u'.' && c != u'I' && c != u' ' &&
+                    !(c >= 0x09u && c <= 0x0Du);
+            };
             if (ln && is_string(aRhs))
-                return as_number(aLhs) == to_number(aRhs);
+                return !not_numeric(aRhs) && as_number(aLhs) == to_number(aRhs);
             if (is_string(aLhs) && rn)
-                return to_number(aLhs) == as_number(aRhs);
+                return !not_numeric(aLhs) && to_number(aLhs) == as_number(aRhs);
             if (is_bigint(aLhs) && is_string(aRhs))
             {
                 auto const n = string_to_bigint(str(aRhs));
@@ -697,6 +707,9 @@ namespace neos::javascript_runtime
 
     bool has_own_property(value aObject, value aKey)
     {
+        // (an ordinary object's (its [[GetOwnProperty]] is OrdinaryGetOwnProperty): its table has the key (no descriptor made))
+        if (auto& o = obj(aObject); o.cellKind == KindObject)
+            return o.properties.find(aKey) != nullptr;
         return obj(aObject).get_own_property(aKey).has_value();
     }
 

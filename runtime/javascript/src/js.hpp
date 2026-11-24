@@ -2139,6 +2139,7 @@ namespace neos::javascript_runtime
     value string_slice_direct(value aCallee, value aThis, value aStart, value aEnd);
     // (builtins_regexp.cpp: r.test(s) whose callee is the built-in RegExp.prototype.test)
     value regexp_test_direct(value aCallee, value aThis, value aString);
+    value regexp_word_test_direct(value aThis, value aString);
 
     // --- the built-ins (builtins_*.cpp): each adds its intrinsics to the realm
 

@@ -2662,6 +2662,31 @@ namespace neos::javascript_runtime::regexp
         match_result run(program const& aProgram, std::u16string_view aInput, std::size_t aStart, bool aSticky, std::vector<std::int32_t>& aCaptures);
     }
 
+    namespace
+    {
+        bool in_first_set(program const& aProgram, char32_t aCodeUnit)
+        {
+            auto const& firstSet = aProgram.firstSet;
+            return aCodeUnit < 128u ? ((firstSet.ascii[aCodeUnit >> 6u] >> (aCodeUnit & 63u)) & 1u) != 0u : contains(firstSet.ranges, aCodeUnit);
+        }
+    }
+
+    std::size_t search_start(program const& aProgram, std::u16string_view aInput, std::size_t aStart)
+    {
+        if (!aProgram.prefix.empty())
+            return find_prefix(aProgram, aInput, aStart);
+        if (aProgram.hasFirstChar)
+            return aInput.find(aProgram.firstChar, aStart);
+        if (aProgram.hasFirstSet)
+        {
+            auto pos = aStart;
+            while (pos < aInput.size() && !in_first_set(aProgram, aInput[pos]))
+                ++pos;
+            return pos < aInput.size() ? pos : std::u16string_view::npos;
+        }
+        return aStart;
+    }
+
     match_result exec(program const& aProgram, std::u16string_view aInput, std::size_t aStart, bool aSticky, std::vector<std::int32_t>& aCaptures)
     {
         if (aStart > aInput.size())
@@ -2684,34 +2709,15 @@ namespace neos::javascript_runtime::regexp
         // (no code unit (from the start; sticky: at it) that a match can start with: none (the matcher's state is not read); else the
         // search starts at the first that can (not in unicode mode, where a position within a surrogate pair is the search's to skip))
         auto from = aStart;
-        if (!aProgram.prefix.empty())
+        if (!aSticky)
         {
-            if (!aSticky && (from = find_prefix(aProgram, aInput, aStart)) == std::u16string_view::npos)
+            if ((from = search_start(aProgram, aInput, aStart)) == std::u16string_view::npos)
                 return match_result::NoMatch;
         }
-        else if (aProgram.hasFirstChar)
+        else if (aProgram.prefix.empty() && (aProgram.hasFirstChar || aProgram.hasFirstSet))
         {
-            if (aSticky ? (aStart >= aInput.size() || aInput[aStart] != aProgram.firstChar) : (from = aInput.find(aProgram.firstChar, aStart)) == std::u16string_view::npos)
+            if (aStart >= aInput.size() || (aProgram.hasFirstChar ? aInput[aStart] != aProgram.firstChar : !in_first_set(aProgram, aInput[aStart])))
                 return match_result::NoMatch;
-        }
-        else if (aProgram.hasFirstSet)
-        {
-            auto const& firstSet = aProgram.firstSet;
-            auto const first = [&](char32_t c) { return c < 128u ? ((firstSet.ascii[c >> 6u] >> (c & 63u)) & 1u) != 0u : contains(firstSet.ranges, c); };
-            auto pos = aStart;
-            if (aSticky)
-            {
-                if (pos >= aInput.size() || !first(aInput[pos]))
-                    return match_result::NoMatch;
-            }
-            else
-            {
-                while (pos < aInput.size() && !first(aInput[pos]))
-                    ++pos;
-                if (pos >= aInput.size())
-                    return match_result::NoMatch;
-                from = pos;
-            }
         }
         bool const unicode = (aProgram.flags & (FlagUnicode | FlagUnicodeSets)) != 0u;
         return run(aProgram, aInput, aSticky || unicode ? aStart : from, aSticky, aCaptures);

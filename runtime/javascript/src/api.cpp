@@ -1370,6 +1370,12 @@ namespace neos::javascript_runtime
             return guard([&]() -> value { return string_slice_direct(aCallee, aThis, aStart, aEnd); });
         }
 
+        value regexp_word_test(value aThis, value aString)
+        {
+            // (the test stub's, once it found a word of the string's length may be it (see regexp_word_test_direct))
+            return regexp_word_test_direct(aThis, aString);
+        }
+
         value test_direct(value aCallee, value aThis, value aString)
         {
             // (r.test(s) whose callee is the realm's %RegExp.prototype.test%)
@@ -1783,16 +1789,30 @@ namespace neos::javascript_runtime
                 region_vector<site> entries;
             };
             using site_table = std::deque<site_chunk>;
-            site* site_entries(site_table& aTable, std::size_t aSite)
+            site* site_entries(site_table& aTable, std::size_t aSite, std::size_t* aFirst = nullptr, std::size_t* aEnd = nullptr)
             {
                 // (the last chunk whose first site is not after it: the chunks are in the order of their first sites (an extension's 
-                // continue the program's count); a binary search (a large bundle's program has a chunk per deferred unit))
-                auto chunk = std::upper_bound(aTable.begin(), aTable.end(), aSite, [](std::size_t aNumber, site_chunk const& aChunk) { return aNumber < aChunk.first; });
-                if (chunk == aTable.begin())
-                    return nullptr;
-                --chunk;
+                // continue the program's count); a binary search (a large bundle's program has a chunk per deferred unit)). The program's
+                // own (the first chunk) first: most of its sites are. Its sites (aFirst, aEnd: those it has that the next's are not))
+                auto chunk = aTable.begin();
+                if (aTable.empty() || aSite < aTable.front().first || (aTable.size() > 1u && aSite >= aTable[1].first))
+                {
+                    chunk = std::upper_bound(aTable.begin(), aTable.end(), aSite, [](std::size_t aNumber, site_chunk const& aChunk) { return aNumber < aChunk.first; });
+                    if (chunk == aTable.begin())
+                        return nullptr;
+                    --chunk;
+                }
                 auto const index = (aSite - chunk->first) * jsl::SiteEntries;
-                return index < chunk->entries.size() ? &chunk->entries[index] : nullptr;
+                if (index >= chunk->entries.size())
+                    return nullptr;
+                if (aFirst != nullptr)
+                {
+                    *aFirst = chunk->first;
+                    *aEnd = chunk->first + chunk->entries.size() / jsl::SiteEntries;
+                    if (auto const next = std::next(chunk); next != aTable.end())
+                        *aEnd = std::min(*aEnd, next->first);
+                }
+                return &chunk->entries[index];
             }
             struct site_tables
             {
@@ -1804,6 +1824,11 @@ namespace neos::javascript_runtime
                 site_table* lastTable = nullptr;
                 std::vector<std::uint32_t>* lastUsed = nullptr;
                 std::vector<bool>* lastListed = nullptr;
+                // (the sites of the chunk (of the last program's table) that the last site found was in, and its first's entries (a 
+                // chunk's entries do not move))
+                std::size_t lastFirst = 0u;
+                std::size_t lastEnd = 0u;
+                site* lastEntries = nullptr;
             };
             site_tables& the_site_tables()
             {
@@ -1816,11 +1841,12 @@ namespace neos::javascript_runtime
                 auto& t = the_site_tables();
                 for (auto& [program, table] : t.tables)
                     for (auto const site : t.used[program])
+                    {
+                        auto const* const entries = site_entries(table, site);
+                        if (entries == nullptr)
+                            continue;
                         for (std::size_t e = 0u; e < jsl::SiteEntries; ++e)
                         {
-                            auto const* const entries = site_entries(table, site);
-                            if (entries == nullptr)
-                                break;
                             auto const& s = entries[e];
                             if (s.kind != jsl::SiteNone)
                                 for (auto const& p : s.prototypes)
@@ -1829,6 +1855,7 @@ namespace neos::javascript_runtime
                             if (s.function != 0u)
                                 aTracer.mark(s.function);
                         }
+                    }
             } };
 
             // (a site's entries while the runtime has them (see site_of): when it lets go of them, the words of theirs that compiled
@@ -1890,9 +1917,23 @@ namespace neos::javascript_runtime
                     t.lastTable = &existing->second;
                     t.lastUsed = &t.used[program];
                     t.lastListed = &t.listed[program];
+                    t.lastEnd = 0u;
                 }
                 auto const number = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite));
-                auto* const entries = site_entries(*t.lastTable, number);
+                site* entries;
+                if (number >= t.lastFirst && number < t.lastEnd)
+                    entries = t.lastEntries + (number - t.lastFirst) * jsl::SiteEntries;
+                else
+                {
+                    std::size_t first, end;
+                    entries = site_entries(*t.lastTable, number, &first, &end);
+                    if (entries != nullptr)
+                    {
+                        t.lastFirst = first;
+                        t.lastEnd = end;
+                        t.lastEntries = entries - (number - first) * jsl::SiteEntries;
+                    }
+                }
                 if (entries == nullptr || number >= t.lastListed->size())
                     return nullptr;
                 // (used: its entries may come to refer to values)
@@ -2151,13 +2192,14 @@ namespace neos::javascript_runtime
         std::int32_t callee_number_cached(value aCallee, std::int32_t aSite)
         {
             // (callee_number, remembered in a call's site (its entries have only functions and their numbers))
+            // (and one that has none (e.g. a built-in function: -1), so that the site's next call of it does not come here again)
             auto const number = callee_number(aCallee);
-            if (number >= 0)
+            if (number >= 0 || is_object(aCallee))
             {
                 site e{};
                 e.function = aCallee;
                 e.number = number;
-                e.dispatch = site_dispatch(aCallee);
+                e.dispatch = number >= 0 ? site_dispatch(aCallee) : 0u;
                 remember(aSite, e);
             }
             return number;
@@ -3318,6 +3360,7 @@ namespace neos::javascript_runtime
             { "closure_table", NEOS_RT_FUNCTION(closure_table), I64, 3u, { I32, I32, I32 }, 0u },
             { "environment_written", NEOS_RT_FUNCTION(environment_written), I64, 2u, { I64, I32 }, 0u },
             { "constant_object", NEOS_RT_FUNCTION(constant_object), I64, 1u, { I64 }, 0u },
+            { "regexp_word_test", NEOS_RT_FUNCTION(regexp_word_test), I64, 2u, { I64, I64 }, 0u },
             { "fixed_global", NEOS_RT_FUNCTION(fixed_global), I64, 2u, { I64, I32 }, 0u },
             { "get_cached", NEOS_RT_FUNCTION(get_cached), I64, 3u, { I64, I64, I32 }, 0u },
             { "callee_number_cached", NEOS_RT_FUNCTION(callee_number_cached), I32, 2u, { I64, I32 }, 0u },

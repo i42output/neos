@@ -82,12 +82,11 @@ namespace neos::javascript_runtime
                         });
                         if (plain && n == count)
                         {
+                            // (each key's property as it is then (a set may change the object): its table's, an enumerable data 
+                            // property's value as it is (an accessor's from its getter))
                             for (std::size_t k = 0u; k < n; ++k)
-                            {
-                                auto const desc = obj(from).get_own_property(keys[k]);
-                                if (desc && desc->enumerable.value_or(false))
-                                    set(to, keys[k], get(from, keys[k]), true);
-                            }
+                                if (auto const p = obj(from).properties.find(keys[k]); p && p.enumerable())
+                                    set(to, keys[k], p.accessor() ? get(from, keys[k]) : p.data(), true);
                             continue;
                         }
                     }

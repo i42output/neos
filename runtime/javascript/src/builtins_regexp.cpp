@@ -336,6 +336,8 @@ namespace neos::javascript_runtime
         {
             if (aEnd <= aStart)
                 return the_names().empty;
+            if (aEnd - aStart == 1)
+                return make_string(aText[static_cast<std::size_t>(aStart)]);    // (an ASCII code unit's is shared)
             if (aStart == 0 && static_cast<std::size_t>(aEnd) == aText.size())
                 return make_string(std::u16string_view{ aText });
             return make_string(std::u16string_view{ aText }.substr(static_cast<std::size_t>(aStart), static_cast<std::size_t>(aEnd - aStart)));
@@ -1290,6 +1292,65 @@ namespace neos::javascript_runtime
         }
     }
 
+    namespace
+    {
+        // (RegExpBuiltinExec's match of a set of words (see regexp::compile), neither global nor sticky, whose lastIndex is a number (its
+        // ToLength calls nothing, and it is not used): one of its words, the whole string (flat))
+        value word_set_test(regexp_object& r, value aString, regexp_state& state)
+        {
+            auto const& program = *r.matcher;
+            auto const text = str(aString);
+            auto const length = text.size();
+            if (length < program.shortestWord || length > program.longestWord)
+                return False;
+            // (the words of its length: their first and last code units compared first, then the others)
+            bool found = false;
+            auto const& same = program.words[length];
+            if (length == 0u)
+                found = !same.empty();
+            else if ((program.wordFilter[length] & regexp::word_bit(text.data(), length)) != 0u)
+            {
+                auto const* const t = text.data();
+                auto const first = t[0];
+                auto const last = t[length - 1u];
+                for (auto const& word : same)
+                {
+                    auto const* const w = word.data();
+                    if (w[0] == first && w[length - 1u] == last && std::memcmp(w, t, length * sizeof(char16_t)) == 0)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found)
+                return False;
+            if (r.legacyFeaturesEnabled)
+            {
+                // (the match, and no captures)
+                auto& legacy = state.legacy;
+                legacy.valid = true;
+                legacy.input = aString;
+                legacy.subject = aString;
+                legacy.captures[0] = 0;
+                legacy.captures[1] = static_cast<std::int32_t>(length);
+                legacy.count = 1u;
+                legacy.lastParen[0] = -1;
+                legacy.lastParen[1] = -1;
+            }
+            else
+                state.legacy.valid = false;
+            return True;
+        }
+    }
+
+    value regexp_word_test_direct(value aThis, value aString)
+    {
+        // (compiled code's test stub's, of a regexp and a string that it found to be as word_set_test needs (see the compiler's 
+        // regexp_test_stub: a set of words, its built-in exec, its lastIndex a number, the string flat): no exception)
+        return word_set_test(*as_regexp(aThis), aString, the_regexp_state());
+    }
+
     value regexp_test_direct(value aCallee, value aThis, value aString)
     {
         // (as the built-in has it (its fast path first; else the built-in called))
@@ -1298,54 +1359,17 @@ namespace neos::javascript_runtime
                 if (auto& state = the_regexp_state(); has_builtin_exec(*r, state))
                 {
                     // (a set of words (see regexp::compile), neither global nor sticky, whose lastIndex is a number (its ToLength calls 
-                    // nothing, and it is not used): RegExpBuiltinExec's match here (one of its words: the whole string))
+                    // nothing, and it is not used): RegExpBuiltinExec's match here (see word_set_test))
                     auto const& program = *r->matcher;
                     if (program.wordSet && (r->flagBits & (regexp::FlagGlobal | regexp::FlagSticky)) == 0u)
                         if (auto const* k = known_last_index(*r, state); k != nullptr && is_number(r->properties.value_at(k->position)))
-                        {
-                            auto const text = str(aString);
-                            auto const length = text.size();
-                            if (length < program.shortestWord || length > program.longestWord)
-                                return False;
-                            // (the words of its length: their first and last code units compared first, then the others)
-                            bool found = false;
-                            auto const& same = program.words[length];
-                            if (length == 0u)
-                                found = !same.empty();
-                            else if ((program.wordFilter[length] & regexp::word_bit(text.data(), length)) != 0u)
-                            {
-                                auto const* const t = text.data();
-                                auto const first = t[0];
-                                auto const last = t[length - 1u];
-                                for (auto const& word : same)
-                                {
-                                    auto const* const w = word.data();
-                                    if (w[0] == first && w[length - 1u] == last && std::memcmp(w, t, length * sizeof(char16_t)) == 0)
-                                    {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!found)
-                                return False;
-                            if (r->legacyFeaturesEnabled)
-                            {
-                                // (the match, and no captures)
-                                auto& legacy = state.legacy;
-                                legacy.valid = true;
-                                legacy.input = aString;
-                                legacy.subject = aString;
-                                legacy.captures[0] = 0;
-                                legacy.captures[1] = static_cast<std::int32_t>(length);
-                                legacy.count = 1u;
-                                legacy.lastParen[0] = -1;
-                                legacy.lastParen[1] = -1;
-                            }
-                            else
-                                state.legacy.valid = false;
-                            return True;
-                        }
+                            return word_set_test(*r, aString, state);
+                    // (neither global nor sticky, whose lastIndex is a number (as above): no code unit that a match can start at, no 
+                    // match (as RegExpBuiltinExec's: nothing changes), e.g. a test for a line break in the space between two tokens)
+                    if (!program.wordSet && (r->flagBits & (regexp::FlagGlobal | regexp::FlagSticky)) == 0u &&
+                        regexp::search_start(program, str(aString), 0u) == std::u16string_view::npos)
+                        if (auto const* k = known_last_index(*r, state); k != nullptr && is_number(r->properties.value_at(k->position)))
+                            return False;
                     return boolean(builtin_match(*r, aThis, aString, the_heap().regexpCaptures, state));
                 }
         return regexp_test_call(aCallee, aThis, aString);

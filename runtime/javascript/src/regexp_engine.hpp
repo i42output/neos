@@ -177,4 +177,7 @@ namespace neos::javascript_runtime::regexp
     // (finds a match starting at aStart (only at aStart if aSticky) or after it; aCaptures: the capture slots (start and end of each
     // group; the whole match first) (-1: undefined); a match's start (slot 0) is the index it was attempted at)
     match_result exec(program const& aProgram, std::u16string_view aInput, std::size_t aStart, bool aSticky, std::vector<std::int32_t>& aCaptures);
+    // (the first code unit (from aStart) that a match can start at, as its prefix, first code unit or first code units say (none: aStart);
+    // npos: none can (not a set of words: see exec))
+    std::size_t search_start(program const& aProgram, std::u16string_view aInput, std::size_t aStart);
 }

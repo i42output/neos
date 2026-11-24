@@ -3478,6 +3478,11 @@ namespace neos::compilers::javascript
             op(opcode::I64And);
             op(opcode::I64Eqz);
             no_word();
+            // (a word of its length may be it: the runtime's test of the words (the checks above made: no exception))
+            get(thisValue);
+            get(text);
+            runtime("regexp_word_test", { I64, I64 }, I64);
+            branch(done, false);
         }
         end_control();
         get(callee);
@@ -3610,7 +3615,7 @@ namespace neos::compilers::javascript
             get(size);
             mem_store(opcode::I64StoreMem32, layout::ArrayLength, alias::Elements);
             get(size);
-            op(opcode::F64UConvertI64);
+            op(opcode::F64SConvertI64);     // (a u32's: signed is the same, and in line in an optimizing tier)
             op(opcode::I64ReinterpretF64);
             branch(done, false);
         }
@@ -7596,13 +7601,10 @@ namespace neos::compilers::javascript
         // of different tags, then of the same tag that is not a string's or a bigint's (e.g. two objects))
         auto const bigintOrString = [&]()
         {
-            // (both strings (unless their lengths differ) or both bigints: the runtime's)
+            // (both strings (unless their lengths differ) or both bigints: the runtime's (an i32: no exception))
             get(aLhs);
             get(aRhs);
-            slow_runtime("strict_equal_value", { I64, I64 }, I64);
-            check();
-            constant(values::True);
-            op(opcode::I64Eq);
+            slow_runtime("strict_equal", { I64, I64 }, I32);
         };
         get(aLhs);
         get(aRhs);
@@ -9153,10 +9155,13 @@ namespace neos::compilers::javascript
                     op(opcode::If);
                     iCode.push_back(0x7Eu);
                     iControls.push_back(control{ control_kind::Block });
+                    // (of the same type: IsStrictlyEqual (an i32: no exception))
+                    result(true);
+                    result(false);
                     get(aLhs);
                     get(aRhs);
-                    slow_runtime(aRuntime, { I64, I64 }, I64);
-                    check();
+                    slow_runtime("strict_equal", { I64, I64 }, I32);
+                    op(opcode::Select);
                     op(opcode::Else);
                     result(false);
                     end_control();
