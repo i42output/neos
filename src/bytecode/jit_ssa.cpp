@@ -2341,6 +2341,9 @@ namespace neos
                             };
                             if ((aOp == 0x61u || aOp == 0x62u) && (exact_round_trip(x, y) || exact_round_trip(y, x)))
                                 return aOp == 0x61u;
+                            // (a value compared with itself that is not NaN (it has an integral range): eq, le, ge)
+                            if (x == y && integral_range(aValues, x, 4))
+                                return aOp == 0x61u || aOp == 0x65u || aOp == 0x66u;
                             bool swapped = false;
                             if (aValues[x].constant())
                             {

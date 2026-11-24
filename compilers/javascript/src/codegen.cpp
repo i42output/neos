@@ -1428,6 +1428,27 @@ namespace neos::compilers::javascript
         release(environment);
     }
 
+    void function_generator::constant_binding(binding const* aBinding, std::uint32_t aValue)
+    {
+        // (a fixed binding whose value's properties are not written through it (e.g. a module's table of constants): the runtime may treat
+        // an ordinary object that is its value as a constant (see the runtime's constant_object: its gets' entries are its own, watched, so
+        // that an optimizing tier that knows the object knows its properties' values); written once (by its declaration))
+        if (!aBinding->fixed || aBinding->memberWritten)
+            return;
+        // (its declaration's initializer an object literal: a table, not an object that other code (e.g. its methods) may write)
+        auto const* declaration = aBinding->declaration;
+        if (declaration == nullptr || declaration->parent == nullptr || !declaration->parent->is(construct::Declarator) ||
+            declaration->parent->size() < 2u || declaration->parent->child(0u) != declaration || !declaration->parent->child(1u)->is(construct::Object))
+            return;
+        // (and no methods, accessors or functions in it (a function of the object may write its properties through this))
+        for (auto const* property : declaration->parent->child(1u)->children)
+            if (!property->is(construct::Property) || std::any_of(property->children.begin(), property->children.end(), [](node const* c) { return is_function_node(c); }))
+                return;
+        get(aValue);
+        runtime("constant_object", { I64 }, I64);
+        drop();
+    }
+
     void function_generator::environment_slot(std::uint32_t aHops, std::uint32_t aSlot)
     {
         // (an environment (on the stack) -> the address of the slot of the environment aHops above it; an environment's parent and its
@@ -4518,6 +4539,7 @@ namespace neos::compilers::javascript
                     get(value);
                     mem_store(opcode::I64StoreMem, 0u, alias::EnvSlot);
                     slot_written(aReference.target, aReference.hops);
+                    constant_binding(aReference.target, value);
                     end_control();
                     release(address);
                 }
@@ -4528,6 +4550,7 @@ namespace neos::compilers::javascript
                     get(value);
                     mem_store(opcode::I64StoreMem, 0u, alias::EnvSlot);
                     slot_written(aReference.target, aReference.hops);
+                    constant_binding(aReference.target, value);
                 }
             }
             break;
@@ -4630,8 +4653,9 @@ namespace neos::compilers::javascript
         environment_slot(hops, aBinding->slot);
         get(value);
         mem_store(opcode::I64StoreMem, 0u, alias::EnvSlot);
-        release(value);
         slot_written(aBinding, hops);
+        constant_binding(aBinding, value);
+        release(value);
     }
 
     // --- the function

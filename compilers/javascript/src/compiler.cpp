@@ -2104,6 +2104,11 @@ namespace neos::compilers::javascript
                     iUses[aSite] = b;
                 if (aSite != nullptr && assignment_target(aSite))
                     b->assigned = true;
+                // (a property of its value written through it (it is a member expression's object that is written or deleted))
+                if (aSite != nullptr && aSite->parent != nullptr && (aSite->parent->is(construct::Dot) || aSite->parent->is(construct::Index) ||
+                    aSite->parent->is(construct::DotPrivate)) && aSite->parent->size() > 0u && aSite->parent->child(0u) == aSite &&
+                    (assignment_target(aSite->parent) || (aSite->parent->parent != nullptr && aSite->parent->parent->is(construct::Delete))))
+                    b->memberWritten = true;
                 if (s->function != aFunction)
                 {
                     b->captured = true;

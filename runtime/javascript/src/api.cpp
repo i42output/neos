@@ -880,6 +880,26 @@ namespace neos::javascript_runtime
                 validity_changed(&aSlot);
         }
 
+        value constant_object(value aValue)
+        {
+            // (compiled code initialized a fixed binding whose value's properties it does not write (an object literal of data properties:
+            // e.g. a module's table of constants) with it: an ordinary object with a shape is a constant: a get's entry for its own property
+            // is its own (SiteSelf), with its validity word (see watch), so that an optimizing tier that knows the object knows the property's
+            // value (V8's constant fields). Its sets are the runtime's then (as a prototype's), so at most MaxConstantObjects are)
+            constexpr std::uint32_t MaxConstantObjects = 256u;
+            static std::uint32_t sConstantObjects = 0u;
+            if (is_object(aValue) && sConstantObjects < MaxConstantObjects)
+            {
+                auto& o = obj(aValue);
+                if (o.cls == object_class::Ordinary && o.ordinaryGet && !o.mirrored && !o.constant && o.properties.layout() != nullptr)
+                {
+                    o.constant = 1u;
+                    ++sConstantObjects;
+                }
+            }
+            return Undefined;
+        }
+
         value environment_written(value aEnvironment, std::int32_t aSlot)
         {
             // (compiled code wrote a fixed binding's slot of a watched environment)
@@ -1997,6 +2017,19 @@ namespace neos::javascript_runtime
                         {
                             if (p->accessor())
                                 return;
+                            // (a constant object's (see constant_object): its own entry (the object itself, with its validity word: its shape 
+                            // is its own once it is watched))
+                            if (o.constant)
+                                if (auto* const word = watch(o); word != nullptr && o.properties.layout() != nullptr)
+                                {
+                                    auto const* const own = o.properties.layout();
+                                    e.shape = shape_word(own);
+                                    e.kind = jsl::SiteSelf;
+                                    e.prototypes[0] = { aObject, shape_word(own) };
+                                    e.position = o.properties.find(aKey).position();
+                                    watch_holder(e, o);
+                                    return;
+                                }
                             e.kind = jsl::SiteOwn;
                             e.position = p.position();
                             own_field(e, const_cast<shape*>(layout), true);
@@ -2088,7 +2121,7 @@ namespace neos::javascript_runtime
                         auto& o = obj(aObject);
                         if (e.kind == jsl::SiteSelf)
                         {
-                            if (aObject == e.prototypes[0].object && holder_value(o, 0u, e.position, aKey, aResult))
+                            if (aObject == e.prototypes[0].object && holder_value(o, e.prototypes[0].shape, e.position, aKey, aResult))
                                 return true;
                             continue;
                         }
@@ -3284,6 +3317,7 @@ namespace neos::javascript_runtime
             { "property_sites", NEOS_RT_FUNCTION(property_sites), I64, 2u, { I32, I32 }, 0u },
             { "closure_table", NEOS_RT_FUNCTION(closure_table), I64, 3u, { I32, I32, I32 }, 0u },
             { "environment_written", NEOS_RT_FUNCTION(environment_written), I64, 2u, { I64, I32 }, 0u },
+            { "constant_object", NEOS_RT_FUNCTION(constant_object), I64, 1u, { I64 }, 0u },
             { "fixed_global", NEOS_RT_FUNCTION(fixed_global), I64, 2u, { I64, I32 }, 0u },
             { "get_cached", NEOS_RT_FUNCTION(get_cached), I64, 3u, { I64, I64, I32 }, 0u },
             { "callee_number_cached", NEOS_RT_FUNCTION(callee_number_cached), I32, 2u, { I64, I32 }, 0u },

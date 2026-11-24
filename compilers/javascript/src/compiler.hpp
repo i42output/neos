@@ -98,6 +98,8 @@ namespace neos::compilers::javascript
                                             ///< function), or it is declared more than once)
         bool fixed = false;                 ///< (captured and written at most once in each of its environments (see compiler::fix_bindings):
                                             ///< once written its slot keeps its value)
+        bool memberWritten = false;         ///< (a property of its value is written through it (x.p = ..., x[k]++, delete x.p ...): see
+                                            ///< function_generator::constant_binding)
         bool lexical() const { return kind == binding_kind::Let || kind == binding_kind::Const || kind == binding_kind::Class; }
     };
 
@@ -345,7 +347,8 @@ namespace neos::compilers::javascript
         void push_extra();                          ///< (a value -> pushed on the extra arguments stack (see layout::AllocExtra))
         void pop_extra(std::uint32_t aCount);       ///< (aCount values popped from it)
         void slot_load(binding const* aBinding);    ///< (a binding's slot -> its value (a fixed binding's: a watched load))
-        void slot_written(binding const* aBinding, std::uint32_t aHops);    ///< (a fixed binding's slot was written: reported if watched)
+        void slot_written(binding const* aBinding, std::uint32_t aHops);
+        void constant_binding(binding const* aBinding, std::uint32_t aValue);    ///< (a fixed binding's slot was written: reported if watched)
         void callee_number_of(std::uint32_t aCallee, std::optional<std::uint32_t> aSite);    ///< (-> the callee's number for the dispatcher (else -1))
         void callee_number_at(std::uint32_t aCallee, std::uint32_t aSite, bool aCallSite);
         void site_dispatch_matches(std::uint32_t aCallee, std::uint32_t aSite);

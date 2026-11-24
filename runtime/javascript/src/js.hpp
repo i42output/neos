@@ -170,6 +170,7 @@ namespace neos::javascript_runtime
         std::uint8_t mirrored : 1 = 0u;     ///< (an object: a global object whose properties have mirrors: changes to them call 
                                             ///< global_object_changed; it has no shape (the property caches do not use it))
         std::uint8_t hasExtra : 1 = 0u;     ///< (an object: it has an object_extra (see object::extra))
+        std::uint8_t constant : 1 = 0u;     ///< (an object: a fixed binding's table (see constant_object): its gets' entries are its own)
         object_class cls{};                 ///< (an object: its class)
         bool extensible = true;             ///< (an object: it is extensible)
         std::uint8_t cellKind = 0u;         ///< (its type's kind (see cell_kind): its operations are gCellOps[cellKind])
