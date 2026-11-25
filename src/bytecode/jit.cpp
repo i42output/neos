@@ -481,6 +481,25 @@ namespace neos
                     };
                     std::vector<lazy_region> lazyRegions;
                     std::uint32_t lazyCompiled = 0u;
+                    // (baseline code made ahead of functions' first calls by the optimizing tier's threads while they have no optimization
+                    // to make (see tier_worker::precompile; NEOS_JIT_PRECOMPILE 0: not): a first call installs its function's (see 
+                    // lazy_compile: code is installed by the thread that runs it). The next function to make, and the bytes made and not
+                    // yet installed (at most MaxPrecompiledBytes); installed functions' call flags (see callFlags) are kept here)
+                    struct precompiled_function
+                    {
+                        std::vector<std::uint8_t> code;
+                        std::size_t entry = 0u;
+                        std::vector<std::pair<std::size_t, std::size_t>> callSites;
+                        std::vector<std::pair<std::size_t, deopt_point>> deoptPoints;
+                        deopt_frame frame;
+                        std::unique_ptr<std::deque<std::uint32_t>> callFlags;
+                    };
+                    bool precompile = false;
+                    std::mutex precompileMutex;
+                    std::vector<std::unique_ptr<precompiled_function>> precompiled;
+                    std::uint32_t precompileNext = 0u;
+                    std::size_t precompiledBytes = 0u;
+                    std::vector<std::unique_ptr<std::deque<std::uint32_t>>> precompiledCallFlags;
                 };
 
                 void compiled_module_deleter::operator()(compiled_module* aModule) const
@@ -687,7 +706,7 @@ namespace neos
                             iLabels[aLabel].offset = offset();
                             if (iInCold)
                                 iColdLabels.push_back(aLabel);
-                            else
+                            else if (iJccErratum)
                                 iRunLabels.push_back(aLabel);
                         }
                         // (padding to a multiple of aAlignment where execution does not reach it (e.g. before a function): int3s)
@@ -967,6 +986,12 @@ namespace neos
                                 }
                         }
                     public:
+                        // (in line where it is used: a call for each byte of each instruction costs as much as the byte)
+#if defined(_MSC_VER)
+                        __forceinline
+#else
+                        [[gnu::always_inline]] inline
+#endif
                         void emit8(std::uint8_t aByte)
                         {
                             // (the code's next byte, if there is room for it (no allocation: no frame of its own); else as emit_bytes)
@@ -987,9 +1012,28 @@ namespace neos
                         {
                             emit_bytes(&aByte, 1u);
                         }
-                        // (little endian: as emit8 of each byte)
-                        void emit32(std::uint32_t aValue) { emit_bytes(&aValue, 4u); }
-                        void emit64(std::uint64_t aValue) { emit_bytes(&aValue, 8u); }
+                        // (little endian: as emit8 of each byte (in place if there is room: no insert))
+                        void emit32(std::uint32_t aValue) { emit_word(aValue); }
+                        void emit64(std::uint64_t aValue) { emit_word(aValue); }
+                        template <typename T>
+                        void emit_word(T aValue)
+                        {
+                            if (!iInCold && !iLastJump && code.capacity() - code.size() >= sizeof(T)) [[likely]]
+                            {
+                                iEvents += sizeof(T);
+                                auto const n = code.size();
+                                code.resize(n + sizeof(T));
+                                std::memcpy(code.data() + n, &aValue, sizeof(T));
+                                return;
+                            }
+                            emit_bytes(&aValue, sizeof(T));
+                        }
+                        // (room for the code of a function of aTokens tokens (its labels too): fewer reallocations as it is made)
+                        void reserve(std::size_t aTokens)
+                        {
+                            code.reserve(std::max<std::size_t>(4096u, aTokens * 8u));
+                            iLabels.reserve(aTokens / 4u + 16u);
+                        }
 #if defined(_MSC_VER)
                         __declspec(noinline)
 #else
@@ -1466,7 +1510,7 @@ namespace neos
                             iLabels[aLabel].shorts.push_back(aShort);
                             if (iInCold)
                                 iColdFixups.emplace_back(aLabel, iLabels[aLabel].fixups.size() - 1u);
-                            else
+                            else if (iJccErratum)
                                 iRunFixups.emplace_back(aLabel, iLabels[aLabel].fixups.size() - 1u);
                             if (aShort != NotShort)
                                 emit8(0u);
@@ -1485,7 +1529,8 @@ namespace neos
                         // (an instruction that a jump after it can be moved by: it starts here (see within_boundary))
                         void lengthenable()
                         {
-                            if (!iInCold)
+                            // (only where within_boundary moves jumps)
+                            if (!iInCold && iJccErratum)
                                 iRun.push_back(lengthenable_instruction{ code.size() });
                         }
                         // (an instruction that a following jcc can be fused with (cmp, test, add, sub and and): its start and end)
@@ -2317,7 +2362,8 @@ namespace neos
                             std::vector<std::pair<std::size_t, compiled_module::deopt_point>> deoptPoints;
                             compiled_module::deopt_frame frame;
                         };
-                        void generate_lazy(compiled_module& aModule, std::uint32_t aFunction, lazy_function& aOutput)
+                        // (aCallFlags: where its calls' flags are (see compiled_module::callFlags; null: the module's))
+                        void generate_lazy(compiled_module& aModule, std::uint32_t aFunction, lazy_function& aOutput, std::deque<std::uint32_t>* aCallFlags = nullptr)
                         {
                             iIndirect = aModule.indirect.data();
                             iLazy = true;
@@ -2327,10 +2373,11 @@ namespace neos
                                 iLoopCounters = aModule.loopCounters.data();
                                 iOsrPending = aModule.osrPending.data();
                                 iOsr = aModule.osr;
-                                iCallFlags = &aModule.callFlags;
+                                iCallFlags = aCallFlags != nullptr ? aCallFlags : &aModule.callFlags;
                                 iLazyFrame = &aOutput.frame;
                             }
                             iPrimaryMemory = aModule.primaryMemory;
+                            a.reserve(iModule.functions[aFunction].codeEnd - iModule.functions[aFunction].codeBegin);
                             function(aFunction);
                             auto const exit = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(aModule.code) + aModule.exitOffset);
                             for (std::uint32_t t = 1u; t < TrapCount; ++t)
@@ -3439,8 +3486,8 @@ namespace neos
                             for (auto t : *f.locals)
                                 iLocals.push_back(local_info{ t });
                             // (a fixed external memory that its code accesses (the first): its address in a register (callee saved: 
-                            // the function saves it))
-                            for (std::size_t p = f.codeBegin; p < f.codeEnd;)
+                            // the function saves it); not looked for if the module has a primary memory (its register is that one's))
+                            for (std::size_t p = iPrimaryMemory != 0u ? f.codeEnd : f.codeBegin; p < f.codeEnd;)
                             {
                                 auto const op = static_cast<std::uint8_t>(iTokens[p]);
                                 if (op >= 0x28u && op <= 0x3Eu)
@@ -7543,6 +7590,7 @@ namespace neos
                             // last slot))
                             bool const shared = d.frames.empty() && (iDeoptCommonFrame == nullptr || iDeoptCommonFrame == &frame);
                             a.load(true, R11, R15, ContextDeoptBuffer);
+                            std::optional<std::uint64_t> raxConstant;   // (the constant that rax has (for the next value that is the same))
                             for (std::size_t o = 0u; o < i.operands.size(); ++o)
                             {
                                 auto const x = i.operands[o];
@@ -7551,10 +7599,17 @@ namespace neos
                                 bool const narrow = type == ssa::I32 || type == ssa::F32;
                                 if (constant(x))
                                 {
-                                    a.mov_ri(RAX, narrow ? (bits(x) & 0xFFFFFFFFull) : bits(x), true);
+                                    auto const k = narrow ? (bits(x) & 0xFFFFFFFFull) : bits(x);
+                                    if (raxConstant != k)
+                                    {
+                                        a.mov_ri(RAX, k, true);
+                                        raxConstant = k;
+                                    }
                                     a.store(true, R11, disp, RAX);
+                                    continue;
                                 }
-                                else if (iHome[x] && !iDeoptAtLocation[v])
+                                raxConstant.reset();
+                                if (iHome[x] && !iDeoptAtLocation[v])
                                 {
                                     a.load(!narrow, RAX, RBP, home_of(x));
                                     a.store(true, R11, disp, RAX);
@@ -9851,8 +9906,46 @@ namespace neos
                         return static_cast<std::size_t>((sNext.fetch_add(1u, std::memory_order_relaxed) * 37u) % 64u) * 64u;
                     }
 
+                    // (code is changed one change at a time (see patch_code))
+                    std::mutex& patch_mutex()
+                    {
+                        static std::mutex sMutex;
+                        return sMutex;
+                    }
+#if !defined(_WIN32)
+                    // (executable memory has two views of its pages (a memory file mapped twice): code runs in one (read and execute), 
+                    // changes are written to the other (read and write), so that no page is writable and executable and a change makes
+                    // no change of protection (each that removed a permission made every processor that runs one of the program's threads
+                    // flush its address translations: a lazily compiled function's installation made four). By the executable view's
+                    // start (patch_mutex held): its size and the writable view)
+                    struct executable_views
+                    {
+                        std::size_t size = 0u;
+                        std::uint8_t* writable = nullptr;
+                    };
+                    std::map<std::uintptr_t, executable_views>& executable_view_map()
+                    {
+                        static std::map<std::uintptr_t, executable_views> sViews;
+                        return sViews;
+                    }
+                    // (the writable view of aCount bytes at an executable address (patch_mutex held); null if it has none)
+                    std::uint8_t* writable_view(void const* aAddress, std::size_t aCount)
+                    {
+                        auto const address = reinterpret_cast<std::uintptr_t>(aAddress);
+                        auto& views = executable_view_map();
+                        auto v = views.upper_bound(address);
+                        if (v == views.begin())
+                            return nullptr;
+                        --v;
+                        if (address + aCount > v->first + v->second.size)
+                            return nullptr;
+                        return v->second.writable + (address - v->first);
+                    }
+#endif
+
+                    // (aFixup: changes to the code once it has been copied (its bytes as they can be written, and its address))
                     void* allocate_executable(bytes const& aCode, std::size_t& aSize, compiled_module::tier_version* aVersion = nullptr,
-                        std::function<void(std::uint8_t* aCode)> const& aFixup = {})
+                        std::function<void(std::uint8_t* aWritable, std::uint8_t const* aCode)> const& aFixup = {})
                     {
                         aSize = aCode.size();
                         auto const offset = executable_offset();
@@ -9882,7 +9975,7 @@ namespace neos
                         auto* const code = static_cast<std::uint8_t*>(memory) + offset;
                         std::memcpy(code, source.data(), source.size());
                         if (aFixup)
-                            aFixup(code);
+                            aFixup(code, code);
                         DWORD old;
                         if (!::VirtualProtect(memory, executable, PAGE_EXECUTE_READ, &old))
                         {
@@ -9894,13 +9987,47 @@ namespace neos
                             aVersion->callCounter = reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(memory) + counterAt);
                         return code;
 #else
+                        // (two views (see executable_views); one view if there cannot be two)
+#if defined(__linux__)
+                        if (auto const file = ::memfd_create("neos-jit", MFD_CLOEXEC); file >= 0)
+                        {
+                            void* writable = MAP_FAILED;
+                            void* memory = MAP_FAILED;
+                            if (::ftruncate(file, static_cast<off_t>(total)) == 0)
+                            {
+                                writable = ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+                                if (writable != MAP_FAILED)
+                                    memory = ::mmap(nullptr, total, PROT_READ | PROT_EXEC, MAP_SHARED, file, 0);
+                            }
+                            ::close(file);
+                            if (memory != MAP_FAILED && (!counted || ::mprotect(static_cast<std::uint8_t*>(memory) + executable, total - executable, PROT_READ | PROT_WRITE) == 0))
+                            {
+                                auto* const code = static_cast<std::uint8_t*>(memory) + offset;
+                                auto* const written = static_cast<std::uint8_t*>(writable) + offset;
+                                std::memcpy(written, source.data(), source.size());
+                                if (aFixup)
+                                    aFixup(written, code);
+                                {
+                                    std::lock_guard<std::mutex> lock{ patch_mutex() };
+                                    executable_view_map()[reinterpret_cast<std::uintptr_t>(memory)] = executable_views{ total, static_cast<std::uint8_t*>(writable) };
+                                }
+                                if (counted)
+                                    aVersion->callCounter = reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(memory) + counterAt);
+                                return code;
+                            }
+                            if (memory != MAP_FAILED)
+                                ::munmap(memory, total);
+                            if (writable != MAP_FAILED)
+                                ::munmap(writable, total);
+                        }
+#endif
                         void* memory = ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                         if (memory == MAP_FAILED)
                             return nullptr;
                         auto* const code = static_cast<std::uint8_t*>(memory) + offset;
                         std::memcpy(code, source.data(), source.size());
                         if (aFixup)
-                            aFixup(code);
+                            aFixup(code, code);
                         if (::mprotect(memory, executable, PROT_READ | PROT_EXEC) != 0)
                         {
                             ::munmap(memory, total);
@@ -9921,6 +10048,15 @@ namespace neos
                         (void)aSize;
                         ::VirtualFree(reinterpret_cast<void*>(base), 0, MEM_RELEASE);
 #else
+                        {
+                            std::lock_guard<std::mutex> lock{ patch_mutex() };
+                            auto& views = executable_view_map();
+                            if (auto v = views.find(base); v != views.end())
+                            {
+                                ::munmap(v->second.writable, v->second.size);
+                                views.erase(v);
+                            }
+                        }
                         ::munmap(reinterpret_cast<void*>(base), aSize + (address - base));
 #endif
                     }
@@ -9944,11 +10080,6 @@ namespace neos
                     // region); or, with aWord, the aligned word at aAddress (8 bytes, in one store: e.g. an entry's address (see set_entry)). 
                     // Other threads may be running code in its pages: they stay executable while they are writable; one change at a time
                     // (a page's protection is restored by the change that made it writable))
-                    std::mutex& patch_mutex()
-                    {
-                        static std::mutex sMutex;
-                        return sMutex;
-                    }
                     void patch_code(void* aAddress, void const* aBytes, std::size_t aCount, bool aWord = false)
                     {
                         std::lock_guard<std::mutex> lock{ patch_mutex() };
@@ -9971,6 +10102,19 @@ namespace neos
                         ::VirtualProtect(aAddress, aCount, old, &old);
                         ::FlushInstructionCache(::GetCurrentProcess(), aAddress, aCount);
 #else
+                        if (auto* const writable = writable_view(aAddress, aCount); writable != nullptr)
+                        {
+                            // (through its writable view: no change of protection)
+                            if (aWord)
+                            {
+                                std::uint64_t word;
+                                std::memcpy(&word, aBytes, sizeof(word));
+                                std::atomic_ref<std::uint64_t>{ *reinterpret_cast<std::uint64_t*>(writable) }.store(word, std::memory_order_release);
+                            }
+                            else
+                                std::memcpy(writable, aBytes, aCount);
+                            return;
+                        }
                         auto const pageSize = static_cast<std::uintptr_t>(::sysconf(_SC_PAGESIZE));
                         auto const first = reinterpret_cast<std::uintptr_t>(aAddress) & ~(pageSize - 1u);
                         auto const last = (reinterpret_cast<std::uintptr_t>(aAddress) + aCount + pageSize - 1u) & ~(pageSize - 1u);
@@ -10622,6 +10766,8 @@ namespace neos
                     }
 
                     // (the thread that makes optimized code (see compiled_module::background): jobs in the order they were made)
+                    constexpr std::size_t MaxPrecompiledBytes = std::size_t{ 64u } << 20u;    ///< (see compiled_module::precompiled)
+
                     class tier_worker
                     {
                     public:
@@ -10636,19 +10782,23 @@ namespace neos
                         {
                             {
                                 std::lock_guard<std::mutex> lock{ iMutex };
-                                if (!iStarted)
-                                {
-                                    // (a thread for each processor but the program's (at most 8): optimizations are made sooner (a program's
-                                    // functions are optimized as it starts, while it runs their baseline code))
-                                    auto const processors = std::thread::hardware_concurrency();
-                                    auto const threads = std::clamp<unsigned>(processors > 1u ? processors - 1u : 1u, 1u, 8u);
-                                    for (unsigned t = 0u; t < threads; ++t)
-                                        std::thread{ [this]() { run(); } }.detach();
-                                    iStarted = true;
-                                }
+                                start();
                                 iQueue.push_back(std::move(aJob));
                             }
                             iWork.notify_one();
+                        }
+                        // (a module whose functions are compiled when first called: the threads make its functions' baseline code ahead of
+                        // their first calls while they have no optimization to make (see compiled_module::precompiled); again after it has
+                        // new functions (see extend))
+                        void precompile(compiled_module& aModule)
+                        {
+                            {
+                                std::lock_guard<std::mutex> lock{ iMutex };
+                                start();
+                                if (std::find(iPrecompile.begin(), iPrecompile.end(), &aModule) == iPrecompile.end())
+                                    iPrecompile.push_back(&aModule);
+                            }
+                            iWork.notify_all();
                         }
                         // (a module is changed (see extend): none of its jobs is being made while aChange runs (those not yet made are made 
                         // afterwards))
@@ -10664,17 +10814,110 @@ namespace neos
                             std::unique_lock<std::mutex> lock{ iMutex };
                             aModule.closing = true;
                             iQueue.erase(std::remove_if(iQueue.begin(), iQueue.end(), [&](auto const& j) { return j->module == &aModule; }), iQueue.end());
+                            iPrecompile.erase(std::remove(iPrecompile.begin(), iPrecompile.end(), &aModule), iPrecompile.end());
                             iIdle.wait(lock, [&]() { return aModule.jobsInFlight == 0u; });
                         }
                     private:
+                        // (iMutex held: the threads, if not yet started (one for each processor but the program's, at most 8: optimizations
+                        // are made sooner (a program's functions are optimized as it starts, while it runs their baseline code)))
+                        void start()
+                        {
+                            if (iStarted)
+                                return;
+                            auto const processors = std::thread::hardware_concurrency();
+                            auto const threads = std::clamp<unsigned>(processors > 1u ? processors - 1u : 1u, 1u, 8u);
+                            for (unsigned t = 0u; t < threads; ++t)
+                                std::thread{ [this]() { run(); } }.detach();
+                            iStarted = true;
+                        }
+                        // (iMutex held: a module's next function whose baseline code is to be made ahead (see precompile), by aFunction;
+                        // null if none (modules with none left are no longer looked at))
+                        compiled_module* next_precompile(std::uint32_t& aFunction)
+                        {
+                            for (auto i = iPrecompile.begin(); i != iPrecompile.end();)
+                            {
+                                auto& m = **i;
+                                if (!m.closing)
+                                {
+                                    std::lock_guard<std::mutex> lock{ m.precompileMutex };
+                                    auto const n = static_cast<std::uint32_t>(m.description.functions.size());
+                                    while (m.precompileNext < n && m.precompiledBytes < MaxPrecompiledBytes)
+                                    {
+                                        auto const f = m.precompileNext++;
+                                        if (m.description.functions[f].imported || (f < m.precompiled.size() && m.precompiled[f]) ||
+                                            entry_of(m, f) != reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t*>(m.code) + m.entryTargets[f]))
+                                            continue;
+                                        aFunction = f;
+                                        return &m;
+                                    }
+                                    if (m.precompileNext < n)
+                                    {
+                                        ++i;    // (later, when installs have made room)
+                                        continue;
+                                    }
+                                }
+                                i = iPrecompile.erase(i);
+                            }
+                            return nullptr;
+                        }
+                        // (a function's baseline code, made ahead of its first call (no lock: its module is not extended while it is made 
+                        // (see quiesce)); kept unless its first call has been made meanwhile)
+                        static void precompile_function(compiled_module& aModule, std::uint32_t aFunction)
+                        {
+                            auto& m = aModule;
+                            try
+                            {
+                                auto output = std::make_unique<compiled_module::precompiled_function>();
+                                output->callFlags = std::make_unique<std::deque<std::uint32_t>>();
+                                code_generator::lazy_function compiled;
+                                code_generator generator{ m.description, true };
+                                generator.generate_lazy(m, aFunction, compiled, output->callFlags.get());
+                                output->code = std::move(generator.code());
+                                output->entry = compiled.entry;
+                                output->callSites = std::move(compiled.callSites);
+                                output->deoptPoints = std::move(compiled.deoptPoints);
+                                output->frame = std::move(compiled.frame);
+                                std::lock_guard<std::mutex> lock{ m.precompileMutex };
+                                if (entry_of(m, aFunction) != reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t*>(m.code) + m.entryTargets[aFunction]))
+                                    return;
+                                if (m.precompiled.size() <= aFunction)
+                                    m.precompiled.resize(m.description.functions.size());
+                                m.precompiledBytes += output->code.size();
+                                m.precompiled[aFunction] = std::move(output);
+                            }
+                            catch (...)
+                            {
+                                // (made when first called: as if not made ahead)
+                            }
+                        }
                         void run()
                         {
                             for (;;)
                             {
                                 std::shared_ptr<compiled_module::tier_job> job;
+                                compiled_module* precompiling = nullptr;
+                                std::uint32_t precompiled = 0u;
                                 {
                                     std::unique_lock<std::mutex> lock{ iMutex };
-                                    iWork.wait(lock, [&]() { return !iQueue.empty(); });
+                                    // (optimizations first; else baseline code made ahead)
+                                    iWork.wait(lock, [&]() { return !iQueue.empty() || (precompiling = next_precompile(precompiled)) != nullptr; });
+                                    if (precompiling != nullptr)
+                                        ++precompiling->jobsInFlight;
+                                }
+                                if (precompiling != nullptr)
+                                {
+                                    precompile_function(*precompiling, precompiled);
+                                    {
+                                        std::lock_guard<std::mutex> lock{ iMutex };
+                                        --precompiling->jobsInFlight;
+                                    }
+                                    iIdle.notify_all();
+                                    continue;
+                                }
+                                {
+                                    std::unique_lock<std::mutex> lock{ iMutex };
+                                    if (iQueue.empty())
+                                        continue;
                                     job = std::move(iQueue.front());
                                     iQueue.pop_front();
                                     if (job->module->closing)
@@ -10703,6 +10946,7 @@ namespace neos
                         std::condition_variable iWork;
                         std::condition_variable iIdle;
                         std::deque<std::shared_ptr<compiled_module::tier_job>> iQueue;
+                        std::vector<compiled_module*> iPrecompile;
                         bool iStarted = false;
                     };
 
@@ -10766,10 +11010,36 @@ namespace neos
                                 return reinterpret_cast<void const*>(current);
                             code_generator::lazy_function compiled;
                             {
-                                code_generator generator{ m.description, true };
-                                generator.generate_lazy(m, aFunction, compiled);
+                                // (its code made ahead (see precompiled), else made now)
+                                std::unique_ptr<compiled_module::precompiled_function> ready;
+                                if (m.precompile)
+                                {
+                                    std::lock_guard<std::mutex> precompileLock{ m.precompileMutex };
+                                    if (aFunction < m.precompiled.size() && m.precompiled[aFunction])
+                                    {
+                                        ready = std::move(m.precompiled[aFunction]);
+                                        m.precompiledBytes -= ready->code.size();
+                                    }
+                                }
+                                std::optional<code_generator> generator;
+                                bytes readyCode;
+                                if (ready)
+                                {
+                                    compiled.entry = ready->entry;
+                                    compiled.callSites = std::move(ready->callSites);
+                                    compiled.deoptPoints = std::move(ready->deoptPoints);
+                                    compiled.frame = std::move(ready->frame);
+                                    readyCode = std::move(ready->code);
+                                    if (ready->callFlags)
+                                        m.precompiledCallFlags.push_back(std::move(ready->callFlags));
+                                }
+                                else
+                                {
+                                    generator.emplace(m.description, true);
+                                    generator->generate_lazy(m, aFunction, compiled);
+                                }
                                 compiled.frame.valid = compiled.frame.valid && m.tiering;
-                                bytes& code = generator.code();
+                                bytes& code = ready ? readyCode : generator->code();
                                 // (in the last region, after the code there (a new region if it has no room: the first small (a module 
                                 // may have few functions called, e.g. a dynamic function's), each one twice the last, up to RegionSize))
                                 constexpr std::size_t RegionSize = std::size_t{ 1u } << 20u;
@@ -11658,13 +11928,13 @@ namespace neos
                             }
 #endif
                         // (the entries' addresses: their first targets' (see code_generator::entries))
-                        result->code = allocate_executable(generator.code(), result->codeSize, nullptr, [&](std::uint8_t* aCode)
+                        result->code = allocate_executable(generator.code(), result->codeSize, nullptr, [&](std::uint8_t* aWritable, std::uint8_t const* aCode)
                         {
                             for (std::size_t f = 0u; f < result->functionOffsets.size() && f < result->entryTargets.size(); ++f)
                                 if (!result->description.functions[f].imported)
                                 {
                                     auto const target = reinterpret_cast<std::uint64_t>(aCode + result->entryTargets[f]);
-                                    std::memcpy(aCode + result->functionOffsets[f] + 8u, &target, sizeof(target));
+                                    std::memcpy(aWritable + result->functionOffsets[f] + 8u, &target, sizeof(target));
                                 }
                         });
                         if (result->code == nullptr)
@@ -11673,6 +11943,14 @@ namespace neos
                         for (std::size_t f = 0u; f < result->description.functions.size(); ++f)
                             if (!result->description.functions[f].imported)
                                 result->indirect[f].target = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(result->code) + result->functionOffsets[f]);
+                        // (its functions' baseline code made ahead of their first calls by the optimizing tier's threads (see 
+                        // compiled_module::precompiled; NEOS_JIT_PRECOMPILE 0: not))
+                        if (result->lazy && result->tiering && result->background)
+                            if (auto const text = std::getenv("NEOS_JIT_PRECOMPILE"); text == nullptr || *text == '\0' || std::strtoll(text, nullptr, 10) != 0)
+                            {
+                                result->precompile = true;
+                                tier_worker::instance().precompile(*result);
+                            }
                     }
                     catch (unsupported const&)
                     {
@@ -11752,13 +12030,13 @@ namespace neos
                             slot[33] = 0xE0u;
                         }
                         compiled_module::tier_chunk chunk;
-                        chunk.code = allocate_executable(code, chunk.size, nullptr, [&](std::uint8_t* aCode)
+                        chunk.code = allocate_executable(code, chunk.size, nullptr, [&](std::uint8_t* aWritable, std::uint8_t const* aCode)
                         {
                             for (auto f = first; f < n; ++f)
                                 if (!m.description.functions[f].imported)
                                 {
                                     auto const stub = reinterpret_cast<std::uint64_t>(aCode + (f - first) * Slot + 16u);
-                                    std::memcpy(aCode + (f - first) * Slot + 8u, &stub, sizeof(stub));
+                                    std::memcpy(aWritable + (f - first) * Slot + 8u, &stub, sizeof(stub));
                                 }
                         });
                         if (chunk.code == nullptr)
@@ -11777,6 +12055,8 @@ namespace neos
                         }
                         m.chunks.push_back(std::move(chunk));
                     });
+                    if (m.precompile)
+                        tier_worker::instance().precompile(m);
                     return true;
                 }
 

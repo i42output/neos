@@ -72,6 +72,9 @@ namespace neos::compilers::javascript
         constexpr type I32 = type::I32;
         constexpr type F64 = type::F64;
         constexpr type STR = type::String;
+        // (a program's property cache sites (with its extensions'): at most this many (a power of 2), so that a site's entries' 
+        // address from its number is within the region (layout::SiteSize each))
+        constexpr std::uint32_t MaxPropertySites = 1u << 26u;
 
         // completion kinds (finally blocks)
         constexpr std::int32_t CompletionNormal = 0;
@@ -654,6 +657,8 @@ namespace neos::compilers::javascript
                 call("javascript::closure_table", { I32, I32, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
+            if (iPropertySites > MaxPropertySites)
+                throw std::runtime_error("javascript: too many property cache sites");
             if (!iUnitFirst && iPropertySites != 0u)
             {
                 // (the program's property cache sites: their table, whose offset is the global's)
@@ -1213,9 +1218,13 @@ namespace neos::compilers::javascript
 
     void function_generator::property_site(std::uint32_t aSite)
     {
+        // (its number within MaxPropertySites (a program has fewer: see compile): an optimized stub knows that its entries are within 
+        // the region (no bounds checks of their words))
         op(opcode::GlobalGet);
         u32(iCompiler.property_sites_global());
         get(aSite);
+        i32(static_cast<std::int32_t>(MaxPropertySites - 1u));
+        op(opcode::I32And);
         op(opcode::I64UConvertI32);
         i64(layout::SiteSize);
         op(opcode::I64Mul);

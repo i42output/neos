@@ -3968,6 +3968,10 @@ namespace neos
                                     case 0x71u: case 0x83u: r = std::min(x(0u), x(1u)); break;                     // (and)
                                     case 0x72u: case 0x84u: case 0x73u: case 0x85u: r = mask_of(std::max(x(0u), x(1u))); break;  // (or, xor)
                                     case 0x6Au: case 0x7Cu: r = add(x(0u), x(1u)); break;                          // (add (if it does not wrap))
+                                    case 0x6Cu: case 0x7Eu:                                                        // (mul (if it does not wrap))
+                                        if (auto const y = x(0u), z = x(1u); z == 0u || y <= width / z)
+                                            r = y * z;
+                                        break;
                                     case 0x74u: case 0x86u:                                                        // (shl by a constant)
                                         if (auto const k = constant_operand(1u))
                                         {
