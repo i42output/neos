@@ -241,7 +241,7 @@ namespace neos::compilers::javascript
         // change a word of another; Any: any word (the default))
         enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header, Validity };
         static alias alias_of_word(std::uint32_t aOffset, bool aArray);     ///< (a word (its offset) of an object's cell (an array's))
-        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, ArrayPop, GetNamedFirst, StringSlice, RegExpTest, ToBooleanOther, Count };
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, ArrayPop, GetNamedFirst, StringSlice, RegExpTest, ToBooleanOther, Truth, Count };
         void generate_stub(stub aStub);
         void generate_slow_function(std::uint32_t aFunction, std::optional<std::uint32_t> aRuntime, std::size_t aParameters);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
@@ -320,6 +320,7 @@ namespace neos::compilers::javascript
         void array_push_stub();
         void array_pop_stub();
         void to_boolean_stub(bool aBooleans = true);
+        void truth_stub();
         void construct_this_stub();
         void array_literal_stub();
         void object_literal_stub();
@@ -669,6 +670,7 @@ namespace neos::compilers::javascript
         function_info* script_function(std::string const& aName);   ///< (the script's function declaration that defines a global function)
         std::uint32_t function_closure(function_info const& aFunction);   ///< (the global (an i64) that holds its function object)
         std::uint32_t property_sites_global();  ///< (the global (an i64) that holds the offset of the program's property cache sites)
+        std::uint32_t truth_sites_global();     ///< (the global (an i64) that holds the offset of the unit's truthiness tests' words)
         std::uint32_t closure_table_global();   ///< (the global (an i64) that holds the offset of its functions' closure table words)
         bool closure_table_used() const;        ///< (its functions read their closure table's words (see the runtime's closure_table))
         std::uint32_t char_code_at_global();    ///< (the global that holds %String.prototype.charCodeAt% (see function_generator::stub))
@@ -732,6 +734,7 @@ namespace neos::compilers::javascript
         std::map<std::string, slow_info> iSlowFunctions;    ///< (by the runtime's function's name: see slow_function)
         std::uint32_t iTemplateSites = 0u;
         std::uint32_t iPropertySites = 0u;      ///< (the program's property cache sites (see cached_get_named): the next one's number)
+        std::uint32_t iTruthSites = 0u;         ///< (the unit's truthiness tests (see function_generator::truth): the next one's number)
         std::unordered_map<std::string, std::uint32_t> iRuntimeIndices; ///< (the runtime's functions that the pass has called: their indices
                                                 ///< in the module (see runtime_index))
         std::uint32_t iErrorGlobal = 0u;

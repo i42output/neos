@@ -2410,6 +2410,37 @@ namespace neos::javascript_runtime
             });
         }
 
+        value truth_sites(std::int32_t aCount, std::int32_t aGlobal)
+        {
+            // (a unit's truthiness tests' words (see jsl::TruthBoolean): its table (no kinds seen yet), whose offset is its global aGlobal; 
+            // in the region (compiled code's loads of them are watched: see truth_record), never freed)
+            return guard([&]() -> value
+            {
+                auto const bytes = static_cast<std::size_t>(std::max(aCount, 1)) * sizeof(std::uint64_t);
+                auto* const words = static_cast<std::uint64_t*>(region_allocate(bytes));
+                std::fill_n(words, bytes / sizeof(std::uint64_t), std::uint64_t{ 0u });
+                *program_word(aGlobal) = region_offset(words);
+                fix_program_word(aGlobal);
+                publish_heap();
+                return Undefined;
+            });
+        }
+
+        std::int32_t truth_record(value aValue, std::uint64_t aWord)
+        {
+            // (a truthiness test of a value of a kind it had not seen: the kind noted in its word (region offset aWord), whose change is
+            // reported (code that knew the kinds it had seen is made again); the value's ToBoolean)
+            auto const kind = aValue == True || aValue == False ? jsl::TruthBoolean : aValue == Undefined || aValue == Null ? jsl::TruthNullish :
+                is_object(aValue) && obj(aValue).cls != object_class::HTMLDDA ? jsl::TruthObject : jsl::TruthOther;
+            auto& word = *reinterpret_cast<std::uint64_t*>(gRegionBase + aWord);
+            if ((word & kind) == 0u)
+            {
+                word |= kind;
+                validity_changed(&word);
+            }
+            return javascript_runtime::to_boolean(aValue) ? 1 : 0;
+        }
+
         value property_sites_extension(std::int32_t aFirst, std::int32_t aCount, std::int32_t aGlobal)
         {
             // (the sites of an extension of the program (see deferred_function): numbered from aFirst (the program's sites so far: see 
@@ -3357,6 +3388,8 @@ namespace neos::javascript_runtime
             { "get_named", NEOS_RT_FUNCTION(get_named), I64, 2u, { I64, I64 }, 0u },
             { "get_named_cached", NEOS_RT_FUNCTION(get_named_cached), I64, 3u, { I64, I64, I32 }, 0u },
             { "property_sites", NEOS_RT_FUNCTION(property_sites), I64, 2u, { I32, I32 }, 0u },
+            { "truth_sites", NEOS_RT_FUNCTION(truth_sites), I64, 2u, { I32, I32 }, 0u },
+            { "truth_record", NEOS_RT_FUNCTION(truth_record), I32, 2u, { I64, I64 }, 0u },
             { "closure_table", NEOS_RT_FUNCTION(closure_table), I64, 3u, { I32, I32, I32 }, 0u },
             { "environment_written", NEOS_RT_FUNCTION(environment_written), I64, 2u, { I64, I32 }, 0u },
             { "constant_object", NEOS_RT_FUNCTION(constant_object), I64, 1u, { I64 }, 0u },

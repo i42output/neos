@@ -36,6 +36,7 @@ namespace neos::compilers::javascript
         clear_nodes();
         iStack.clear();
         iPropertySites = 0u;
+        iTruthSites = 0u;
         iRuntimeIndices.clear();
     }
 
@@ -100,6 +101,7 @@ namespace neos::compilers::javascript
     void compiler::begin_pass()
     {
         iPropertySites = iUnitFirst ? iUnitSites : 0u;    // (each pass numbers the program's sites from 0 (an extension's: after the program's))
+        iTruthSites = 0u;                                  // (and the unit's truthiness tests from 0 (each unit has a table of its own))
         iRuntimeIndices.clear();    // (and makes the module's functions again)
     }
 
@@ -2537,6 +2539,11 @@ namespace neos::compilers::javascript
     std::uint32_t compiler::property_sites_global()
     {
         return global_index("%jssites", type::I64);
+    }
+
+    std::uint32_t compiler::truth_sites_global()
+    {
+        return global_index("%jstruth", type::I64);
     }
 
     std::uint32_t compiler::closure_table_global()

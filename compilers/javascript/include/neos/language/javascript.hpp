@@ -340,6 +340,14 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t FieldNumber = 1u;            ///< (a number)
         inline constexpr std::uint32_t FieldString = 2u;            ///< (a string)
         inline constexpr std::uint32_t FieldObject = 3u;            ///< (an object)
+        // (a unit's truthiness tests (the program's and each extension's: ToBoolean of a value that the code tests, numbered by the
+        // compiler from 0 in the unit): a word each (u64), in a table that the runtime makes for the unit (truth_sites), whose offset is in
+        // a global of the unit's: the kinds of the values that the test has seen, by bit (the runtime's truth_record notes a kind, and 
+        // reports the word's change: compiled code's load of it is a watched load, so an optimizing tier knows them))
+        inline constexpr std::uint64_t TruthBoolean = 1u;
+        inline constexpr std::uint64_t TruthNullish = 2u;           ///< (undefined, null)
+        inline constexpr std::uint64_t TruthObject = 4u;            ///< (an object (not an [[IsHTMLDDA]] one))
+        inline constexpr std::uint64_t TruthOther = 8u;             ///< (any other: a number, string, symbol, bigint ...)
         inline constexpr std::uint32_t SiteDispatch = 80u;          ///< (u64: the function's (SiteFunction's) dispatch key (see FunctionDispatch); else 0)
         inline constexpr std::uint32_t SiteTemplate = SiteAdded;    ///< (u64: SiteConstruct: the region offset of the object's template (its first
                                                                     ///< ObjectSize bytes: its new objects' are a copy of it, then their handle,

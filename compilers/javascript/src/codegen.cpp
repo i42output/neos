@@ -657,6 +657,16 @@ namespace neos::compilers::javascript
                 call("javascript::closure_table", { I32, I32, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
+            if (iTruthSites != 0u)
+            {
+                // (the unit's truthiness tests' words (see function_generator::truth): their table, whose offset is the global's)
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(iTruthSites));
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(truth_sites_global()));
+                call("javascript::truth_sites", { I32, I32 }, I64);
+                put_op(code, opcode::Drop);
+            }
             if (iPropertySites > MaxPropertySites)
                 throw std::runtime_error("javascript: too many property cache sites");
             if (!iUnitFirst && iPropertySites != 0u)
@@ -3959,7 +3969,8 @@ namespace neos::compilers::javascript
             { "%js.get_named_first", { I64, I64, I32 }, I64 },
             { "%js.string_slice", { I64, I64, I64, I64 }, I64 },
             { "%js.regexp_test", { I64, I64, I64 }, I64 },
-            { "%js.to_boolean_other", { I64 }, I32 }
+            { "%js.to_boolean_other", { I64 }, I32 },
+            { "%js.truth", { I64, I64 }, I32 }
         };
         static_assert(std::size(sStubs) == static_cast<std::size_t>(function_generator::stub::Count));
         auto const& s = sStubs[static_cast<std::size_t>(aStub)];
@@ -4021,6 +4032,10 @@ namespace neos::compilers::javascript
         case stub::ToBooleanOther:
             iParameterCount = 1u;
             to_boolean_stub(aStub == stub::ToBoolean);
+            break;
+        case stub::Truth:
+            iParameterCount = 2u;
+            truth_stub();
             break;
         case stub::ArrayPush:
             iParameterCount = 3u;
@@ -5848,26 +5863,104 @@ namespace neos::compilers::javascript
 
     void function_generator::truth()
     {
-        // (the value's ToBoolean (an i32): booleans inline (true: 1, else false: 0 (constants: a branch on the result goes to its 
-        // target from them directly)), else the ToBooleanOther stub's (it does not test them again))
-        tee(iScratch);
-        constant(values::True);
-        op(opcode::I64Eq);
-        op(opcode::If);
-        iCode.push_back(0x7Fu);
-        i32(1);
-        op(opcode::Else);
-        get(iScratch);
-        constant(values::False);
-        op(opcode::I64Eq);
-        op(opcode::If);
-        iCode.push_back(0x7Fu);
-        i32(0);
-        op(opcode::Else);
-        get(iScratch);
-        call_stub(stub::ToBooleanOther);
-        op(opcode::End);
-        op(opcode::End);
+        // (the value's ToBoolean (an i32): the Truth stub's, with the test's word (see layout::TruthBoolean): the program's, or an 
+        // extension's (the stub is the program's))
+        op(opcode::GlobalGet);
+        u32(iCompiler.truth_sites_global());
+        i64(static_cast<std::int64_t>(iCompiler.iTruthSites++) * 8);
+        op(opcode::I64Add);
+        call_stub(stub::Truth);
+    }
+
+    void function_generator::truth_stub()
+    {
+        // (the Truth stub's code (its parameters: a value and its test's word's region offset): the value's ToBoolean, by the kinds of
+        // values that the test has seen (the word: a watched load, so that an optimizing tier that inlines a call (its word a constant) 
+        // knows them, and has only their code): booleans (true: 1, false: 0; constants: a branch on the result goes to its target from
+        // them directly), undefined and null (0), objects (1, but an [[IsHTMLDDA]] one's) here; once it has seen another kind, the 
+        // ToBoolean stub's; else (a kind it has not seen) the runtime's truth_record (which notes the kind))
+        std::uint32_t const v = 0u, word = 1u;
+        auto const seen = temporary();
+        get(word);
+        op(opcode::I64LoadMem);
+        u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
+        u32(layout::Memory);
+        u32(0u);
+        set(seen);
+        begin(control_kind::Block, I32);
+        auto const done = iControls.size() - 1u;
+        auto const kind = [&](std::uint64_t aKind, auto aTest)
+        {
+            get(seen);
+            i64(static_cast<std::int64_t>(aKind));
+            op(opcode::I64And);
+            i64(0);
+            op(opcode::I64Ne);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            aTest();
+            end_control();
+        };
+        auto const result_if = [&](std::int32_t aResult)
+        {
+            // (a test's i32 -> aResult if it is not 0)
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            i32(aResult);
+            branch(done, false);
+            end_control();
+        };
+        kind(layout::TruthBoolean, [&]()
+        {
+            get(v);
+            constant(values::True);
+            op(opcode::I64Eq);
+            result_if(1);
+            get(v);
+            constant(values::False);
+            op(opcode::I64Eq);
+            result_if(0);
+        });
+        kind(layout::TruthNullish, [&]()
+        {
+            static_assert((values::Undefined | 1u) == values::Null);
+            get(v);
+            i64(1);
+            op(opcode::I64Ior);
+            constant(values::Null);
+            op(opcode::I64Eq);
+            result_if(0);
+        });
+        kind(layout::TruthObject, [&]()
+        {
+            get(v);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            cell_of(v);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectClass, alias::Header);
+            i32(layout::ClassHTMLDDA);
+            op(opcode::I32Ne);
+            result_if(1);
+            end_control();
+        });
+        kind(layout::TruthOther, [&]()
+        {
+            get(v);
+            call_stub(stub::ToBoolean);
+            branch(done, false);
+        });
+        get(v);
+        get(word);
+        runtime("truth_record", { I64, I64 }, I32);
+        end_control();
+        release(seen);
     }
 
     void function_generator::if_statement(node* aNode)
