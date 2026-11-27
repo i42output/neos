@@ -242,6 +242,7 @@ namespace neos::language::javascript
     {
         inline constexpr std::uint32_t Memory = 2u;                 ///< (the external memory's index: JavaScript's)
         inline constexpr std::uint32_t HandleShift = 3u;            ///< (a cell's offset: its handle << HandleShift (an address's index scaled by 8))
+        inline constexpr std::uint64_t RegionSize = std::uint64_t{ 32u } << 30u;  ///< (the heap's region: every cell's words are below it)
         inline constexpr std::uint32_t ShapeProto = 0u;             ///< (value: a shape's (its objects') prototype (a shape is at its word << ValueUnitShift))
         inline constexpr std::uint32_t ShapeLeft = 8u;              ///< (u64: not 0 once an object has left the shape (it got another, or none: a
                                                                     ///< property added (or a transition for one made), its prototype changed, a

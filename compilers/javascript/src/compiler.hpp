@@ -363,6 +363,7 @@ namespace neos::compilers::javascript
         void dispatch(std::uint32_t aNumber);         ///< (... its arguments -> its result: the call)
         void check();               ///< (the i64 on the stack: an exception branches to the innermost handler)
         void assume_not_exception();    ///< (the i64 on the stack is not an exception (neos::assume): optimized code knows it)
+        void in_region();               ///< (the i64 on the stack is an address of a cell's words (neos::assume): see layout::RegionSize)
         void field_kind(std::uint32_t aEntry, std::uint32_t aKind);     ///< (an entry's field's kind (layout::SiteFieldKind) -> aKind)
         void field_valid(std::uint32_t aEntry, std::uint32_t aKind, std::size_t aSlow);  ///< (a kind's validity word is the entry's; else aSlow)
         void shape_kept(std::uint32_t aShape, std::uint32_t aEntry);    ///< (a receiver's shape (its word) is an entry's: it keeps it if the shape is one that no object has left)

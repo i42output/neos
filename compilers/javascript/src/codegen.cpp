@@ -1531,6 +1531,20 @@ namespace neos::compilers::javascript
         end_control();
     }
 
+    void function_generator::in_region()
+    {
+        // (the i64 on the stack is the address of words of a cell (e.g. a string's code unit at an index below its length): below the 
+        // region's size (layout::RegionSize); optimized code may assume it (neos::assume: an access there (at an offset within the
+        // runtime's guard after the region) is not checked))
+        auto const address = temporary();
+        tee(address);
+        i64(static_cast<std::int64_t>(layout::RegionSize));
+        op(opcode::I64LtU);
+        call(iCompiler.runtime_function("neos::assume", { I32 }, type::Void));
+        get(address);
+        release(address);
+    }
+
     void function_generator::assume_not_exception()
     {
         // (the i64 on the stack (e.g. a property's value) is not an exception: optimized code may assume it (neos::assume: e.g. a get's 
@@ -1718,6 +1732,7 @@ namespace neos::compilers::javascript
                     i64(3);
                     op(opcode::I64Shl);
                     op(opcode::I64Add);
+                    in_region();
                     mem_load(opcode::I64LoadMem, 0u, alias::Slot);
                     assume_not_exception();
                     branch(done, false);
@@ -1806,6 +1821,7 @@ namespace neos::compilers::javascript
                         i64(3);
                         op(opcode::I64Shl);
                         op(opcode::I64Add);
+                        in_region();
                         mem_load(opcode::I64LoadMem, 0u, alias::Slot);
                         assume_not_exception();
                         set(fieldValue);
@@ -1912,6 +1928,7 @@ namespace neos::compilers::javascript
                                 i64(3);
                                 op(opcode::I64Shl);
                                 op(opcode::I64Add);
+                                in_region();
                                 cached_load(opcode::I64LoadMem, 0u, alias::Slot);
                             }
                             op(opcode::Else);
@@ -1930,6 +1947,7 @@ namespace neos::compilers::javascript
                                 i64(3);
                                 op(opcode::I64Shl);
                                 op(opcode::I64Add);
+                                in_region();
                                 mem_load(opcode::I64LoadMem, 0u, alias::Slot);
                                 assume_not_exception();
                             }
@@ -2090,6 +2108,7 @@ namespace neos::compilers::javascript
             i64(3);
             op(opcode::I64Shl);
             op(opcode::I64Add);
+            in_region();
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
             assume_not_exception();
             branch(done, false);
@@ -2197,6 +2216,7 @@ namespace neos::compilers::javascript
                 i64(3);
                 op(opcode::I64Shl);
                 op(opcode::I64Add);
+                in_region();
                 get(value);
                 mem_store(opcode::I64StoreMem, 0u, alias::Slot);
                 undefined();    // (set: its callers check its result (not an exception), not use it)
@@ -2230,6 +2250,7 @@ namespace neos::compilers::javascript
                     i64(3);
                     op(opcode::I64Shl);
                     op(opcode::I64Add);
+                    in_region();
                     get(value);
                     mem_store(opcode::I64StoreMem, 0u, alias::Slot);
                     undefined();
@@ -2303,6 +2324,7 @@ namespace neos::compilers::javascript
                 i64(3);
                 op(opcode::I64Shl);
                 op(opcode::I64Add);
+                in_region();
                 get(value);
                 mem_store(opcode::I64StoreMem, 0u, alias::Slot);
                 get(cell);
@@ -2610,6 +2632,7 @@ namespace neos::compilers::javascript
             i64(3);
             op(opcode::I64Shl);
             op(opcode::I64Add);
+            in_region();
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
             // (the entry's (its objects' root shape is the entry's: an object's shape is its prototype's))
             get(entry);
@@ -3077,6 +3100,7 @@ namespace neos::compilers::javascript
             i64(1);
             op(opcode::I64Shl);
             op(opcode::I64Add);
+            in_region();
             mem_load(opcode::I32LoadMem16U, 0u, alias::String);
             op(opcode::F64UConvertI32);
             op(opcode::I64ReinterpretF64);
@@ -3406,6 +3430,7 @@ namespace neos::compilers::javascript
             i64(3);
             op(opcode::I64Shl);
             op(opcode::I64Add);
+            in_region();
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
             constant(values::TagSpecial);
             op(opcode::I64GeU);
@@ -3427,6 +3452,7 @@ namespace neos::compilers::javascript
             i64(3);
             op(opcode::I64Shl);
             op(opcode::I64Add);
+            in_region();
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
             get(state);
             volatile_load(opcode::I64LoadMem, layout::AllocRegExpExec, false, alias::Alloc);
@@ -3621,6 +3647,7 @@ namespace neos::compilers::javascript
             i64(3);
             op(opcode::I64Shl);
             op(opcode::I64Add);
+            in_region();
             get(element);
             mem_store(opcode::I64StoreMem, 0u, alias::Element);
             get(size);
@@ -3855,6 +3882,7 @@ namespace neos::compilers::javascript
         i64(3);
         op(opcode::I64Shl);
         op(opcode::I64Add);
+        in_region();
         set(aAddress);
         release(index);
     }

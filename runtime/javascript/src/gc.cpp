@@ -118,6 +118,7 @@ namespace neos::javascript_runtime
         constexpr std::size_t MaxSmall = 4096u;
         static_assert(RegionSize >> heap::HandleShift <= std::size_t{ 1u } << 32u);     // (a handle is 32 bits)
         static_assert(neos::language::javascript::layout::HandleShift == heap::HandleShift);
+        static_assert(neos::language::javascript::layout::RegionSize == RegionSize);
 
         constexpr std::uint32_t SizeClasses[] =
         {

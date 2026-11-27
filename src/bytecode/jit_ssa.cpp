@@ -3960,6 +3960,20 @@ namespace neos
                                             return o.imm0;
                                         return {};
                                     };
+                                    if (i.op == Assume && i.operands.size() == 1u)
+                                    {
+                                        // (a claim that a value of its block, made before it, is below a constant (lt_u), or at most one 
+                                        // (le_u): its bound from then on)
+                                        auto const& c = values[i.operands[0]];
+                                        if (!c.dead && c.operands.size() == 2u && (c.op == 0x49u || c.op == 0x54u || c.op == 0x4Du || c.op == 0x58u))
+                                            if (auto const& k = values[c.operands[1]]; k.constant() && known[c.operands[0]] && values[c.operands[0]].block == i.block)
+                                            {
+                                                auto const limit = (c.op == 0x49u || c.op == 0x4Du) ? (k.imm0 & 0xFFFFFFFFu) : k.imm0;
+                                                auto const at_most = (c.op == 0x49u || c.op == 0x54u) ? (limit == 0u ? 0u : limit - 1u) : limit;
+                                                bound[c.operands[0]] = std::min(bound[c.operands[0]], at_most);
+                                            }
+                                        continue;
+                                    }
                                     std::uint64_t r = width;
                                     switch (i.op)
                                     {
