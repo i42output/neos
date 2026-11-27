@@ -1545,6 +1545,21 @@ namespace neos::compilers::javascript
         release(address);
     }
 
+    void function_generator::cell_offset()
+    {
+        // (the i64 on the stack is a cell's region offset (aligned, within the handles' range): optimized code may assume it (neos::assume),
+        // so that code that finds the cell from its handle (cell_of) is seen to find this one)
+        in_region();
+        auto const offset = temporary();
+        tee(offset);
+        i64(static_cast<std::int64_t>((std::uint64_t{ 1u } << layout::HandleShift) - 1u));
+        op(opcode::I64And);
+        op(opcode::I64Eqz);
+        call(iCompiler.runtime_function("neos::assume", { I32 }, type::Void));
+        get(offset);
+        release(offset);
+    }
+
     void function_generator::assume_not_exception()
     {
         // (the i64 on the stack (e.g. a property's value) is not an exception: optimized code may assume it (neos::assume: e.g. a get's 
@@ -2677,10 +2692,9 @@ namespace neos::compilers::javascript
             site_load(opcode::I32LoadMem, e * layout::SiteEntrySize + layout::SiteSlotSize);
             runtime("allocate_slot", { I32 }, I64);
             end_control();
-            // (a region offset (of a cell: 16 bytes aligned, within the handles' range): masked, so that code that finds the cell from its
+            // (a region offset (of a cell: 16 bytes aligned, within the handles' range): claimed so, so that code that finds the cell from its
             // handle (cell_of) is seen to find this one)
-            i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
-            op(opcode::I64And);
+            cell_offset();
             set(slot);
             // (the object: the template's copy (its type, flags and kind); its shape (the entry's root shape of its prototype) and values'
             // word)
@@ -2782,8 +2796,7 @@ namespace neos::compilers::javascript
             runtime("allocate_slot", { I32 }, I64);
             end_control();
         }
-        i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
-        op(opcode::I64And);
+        cell_offset();
         set(slot);
         // (the array: the template's copy (its type, flags and kind); its shape (the entry's: its prototype's), elements (their offset and
         // number) and length)
@@ -2899,8 +2912,7 @@ namespace neos::compilers::javascript
             runtime("allocate_slot", { I32 }, I64);
             end_control();
         }
-        i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
-        op(opcode::I64And);
+        cell_offset();
         set(slot);
         get(entry);
         site_load(opcode::I64LoadMem, layout::SiteTemplate);
@@ -3298,10 +3310,9 @@ namespace neos::compilers::javascript
             get(list);
             get(index);
             mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
-            // (a region offset (of a cell: within the handles' range): masked, as the construct stub's)
+            // (a region offset (of a cell: within the handles' range): claimed so, as the construct stub's)
             get(slot);
-            i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
-            op(opcode::I64And);
+            cell_offset();
             set(slot);
             // (the string: its first word (type, kind, length), its code units' offset (after its members), the rest of its members 0,
             // then its code units; stores of a new cell's words (Header: no code reads them yet))

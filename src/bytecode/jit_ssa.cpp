@@ -1240,6 +1240,51 @@ namespace neos
                                         }
                                         continue;
                                     }
+                                    if (!i.dead && i.op == Assume && i.operands.size() == 1u)
+                                    {
+                                        // (a claim of an i64 of its block, made before it (see fold_assumed_bounds): x <u K or x <=u K (its
+                                        // bits above K's highest may be 1 no more), (x & M) == T (its bits of M are T's))
+                                        auto const& c = values[replaced.resolved(i.operands[0])];
+                                        if (!c.dead && c.op == 0x50u && c.operands.size() == 1u)
+                                        {
+                                            // ((x & M) == 0 as eqz)
+                                            auto const& a = values[replaced.resolved(c.operands[0])];
+                                            if (!a.dead && a.op == 0x83u && a.operands.size() == 2u && values[a.operands[1]].constant())
+                                                if (auto const x = replaced.resolved(a.operands[0]); values[x].type == I64 && done[x] && values[x].block == i.block && !values[x].constant())
+                                                {
+                                                    may[x] &= ~values[a.operands[1]].imm0;
+                                                    ones[x] &= ~values[a.operands[1]].imm0;
+                                                }
+                                        }
+                                        else if (!c.dead && c.operands.size() == 2u && (c.op == 0x54u || c.op == 0x58u || c.op == 0x51u))
+                                        {
+                                            auto x = replaced.resolved(c.operands[0]);
+                                            auto const& k = values[replaced.resolved(c.operands[1])];
+                                            if (c.op == 0x51u)
+                                            {
+                                                auto const& a = values[x];
+                                                if (k.constant() && !a.dead && a.op == 0x83u && a.operands.size() == 2u && values[a.operands[1]].constant())
+                                                {
+                                                    auto const m = values[a.operands[1]].imm0;
+                                                    auto const t = k.imm0 & m;
+                                                    x = replaced.resolved(a.operands[0]);
+                                                    if (values[x].type == I64 && done[x] && values[x].block == i.block && !values[x].constant())
+                                                    {
+                                                        may[x] &= ~m | t;
+                                                        ones[x] |= t;
+                                                    }
+                                                }
+                                            }
+                                            else if (k.constant() && values[x].type == I64 && done[x] && values[x].block == i.block && !values[x].constant())
+                                            {
+                                                auto const limit = c.op == 0x54u ? (k.imm0 == 0u ? 0u : k.imm0 - 1u) : k.imm0;
+                                                auto const bits = limit == 0u ? std::uint64_t{ 0u } : (~std::uint64_t{ 0u } >> std::countl_zero(limit));
+                                                may[x] &= bits;
+                                                ones[x] &= bits;
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     if (i.dead || (i.type != I32 && i.type != I64))
                                         continue;
                                     if (!replaced.to.empty())
@@ -7761,10 +7806,28 @@ namespace neos
                                 break;
                         }
                         // (assumes: no code (their conditions' code, only theirs: none))
+                        bool claims = false;
                         for (auto& i : aFunction.values)
-                            if (i.op == Assume || i.op == Keeps)
+                            if (!i.dead && (i.op == Assume || i.op == Keeps))
+                            {
                                 i.dead = true;
+                                claims = true;
+                            }
                         aFunction.usesCurrent = false;
+                        if (claims)
+                        {
+                            // (blocks that had only claims (e.g. a kind's claim in a branch on an entry's kind, in code that does
+                            // not know the entry): branches to them go to where they went)
+                            eliminate_dead_code(aFunction);
+                            bool changed = changes(simplify(aFunction));
+                            changed = changes(merge_blocks(aFunction)) || changed;
+                            changed = changes(thread_jumps(aFunction)) || changed;
+                            if (changed)
+                            {
+                                order_blocks(aFunction);
+                                eliminate_dead_code(aFunction);
+                            }
+                        }
                         sink_values(aFunction);
                         if (duplicate_returns(aFunction))
                             order_blocks(aFunction);
